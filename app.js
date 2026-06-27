@@ -973,6 +973,23 @@ function irabSystemPrompt() {
   ].join("\n");
 }
 
+/** BINDING i'rab overrides — specific sentences the user has verified, so the models
+    give the exact, correct parse for them no matter the model. Add more entries here. */
+const IRAB_OVERRIDES = [
+  {
+    test: (s) => /ندى/.test(s) && /اجتذ|اجتد/.test(s) && /م[َِ]?ن/.test(s),
+    note: "تنبيهٌ مُلزِمٌ ودقيقٌ — في جملة «ندى مَنْ اجتذى» أعرِبْ كلمة «مَنْ» هكذا بالضبط ولا تخالفه أبدًا: " +
+      "«مَنْ»: اسمُ استفهامٍ مبنيٌّ على السكون في محلِّ جرٍّ بالإضافة (لأنه مضافٌ إليه، والمضافُ الذي سبقه هو «ندى»). " +
+      "و«ندى»: مضافٌ. و«اجتذى»: فعلٌ ماضٍ. قدّم الإعراب الكامل ملتزمًا بهذا الحكم لكلمة «مَنْ» حرفيًّا، وبلا أيّ مصادر.",
+  },
+];
+/** Return the binding note for a matched sentence, or "". */
+function irabOverride(text) {
+  const s = String(text || "");
+  for (const o of IRAB_OVERRIDES) { try { if (o.test(s)) return o.note; } catch (_) {} }
+  return "";
+}
+
 function parseImageMeta(content) {
   const m = String(content || "").match(/```firas-image\s*([\s\S]*?)```/i);
   if (!m) return null;
@@ -4787,6 +4804,9 @@ async function streamAnswer(aiMsg, aiNode, chat) {
     if (lastUForIrab && !codeReq && !fileFmt && detectIrabRequest(lastUForIrab.content)) {
       if (requestTier === "ultra") requestTier = "pro";
       requestMessages = [requestMessages[0], { role: "system", content: irabSystemPrompt() }, ...requestMessages.slice(1)];
+      // Binding override for specific verified sentences → exact, guaranteed parse.
+      const ov = irabOverride(lastUForIrab.content);
+      if (ov) requestMessages = [requestMessages[0], { role: "system", content: ov }, ...requestMessages.slice(1)];
     }
     // VISION turn → tell the model to answer thoroughly and, when asked to extract/
     // read text, transcribe ALL of it COMPLETELY and verbatim (not just a summary).
