@@ -4116,6 +4116,49 @@ function joinCodeContinuation(existing, cont) {
   return existing + cont;
 }
 
+/** The "finish this cut-off file" user instruction (shared by manual + auto continue). */
+function codeContinueUserMsg(meta, ar) {
+  const lbl = (meta && meta.label) || (ar ? "كود" : "code");
+  return ar
+    ? `هذا الملف (${lbl}) توقّف قبل أن يكتمل وهو ناقص. أكمله من حيث توقّف بالضبط وأنهِه بالكامل (أغلق كل الوسوم والأقواس؛ ولِلـHTML أكمل <style> و</head> و<body> كاملًا والسكربتات وانتهِ بـ </html>). أخرج فقط بقية الكود الخام، دون إعادة أي سطر موجود ودون أي شرح أو علامات \`\`\`.`
+    : `This ${lbl} file stopped before completing and is INCOMPLETE. Continue from exactly where it stops and finish it fully (close every tag/bracket; for HTML complete <style>, </head>, the full <body> and scripts, and end with </html>). Output ONLY the remaining raw code, never re-output an existing line, no commentary or \`\`\` fences.`;
+}
+
+/** AUTO-COMPLETE: keep continuing a cut-off file until it's whole — so ONE request
+    can yield a large COMPLETE file with no manual clicking. Loops the continuation
+    (coder model) until codeLooksComplete, no growth, the round cap, or Stop. Calls
+    onChunk(mergedCode, round) so the caller streams the growth live. Returns the
+    final code. `convo` = the conversation up to (not incl.) this reply. */
+async function autoCompleteCode(code, codeReq, convo, lang, signal, onChunk) {
+  const MAX_ROUNDS = 8, MAX_LEN = 500000;
+  const ar = lang === "ar";
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    if (signal.aborted || code.length > MAX_LEN || codeLooksComplete(code, codeReq.lang)) break;
+    const prior = convo.map((m) => {
+      if (m.role === "assistant") { const cm = parseCodeMeta(m.content); if (cm) return { role: "assistant", content: cleanCodeBody(cm.code) }; }
+      return { role: m.role, content: m.content };
+    }).filter((m) => m.content && (m.role === "user" || m.role === "assistant"));
+    const messages = [
+      { role: "system", content: codeContinueSystemPrompt(codeReq) },
+      ...prior,
+      { role: "assistant", content: code },
+      { role: "user", content: codeContinueUserMsg(codeReq, ar) },
+    ];
+    const before = code;
+    let out = "";
+    try {
+      out = await streamAgentText(messages, "ultra", signal, (full) => {
+        if (onChunk) onChunk(joinCodeContinuation(before, sanitizeContinuation(full)), round);
+      });
+    } catch (e) { break; } // network/abort → stop auto-completing, keep what we have
+    const merged = joinCodeContinuation(before, sanitizeContinuation(out));
+    if (merged.length <= before.length + 8) break; // no real progress → stop
+    code = merged;
+    if (onChunk) onChunk(code, round);
+  }
+  return code;
+}
+
 /** Resume a code card whose file stopped before completing. Streams the missing
     tail from the coder model and appends it seamlessly into the SAME box, then
     persists. Safe to click repeatedly for very long files. */
@@ -4158,14 +4201,11 @@ async function continueCode(card) {
     if (m.role === "assistant") { const cm = parseCodeMeta(m.content); if (cm) return { role: "assistant", content: cleanCodeBody(cm.code) }; }
     return { role: m.role, content: m.content };
   }).filter((m) => m.content && (m.role === "user" || m.role === "assistant"));
-  const lbl = meta.label || (ar ? "كود" : "code");
   const messages = [
     { role: "system", content: codeContinueSystemPrompt(meta) },
     ...prior,
     { role: "assistant", content: code },
-    { role: "user", content: ar
-      ? `هذا الملف (${lbl}) توقّف قبل أن يكتمل وهو ناقص. أكمله من حيث توقّف بالضبط وأنهِه بالكامل (أغلق كل الوسوم والأقواس؛ ولِلـHTML أكمل <style> و</head> و<body> كاملًا والسكربتات وانتهِ بـ </html>). أخرج فقط بقية الكود الخام، دون إعادة أي سطر موجود ودون أي شرح أو علامات \`\`\`.`
-      : `This ${lbl} file stopped before completing and is INCOMPLETE. Continue from exactly where it stops and finish it fully (close every tag/bracket; for HTML complete <style>, </head>, the full <body> and scripts, and end with </html>). Output ONLY the remaining raw code, never re-output an existing line, no commentary or \`\`\` fences.` },
+    { role: "user", content: codeContinueUserMsg(meta, ar) },
   ];
 
   // Flip the finished card into a "continuing…" streaming state.
@@ -4609,7 +4649,20 @@ async function streamAnswer(aiMsg, aiNode, chat) {
     if (codeReq) {
       // Persist as a code block: ```firas-code {meta}\n<code>\n``` → renders the
       // finished code card (copy/download/preview) and survives reload.
-      const code = stripCodeFences(answer);
+      let code = sanitizeContinuation(stripCodeFences(answer));
+      // AUTO-COMPLETE: if the model was cut off, keep continuing internally until the
+      // file is whole — so ONE request yields a large COMPLETE file (no manual clicks).
+      // The growth renders live; Stop (signal) interrupts it.
+      if (!signal.aborted && !codeLooksComplete(code, codeReq.lang)) {
+        code = await autoCompleteCode(code, codeReq, convo, replyLang, signal, (merged) => {
+          const node = liveNode(); const mdEl = node && node.querySelector(".msg-ai__body .md");
+          if (!mdEl) return;
+          renderLiveCodeInto(mdEl, merged, codeReq, replyLang);
+          const w = mdEl.querySelector(".code-card__writing");
+          if (w) w.textContent = replyLang === "ar" ? "يُكمل تلقائيًا…" : "Auto-completing…";
+          mdEl.classList.remove("stream-caret");
+        });
+      }
       const meta = { filename: codeReq.filename, lang: codeReq.lang, ext: codeReq.ext, label: codeReq.label };
       aiMsg.content = "```firas-code " + JSON.stringify(meta) + "\n" + code + "\n```";
     } else {
