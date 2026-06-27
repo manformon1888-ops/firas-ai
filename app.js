@@ -965,7 +965,8 @@ function irabSystemPrompt() {
     "- لكلِّ كلمة بيّن: نوعَها (اسم/فعل/حرف)، وموقعَها الإعرابي (مبتدأ، خبر، فاعل، نائب فاعل، مفعول به، مضاف إليه، حال، تمييز، اسم/خبر للناسخ، مجرور بحرف الجر، بدل، نعت، معطوف، توكيد...)، وحالتَها (مرفوع/منصوب/مجرور/مجزوم، أو مبني)، وعلامةَ الإعراب (الضمة/الفتحة/الكسرة/السكون، أو العلامات الفرعية: الواو والألف والياء والنون وثبوت النون أو حذفها، ومنع الصرف)، وسببَ ذلك.",
     "- أعرِبِ الجُملَ وأشباهَ الجُمل وبيّن محلَّها من الإعراب (في محل رفع/نصب/جر، أو لا محلَّ لها) مع التعليل.",
     "- إن كان النص آيةً من القرآن الكريم فالتزم أقصى الدقّة، واتّبع ما قرّره أئمّةُ النحو في كتب إعراب القرآن، وأشِرْ إلى القراءات إن أثّرت في الإعراب، وإلى تعدّد الأوجه الإعرابية إن وُجِد.",
-    "- إن وُجدت في السياق نتائجُ بحثٍ أو مراجعُ لإعراب هذه الجملة فاستند إليها بعد التحقّق من صحّتها، ونظّمها وقدّمها للمستخدم بوضوح؛ وإن لم تتوفّر مراجع (أو لم يُجدِ البحث) فأعرِبِ الجملة بنفسك وَفق المنهج أعلاه.",
+    "- إن وُجدت في السياق نتائجُ بحثٍ أو مراجعُ لإعراب هذه الجملة فاستند إليها بعد التحقّق من صحّتها ونظّمها بوضوح؛ وإن لم تتوفّر (أو لم يُجدِ البحث) فأعرِبِ الجملة بنفسك وَفق المنهج أعلاه.",
+    "- مهم: اعرض الإعراب فقط — لا تذكر أي مصادر أو روابط أو أرقام استشهاد [1][2] ولا قسم \"المصادر\"، ولا تُشِر إلى أنك بحثت في الويب.",
     "- كن صحيحًا مضبوطًا تمامًا ولا تُقدّم إعرابًا خاطئًا؛ وإن لم تتيقّن من وجهٍ فبيّن ذلك بوضوح بدلًا من التخمين.",
     "- رتّب الإجابة بوضوح: اكتب الكلمة ثم إعرابَها سطرًا سطرًا، واضبط الكلماتِ بالشكل (التشكيل)، بعربيةٍ فصحى سليمة.",
   ].join("\n");
@@ -4543,6 +4544,17 @@ function formatSearchContext(results, lang) {
   return head + "\n\n" + body;
 }
 
+/** Web references for I'RAB — INTERNAL use only: the model leans on them but shows
+    NO sources, links, or [1][2] citations (the user wants only the clean parse). */
+function formatIrabContext(results, lang) {
+  if (!results || !results.length) return "";
+  const head = lang === "ar"
+    ? "مراجعُ من الويب لإعراب الجملة (للاستئناس الداخلي فقط). استند إليها بعد التحقّق من صحّتها، لكن لا تذكرها ولا تقتبسها ولا تضع أرقام استشهاد [1][2] ولا أي روابط أو قسم مصادر في إجابتك إطلاقًا — اعرض الإعراب النظيف فقط ولا شيء غيره."
+    : "Web references for parsing the sentence (INTERNAL use only). Use them after verifying, but do NOT mention, quote, number [1][2], link, or list any sources in your answer — output only the clean i'rab and nothing else.";
+  const body = results.map((r) => "- " + r.title + (r.snippet ? ": " + r.snippet : "")).join("\n");
+  return head + "\n\n" + body;
+}
+
 /**
  * Core streaming routine. Tied to a SPECIFIC chat (by object + id), NOT to the
  * active view: if the user opens/switches chats mid-stream, this keeps running
@@ -4750,7 +4762,8 @@ async function streamAnswer(aiMsg, aiNode, chat) {
         }
         const query = isIrab ? ("إعراب " + lastUserMsg.content) : lastUserMsg.content;
         const results = await fetchWebSearch(query);
-        const ctx = formatSearchContext(results, replyLang);
+        // I'rab uses references WITHOUT showing sources; a normal turn cites them.
+        const ctx = isIrab ? formatIrabContext(results, replyLang) : formatSearchContext(results, replyLang);
         if (ctx) {
           requestMessages = [requestMessages[0], { role: "system", content: ctx }, ...requestMessages.slice(1)];
           // gpt-oss (pro) uses live web results far better than the coder model (ultra),
