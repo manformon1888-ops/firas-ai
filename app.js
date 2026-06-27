@@ -65,7 +65,7 @@ const MODELS = {
     short: { ar: "أولترا", en: "Ultra" },
     reasoning_effort: "high",
     temperature: 0.7,
-    max_tokens: 8192,
+    max_tokens: 16384,
     showThinking: true,
     premium: true,
     persona:
@@ -373,6 +373,7 @@ const ICONS = {
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   regen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg>',
+  continue: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 4 10 8-10 8V4ZM19 4v16"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
   caret: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
@@ -523,6 +524,39 @@ function detectCodeRequest(text) {
   const hasVerb = CODE_BUILD_VERBS.test(s);
   if (!hasVerb) return null;
   if (CODE_HARD.test(s) || CODE_SOFT.test(s)) return codeSpecFromText(s);
+  return null;
+}
+
+// Code-edit / continue / iterate intents. Once the previous assistant turn was a
+// code deliverable, ANY of these keep the follow-up inside the SAME code box —
+// these are imperative verbs ("edit", "add", "make it…"), not the code NOUN, so a
+// fresh request still needs detectCodeRequest above.
+const CODE_FOLLOWUP =
+  /عدّل|عدل|تعديل|عدّله|عدله|غيّر|غير|بدّل|بدل|أضف|اضف|اضيف|ضيف|احذف|أصلح|اصلح|صحّح|صحح|كمّل|كمل|كمّله|كمله|أكمل|اكمل|استمر|واصل|زِد|زد|حسّن|حسن|طوّر|طور|اجعل|اجعله|خلّي|خلي|أعد|اعد\s*كتابة|نفس\s*الكود|edit|modif|chang|updat|\badd\b|remov|delet|\bfix\b|continu|improv|refactor|append|extend|rewrit|make\s+it|same\s+code|keep\s+going/i;
+
+/** When the most recent assistant turn was a code deliverable, treat a follow-up
+    edit/continue/iterate request as code too — so it streams into the SAME code box
+    instead of leaking into the chat as plain text, then being re-boxed. Reuses the
+    previous file's language/extension. Returns a spec or null. */
+function codeFollowupSpec(convo) {
+  if (!Array.isArray(convo) || state.mode === "plan") return null;
+  const last = [...convo].reverse().find((m) => m.role === "user");
+  if (!last) return null;
+  // Was the most recent assistant turn a CODE deliverable?
+  let prevCode = null;
+  for (let i = convo.length - 1; i >= 0; i--) {
+    if (convo[i].role === "assistant") { prevCode = parseCodeMeta(convo[i].content); break; }
+  }
+  if (!prevCode) return null; // last AI turn wasn't code → route normally
+  const s = String(last.content || "");
+  if (CODE_DOC_OVERRIDE.test(s) || detectFileRequest(s)) return null; // explicit document
+  // A pure explanation/question about the code ("how does this work?") stays a
+  // normal chat answer — don't regenerate the file.
+  const explains = /(اشرح|وضّح|فسّر|ما\s*معنى|شنو\s*يعني|شرح|\bexplain\b|what\s+does|how\s+does\s+it|why\s+is)/i.test(s);
+  if (explains && !CODE_BUILD_VERBS.test(s)) return null;
+  if (detectCodeRequest(s) || CODE_FOLLOWUP.test(s)) {
+    return { lang: prevCode.lang, ext: prevCode.ext, label: prevCode.label, filename: prevCode.filename };
+  }
   return null;
 }
 
@@ -1093,6 +1127,12 @@ function wireCodeActions(card, meta, lang) {
   const d = mkBtn(ICONS.download, ar ? "تحميل" : "Download", "js-dl");
   d.addEventListener("click", () => downloadBlob(new Blob([code], { type: codeMime(meta.ext) }), filename));
   actions.appendChild(d);
+  // Continue — resume a file that stopped before finishing (token cap / stream cut /
+  // model stop). Appends the missing tail seamlessly to the SAME box. Click again
+  // for very long files — there is no length ceiling.
+  const k = mkBtn(ICONS.continue, ar ? "كمّل" : "Continue", "js-continue");
+  k.addEventListener("click", () => continueCode(card));
+  actions.appendChild(k);
 }
 /** Toggle a sandboxed live preview of HTML code (scripts run, but isolated from
     our origin — no allow-same-origin, so it can't read our cookies/storage). */
@@ -3916,6 +3956,147 @@ async function callAgentText(messages, tierKey, signal) {
   return out;
 }
 
+/** Like callAgentText, but invokes onDelta(fullSoFar) on every token so the caller
+    can stream the text live into the UI. Returns the full text. */
+async function streamAgentText(messages, tierKey, signal, onDelta) {
+  const m = MODELS[tierKey] || MODELS.pro;
+  let response;
+  if (CONFIG.BACKEND_URL) {
+    response = await fetch(CONFIG.BACKEND_URL, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, tier: tierKey, think: false }), credentials: "same-origin", signal });
+  } else {
+    response = await fetch(TRANSPORT_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: m.transport, messages, stream: true, reasoning_effort: m.reasoning_effort, temperature: m.temperature, max_tokens: m.max_tokens }), signal });
+  }
+  if (!response.ok || !response.body) throw new Error("HTTP " + response.status);
+  const reader = response.body.getReader(); const dec = new TextDecoder(); let buf = "", out = "";
+  while (true) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true }); const lines = buf.split("\n"); buf = lines.pop();
+    for (const line of lines) {
+      const tr = line.trim(); if (!tr.startsWith("data:")) continue;
+      const d = tr.slice(5).trim(); if (d === "[DONE]") { buf = ""; break; }
+      try { const j = JSON.parse(d); const del = j.choices && j.choices[0] && j.choices[0].delta; if (del && del.content) { out += del.content; if (onDelta) onDelta(out); } } catch (_) {}
+    }
+  }
+  return out;
+}
+
+/** System prompt for resuming a cut-off code file: output ONLY the missing tail. */
+function codeContinueSystemPrompt(meta) {
+  const label = (meta && meta.label) || "code";
+  return [
+    "You are continuing a partially-written " + label + " file that was cut off mid-output.",
+    "You will be shown the user's original request and the code written SO FAR (the last assistant message).",
+    "Output the EXACT continuation — the characters that come immediately AFTER the existing code, so that (existing + your output) is ONE valid, complete file.",
+    "STRICT RULES:",
+    "- Do NOT repeat, restate, or re-output any code that already exists. Begin precisely at the first missing character (mid-line if it was cut mid-line).",
+    "- Do NOT add explanations, notes about continuing, Markdown code fences, or any prose. Output ONLY raw " + label + " source.",
+    "- Finish the file fully: close every open tag, bracket, and string (e.g. end HTML with </html>).",
+    "- If the existing code is already a complete, valid file, output ONLY this exact token and nothing else: ALREADY_COMPLETE",
+  ].join("\n");
+}
+
+/** Concatenate a continuation onto existing code, trimming any overlap the model
+    accidentally repeated at the seam. */
+function joinCodeContinuation(existing, cont) {
+  if (!existing) return cont || "";
+  if (!cont) return existing;
+  // Trim the longest overlap the model accidentally repeated at the seam. Floor of
+  // 10 chars so a real repeat (a line or more) is caught while a short coincidental
+  // match isn't eaten.
+  const maxOv = Math.min(existing.length, cont.length, 800);
+  for (let n = maxOv; n >= 10; n--) {
+    if (existing.slice(existing.length - n) === cont.slice(0, n)) return existing + cont.slice(n);
+  }
+  return existing + cont;
+}
+
+/** Resume a code card whose file stopped before completing. Streams the missing
+    tail from the coder model and appends it seamlessly into the SAME box, then
+    persists. Safe to click repeatedly for very long files. */
+async function continueCode(card) {
+  const chat = activeChat();
+  if (!chat) return;
+  if (activeStreams.has(chat.id)) {
+    showToast(state.lang === "ar" ? "انتظر حتى ينتهي الرد الحالي" : "Wait for the current reply to finish");
+    return;
+  }
+  const turn = card.closest(".msg-ai");
+  const idx = turn ? parseInt(turn.dataset.index, 10) : -1;
+  const aiMsg = (idx >= 0 && chat.messages[idx]) ? chat.messages[idx] : null;
+  const meta = aiMsg ? parseCodeMeta(aiMsg.content) : null;
+  if (!meta) return;
+  const ar = (aiMsg.lang || state.lang) === "ar";
+  let code = meta.code != null ? meta.code : "";
+
+  // Context: prior turns (code unwrapped to raw), the code so far as the assistant's
+  // last message, then an explicit "continue exactly" instruction.
+  const prior = chat.messages.slice(0, idx).map((m) => {
+    if (m.role === "assistant") { const cm = parseCodeMeta(m.content); if (cm) return { role: "assistant", content: cm.code }; }
+    return { role: m.role, content: m.content };
+  }).filter((m) => m.content && (m.role === "user" || m.role === "assistant"));
+  const messages = [
+    { role: "system", content: codeContinueSystemPrompt(meta) },
+    ...prior,
+    { role: "assistant", content: code },
+    { role: "user", content: ar
+      ? "الكود أعلاه توقف قبل أن يكتمل. أكمله تمامًا من حيث توقف بالضبط — أخرج فقط بقية الكود الخام (الأحرف التالية) دون تكرار أي شيء مكتوب ودون أي شرح أو علامات ```. إن كان مكتملًا فأخرج فقط الكلمة: ALREADY_COMPLETE"
+      : "The code above stopped before completing. Continue it EXACTLY from where it stops — output ONLY the remaining raw code (the next characters), with no repetition and no commentary or ``` fences. If it is already complete, output ONLY: ALREADY_COMPLETE" },
+  ];
+
+  // Flip the finished card into a "continuing…" streaming state.
+  const controller = new AbortController();
+  activeStreams.set(chat.id, { controller });
+  syncStreamingUi();
+  card.classList.add("is-streaming");
+  const codeEl = card.querySelector(".code-card__code");
+  const body = card.querySelector(".code-card__body");
+  const actions = card.querySelector(".code-card__actions");
+  if (actions) {
+    actions.innerHTML = "";
+    const w = document.createElement("span");
+    w.className = "code-card__writing";
+    w.textContent = ar ? "يُكمل الكود…" : "Continuing…";
+    actions.appendChild(w);
+  }
+
+  let tail = "";
+  const onDelta = (full) => {
+    tail = full;
+    const merged = joinCodeContinuation(code, stripCodeFences(tail));
+    if (codeEl) codeEl.textContent = merged;
+    const cnt = card.querySelector(".code-card__count");
+    if (cnt) cnt.textContent = codeLineCountText(merged, meta.lang);
+    if (body) body.scrollTop = body.scrollHeight;
+  };
+
+  const persistMerge = (contRaw) => {
+    const cont = stripCodeFences(contRaw || "").trim();
+    if (!cont || /^ALREADY_COMPLETE\s*$/i.test(cont)) return false;
+    code = joinCodeContinuation(code, cont);
+    aiMsg.content = "```firas-code " + JSON.stringify({ filename: meta.filename, lang: meta.lang, ext: meta.ext, label: meta.label }) + "\n" + code + "\n```";
+    persistChat(chat);
+    return true;
+  };
+
+  try {
+    const out = await streamAgentText(messages, "ultra", controller.signal, onDelta);
+    if (persistMerge(out)) showToast(ar ? "تم إكمال الكود ✅" : "Code continued ✅");
+    else showToast(ar ? "الكود مكتمل بالفعل ✅" : "Already complete ✅");
+  } catch (err) {
+    if (controller.signal.aborted) persistMerge(tail); // keep what streamed before Stop
+    else { persistMerge(tail); showToast(ar ? "تعذّر إكمال الكود، حاول مجددًا" : "Couldn't continue — try again"); }
+  } finally {
+    activeStreams.delete(chat.id);
+    syncStreamingUi();
+    // Rebuild the finished card (refreshed code + full button row).
+    const fresh = parseCodeMeta(aiMsg.content);
+    if (fresh && card.isConnected) card.replaceWith(buildCodeCard(fresh, aiMsg.lang || state.lang));
+    else card.classList.remove("is-streaming");
+  }
+}
+
 /** Planner + Author + Finisher → the final document string (metadata block + content). */
 async function runFileAgentPipeline(convo, fmt, lang, tierKey, signal, onStage) {
   // Files ALWAYS use the general document model (gpt-oss = "pro"), never the coder
@@ -4038,8 +4219,15 @@ async function streamAnswer(aiMsg, aiNode, chat) {
   // Snapshot whether THIS reply is a CODE deliverable — streamed live into a code
   // window (no file masking, no markdown). Skipped in plan mode.
   const lastUserForCode = [...convo].reverse().find((m) => m.role === "user");
-  const codeReq = (!fileFmt && state.mode !== "plan" && lastUserForCode)
-    ? detectCodeRequest(lastUserForCode.content) : null;
+  // In plan mode, the EXECUTE turn is triggered by an approval ("ابدأ") that carries
+  // no build spec — so look back to the ORIGINAL request to pick the deliverable.
+  const planExecuting = state.mode === "plan" && precededByApproval(chat, chat.messages.indexOf(aiMsg));
+  const codeTrigger = planExecuting
+    ? ([...convo].reverse().find((m) => m.role === "user" && detectCodeRequest(m.content)) || lastUserForCode)
+    : lastUserForCode;
+  const codeReq = (!fileFmt && (state.mode !== "plan" || planExecuting) && codeTrigger)
+    ? (detectCodeRequest(codeTrigger.content) || (state.mode !== "plan" ? codeFollowupSpec(convo) : null))
+    : null;
 
   let answer = "";
   let reasoning = "";
@@ -4099,14 +4287,16 @@ async function streamAnswer(aiMsg, aiNode, chat) {
     // IMAGE REQUESTS → generate an image (keyless) instead of a text reply. Show a
     // framed "generating…" effect, enhance the prompt to a vivid English one, then
     // render the image card (which loads the picture from the /api/image proxy).
-    const imgUser = [...convo].reverse().find((m) => m.role === "user");
+    const imgUser = planExecuting
+      ? ([...convo].reverse().find((m) => m.role === "user" && detectImageRequest(m.content)) || [...convo].reverse().find((m) => m.role === "user"))
+      : [...convo].reverse().find((m) => m.role === "user");
     // A clearly-GRAPHIC noun (logo/poster/photo/wallpaper…) means an image even if
     // the text also mentions html/web — so it wins over the code path.
     const clearlyGraphic = imgUser && /صورة|صوره|شعار|لوغو|بوستر|خلفية|بورتريه|رسمة|رسمه|لوحة|\blogo\b|\bposter\b|\bwallpaper\b|\bportrait\b|\bavatar\b/i.test(imgUser.content);
     // A vision turn (the user attached images) must NOT be treated as image
     // generation — answer about the image instead.
     const imgHasAttachments = imgUser && Array.isArray(imgUser.images) && imgUser.images.length > 0;
-    if (imgUser && !imgHasAttachments && state.mode !== "plan" && !fileFmt && detectImageRequest(imgUser.content) && (clearlyGraphic || !codeReq)) {
+    if (imgUser && !imgHasAttachments && (state.mode !== "plan" || planExecuting) && !fileFmt && detectImageRequest(imgUser.content) && (clearlyGraphic || !codeReq)) {
       // Pre-check the per-user daily cap (read-only; the slot is charged on the
       // server only when the image actually loads — see imageUrl's cid). An
       // explicit 429 blocks; other errors fail open (downstream auth still gates).
@@ -4172,7 +4362,13 @@ async function streamAnswer(aiMsg, aiNode, chat) {
     // model (ultra = qwen3-coder, which excels at code). No web search, no
     // thinking. The SSE loop below streams the source into the code window.
     if (codeReq) {
-      requestMessages = [{ role: "system", content: codeSystemPrompt(codeReq) }, ...convo.map((m) => ({ role: m.role, content: m.content }))];
+      // Unwrap any prior firas-code blocks to RAW source so the model sees real
+      // code (not our JSON meta fence) when editing/continuing in the same chat.
+      const codeConvo = convo.map((m) => {
+        if (m.role === "assistant") { const cm = parseCodeMeta(m.content); if (cm) return { role: "assistant", content: cm.code }; }
+        return { role: m.role, content: m.content };
+      });
+      requestMessages = [{ role: "system", content: codeSystemPrompt(codeReq) }, ...codeConvo];
       requestTier = "ultra";
       aiMsg.think = false;
     } else if (state.mode !== "plan") {
