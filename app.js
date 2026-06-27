@@ -4821,8 +4821,8 @@ async function streamAnswer(aiMsg, aiNode, chat) {
     // rigorously step-by-step, weigh edge-cases, and self-verify before answering.
     if (requestTier === "max") {
       const maxSys = replyLang === "ar"
-        ? "أنت الآن في الوضع الأقوى «ماكس». تعامل مع المسألة بأقصى عمق وذكاء: فكّك المشكلة إلى مكوّناتها، استكشف أكثر من زاوية ونهج قبل أن تقرّر، استنتج خطوةً بخطوة بدقّة صارمة، وازِن الحالات الحدّية والفروق الدقيقة والمقايضات صراحةً، وتحقّق من صحّة إجابتك ذاتيًا قبل تقديمها. قدّم تحليلًا شاملًا ومنظَّمًا ودقيقًا وعالي الجودة — أعمق وأذكى بكثير من رد عادي."
-        : "You are now in the most powerful mode, 'Max'. Engage with maximum depth and intelligence: decompose the problem into its parts, explore multiple angles and approaches before deciding, reason step by step with rigorous precision, weigh edge-cases, nuances and trade-offs explicitly, and self-verify your answer before giving it. Deliver a thorough, well-structured, precise, top-quality analysis — far deeper and smarter than an ordinary reply.";
+        ? "أنت في الوضع الأقوى «ماكس». فكّر بعمقٍ ودقّةٍ داخليًّا (فكّك المشكلة، وازِن الاحتمالات والمقايضات، وتحقّق من صحّة إجابتك قبل تقديمها)، لكن اجعل **طول الإجابة مناسبًا للسؤال**: كن مباشرًا وموجزًا في الأسئلة البسيطة، وأفِضْ في التحليل والتفصيل فقط عند الأسئلة المعقّدة التي تستحقّ ذلك. لا تُطِلْ بلا داعٍ ولا تحشُ الكلام — قدّم أعلى جودةٍ وأدقَّ إجابةٍ بأقصرِ طريقٍ ممكن."
+        : "You are in the most powerful mode, 'Max'. Think deeply and rigorously INTERNALLY (decompose, weigh possibilities and trade-offs, self-verify before answering), but match the RESPONSE LENGTH to the question: be direct and concise for simple questions, and go deep/detailed ONLY for genuinely complex ones that warrant it. Do not pad or over-write — deliver the highest-quality, most precise answer by the shortest path.";
       requestMessages = [requestMessages[0], { role: "system", content: maxSys }, ...requestMessages.slice(1)];
     }
     const rtModel = MODELS[requestTier] || tier;
