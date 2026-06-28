@@ -1270,41 +1270,51 @@ function sniffImageMime(buf) {
 // Generate an image via Cloudflare Workers AI (free daily quota, reliable). FLUX.2 models
 // require multipart/form-data; flux-1/Leonardo take simple JSON. Response is base64 in
 // {result:{image}} (or raw image bytes for some). Returns {buf,mime} or null.
-let _cfCooldownUntil = 0; // set when CF's daily 10k-neuron quota is exhausted (429) → skip it
-async function generateImageCloudflare(prompt, w, h) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) return null;
-  if (Date.now() < _cfCooldownUntil) return null;
+// Pool of Cloudflare accounts → multiplies the free 10k-neuron/day quota. The primary
+// CF_ACCOUNT_ID/CF_API_TOKEN plus any pairs in CF_ACCOUNTS ("id:token,id:token,..."). Each
+// request tries them in order, skipping any in a 429 cooldown. NOTE: pooling many accounts
+// to bypass a free tier may breach Cloudflare's ToS — the operator's choice.
+const CF_ACCOUNTS = (() => {
+  const list = [];
+  if (CF_ACCOUNT_ID && CF_API_TOKEN) list.push({ id: CF_ACCOUNT_ID, token: CF_API_TOKEN });
+  for (const pair of (process.env.CF_ACCOUNTS || "").split(",")) {
+    const s = pair.trim(); if (!s) continue;
+    const i = s.indexOf(":"); if (i < 1) continue;
+    const id = s.slice(0, i).trim(), token = s.slice(i + 1).trim();
+    if (id && token) list.push({ id, token });
+  }
+  return list;
+})();
+const _cfCooldown = new Map(); // accountId -> ms timestamp to skip until (its daily 429)
+
+// One generation attempt against a SINGLE account. Returns {buf,mime}, the string "429"
+// (quota exhausted → caller cools it down and tries the next), or null on other failure.
+async function cfTryAccount(acct, prompt, w, h) {
   const ac = new AbortController();
-  const to = setTimeout(() => ac.abort(), 90_000); // flux-2-klein ~4s; flux-2-dev can be ~80s
+  const to = setTimeout(() => ac.abort(), 90_000); // flux-2-klein ~4s; flux-2-dev ~80s
   try {
-    const url = "https://api.cloudflare.com/client/v4/accounts/" + CF_ACCOUNT_ID + "/ai/run/" + CF_IMAGE_MODEL;
+    const url = "https://api.cloudflare.com/client/v4/accounts/" + acct.id + "/ai/run/" + CF_IMAGE_MODEL;
     const text = String(prompt || "").slice(0, 2000);
     let r;
     if (/flux-2/i.test(CF_IMAGE_MODEL)) {
-      // FLUX.2 needs multipart/form-data. Do NOT set Content-Type — fetch adds the
-      // multipart boundary automatically when the body is a FormData.
+      // FLUX.2 needs multipart/form-data — don't set Content-Type (fetch adds the boundary).
       const fd = new FormData();
-      fd.append("prompt", text);
-      fd.append("steps", String(CF_IMAGE_STEPS));
-      fd.append("width", String(w || 1024));
-      fd.append("height", String(h || 1024));
-      r = await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + CF_API_TOKEN }, body: fd, signal: ac.signal });
+      fd.append("prompt", text); fd.append("steps", String(CF_IMAGE_STEPS));
+      fd.append("width", String(w || 1024)); fd.append("height", String(h || 1024));
+      r = await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + acct.token }, body: fd, signal: ac.signal });
     } else {
       const body = { prompt: text };
       if (/flux-1|schnell/i.test(CF_IMAGE_MODEL)) body.steps = CF_IMAGE_STEPS;
-      r = await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + CF_API_TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ac.signal });
+      r = await fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + acct.token, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ac.signal });
     }
     if (!r.ok) {
       const errBody = await r.text().catch(() => "");
-      if (r.status === 429 || /allocation|neurons/i.test(errBody)) { _cfCooldownUntil = Date.now() + 30 * 60_000; } // daily quota used → back off 30 min
-      console.error("[firas] Cloudflare image HTTP " + r.status + ": " + errBody.slice(0, 200));
+      if (r.status === 429 || /allocation|neurons/i.test(errBody)) return "429";
+      console.error("[firas] Cloudflare image HTTP " + r.status + ": " + errBody.slice(0, 160));
       return null;
     }
     const ct = (r.headers.get("content-type") || "").toLowerCase();
-    if (ct.startsWith("image/")) {
-      const buf = Buffer.from(await r.arrayBuffer());
-      return buf.length ? { buf, mime: ct } : null;
-    }
+    if (ct.startsWith("image/")) { const buf = Buffer.from(await r.arrayBuffer()); return buf.length ? { buf, mime: ct } : null; }
     const j = await r.json().catch(() => null);
     const b64 = j && ((j.result && (j.result.image || (Array.isArray(j.result.images) && j.result.images[0]))) || j.image);
     if (typeof b64 === "string" && b64.length > 100) {
@@ -1312,10 +1322,22 @@ async function generateImageCloudflare(prompt, w, h) {
       const buf = Buffer.from(clean, "base64");
       return buf.length ? { buf, mime: sniffImageMime(buf) } : null;
     }
-    if (j && j.success === false) console.error("[firas] Cloudflare image error: " + JSON.stringify(j.errors || j).slice(0, 200));
+    if (j && j.success === false) console.error("[firas] Cloudflare image error: " + JSON.stringify(j.errors || j).slice(0, 160));
     return null;
   } catch (e) { console.error("[firas] Cloudflare image exception: " + (e && e.message || e)); return null; }
   finally { clearTimeout(to); }
+}
+
+// Try each pooled account in turn; skip those in 429 cooldown. Returns {buf,mime} or null.
+async function generateImageCloudflare(prompt, w, h) {
+  for (const acct of CF_ACCOUNTS) {
+    if (Date.now() < (_cfCooldown.get(acct.id) || 0)) continue;
+    const out = await cfTryAccount(acct, prompt, w, h);
+    if (out === "429") { _cfCooldown.set(acct.id, Date.now() + 30 * 60_000); continue; } // exhausted → next account
+    if (out && out.buf && out.buf.length) return out;
+    // other failure → try the next account
+  }
+  return null;
 }
 
 async function generateImageGemini(prompt) {
