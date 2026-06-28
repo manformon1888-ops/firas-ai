@@ -38,10 +38,11 @@ const HF_IMAGE_URL   = env("HF_IMAGE_URL") || ("https://router.huggingface.co/hf
 // auth token, so END USERS never sign in to Puter → real GPT-Image/Gemini quality, free.
 // Tried FIRST when set. Token: https://puter.com/dashboard#account → API token → Create.
 const PUTER_AUTH_TOKEN    = env("PUTER_AUTH_TOKEN") || "";
-// Default = gpt-image-1-mini: real GPT-Image quality at the CHEAPEST cost (gpt-image-2
-// "high" + gemini "nano-banana" are pricier and 402 once the free balance is gone).
-const PUTER_IMAGE_MODEL   = env("PUTER_IMAGE_MODEL") || "gpt-image-1-mini";
-const PUTER_IMAGE_QUALITY = env("PUTER_IMAGE_QUALITY") || "high"; // only applies to gpt-image-2 / gpt-image-1.5
+// Default = gpt-image-2 at "low": the FULL GPT-Image model (sharper, better in-image
+// text than gpt-image-1-mini) at moderate cost. gpt-image-2 "high"/"medium" + gemini
+// "nano-banana" cost more and 402 fast; set gpt-image-1-mini for the cheapest option.
+const PUTER_IMAGE_MODEL   = env("PUTER_IMAGE_MODEL") || "gpt-image-2";
+const PUTER_IMAGE_QUALITY = env("PUTER_IMAGE_QUALITY") || "low"; // gpt-image-2 / gpt-image-1.5 only: low | medium | high
 const PUTER_DRIVER_URL    = "https://api.puter.com/drivers/call";
 const PUTER_MODEL_ALIASES = { "nano-banana": "gemini-2.5-flash-image-preview", "nano-banana-pro": "gemini-3-pro-image-preview" };
 function puterEngineTag() { const m = PUTER_MODEL_ALIASES[PUTER_IMAGE_MODEL] || PUTER_IMAGE_MODEL; return m + (/gpt-image-(2|1\.5)/i.test(m) ? " " + PUTER_IMAGE_QUALITY : ""); }
