@@ -3141,7 +3141,7 @@ function exportCss(th, isAr, scope) {
     dp + "tr:nth-child(even) td{background:#" + th.zebra + "}" +
     dp + "img{max-width:100%;page-break-inside:avoid;border-radius:6px}" +
     dp + ".katex{font-size:1.05em}" +
-    dp + ".katex-display{margin:.8em 0;max-width:100%;overflow:hidden;page-break-inside:avoid;direction:ltr;text-align:center}" +
+    dp + ".katex-display{margin:1.15em 0;max-width:100%;overflow:visible;page-break-inside:avoid;direction:ltr;text-align:center}" +
     dp + ".katex{max-width:100%;direction:ltr}" +
     dp + ".katex-display>.katex{display:inline-block;text-align:initial}"
   );
@@ -3285,14 +3285,18 @@ async function exportPdf(turn, lang, msg) {
     root = buildExportRoot(mdNode, lang, meta);
     document.body.appendChild(root);
     await ensureExportFonts(lang === "ar");       // professional fonts ready before capture
-    await new Promise((r) => setTimeout(r, 90)); // let layout + KaTeX settle
+    await new Promise((r) => setTimeout(r, 220)); // let layout + fonts + KaTeX fully settle (prevents mis-measured breaks)
 
     const pdf = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
     const pageW = 210, pageH = 297, mL = 14, mT = 15, mB = 16;
     const contentW = pageW - mL - 14;           // 182mm text column
     const contentH = pageH - mT - mB;           // 266mm text height
-    const scale = 2;
-    const toJpeg = (c) => c.toDataURL("image/jpeg", 0.95);
+    // Adaptive scale: crisp (~300 DPI) for normal docs, auto-reduced for very long ones so the
+    // single html2canvas capture never exceeds the browser's max canvas size (which would blank/
+    // clip the bottom — a cause of "deleted" content).
+    const _docPxH = ((root.querySelector(".doc") || {}).scrollHeight) || 1;
+    const scale = (_docPxH * 2.7 > 30000) ? Math.max(1.6, 30000 / _docPxH) : 2.7;
+    const toJpeg = (c) => c.toDataURL("image/jpeg", 0.97);
     let pageStarted = false;
 
     // ---- Cover: full-bleed page 1 ----
@@ -3303,22 +3307,36 @@ async function exportPdf(turn, lang, msg) {
       pageStarted = true;
     }
 
-    // ---- Content: render .doc once, paginate at element boundaries (no split equations) ----
+    // ---- Content: render .doc once, paginate at block boundaries (never split an equation/table/figure) ----
     const docEl = root.querySelector(".doc");
     const dc = await H2C(docEl, { scale, backgroundColor: bg, windowWidth: 794, logging: false, useCORS: true });
     const pxPerMm = dc.width / contentW;
     const pageHpx = Math.floor(contentH * pxPerMm);
     const dTop = docEl.getBoundingClientRect().top;
-    const bounds = [...docEl.querySelectorAll(":scope > *")].map((c) => (c.getBoundingClientRect().bottom - dTop) * scale);
+    // Break candidates = the BOTTOM edge (canvas px) of every block we must not split:
+    // direct children PLUS display equations, tables, images, code, lists, paragraphs &
+    // headings (even when nested), so a page can always end cleanly before a tall block.
+    const blockEls = new Set([
+      ...docEl.querySelectorAll(":scope > *"),
+      ...docEl.querySelectorAll(".katex-display, table, img, pre, blockquote, figure, h1, h2, h3, h4, h5, h6, p, li"),
+    ]);
+    const bounds = [...blockEls]
+      .map((el) => Math.round((el.getBoundingClientRect().bottom - dTop) * scale))
+      .filter((b) => b > 0)
+      .sort((a, b) => a - b);
+    const MIN_FILL = pageHpx * 0.12;   // allow an early break to push a tall block down, but avoid near-empty pages
     let start = 0;
     while (start < dc.height - 1) {
-      let end = Math.min(start + pageHpx, dc.height);
+      const maxEnd = Math.min(start + pageHpx, dc.height);
+      let end = maxEnd;
       if (end < dc.height) {
+        // largest block boundary that fits → clean break, no split. If none fits, a single
+        // block is taller than a whole page → forced split at maxEnd (unavoidable).
         let cut = 0;
-        for (const b of bounds) { if (b > start + pageHpx * 0.4 && b <= end) cut = b; }
-        if (cut > start) end = cut;            // clean break at an element boundary
+        for (const b of bounds) { if (b > start + MIN_FILL && b <= maxEnd) cut = b; }
+        if (cut > start) end = cut;
       }
-      const sliceH = end - start;
+      const sliceH = Math.max(1, end - start);
       const tmp = document.createElement("canvas");
       tmp.width = dc.width; tmp.height = sliceH;
       const ctx = tmp.getContext("2d");
