@@ -73,6 +73,18 @@ const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-i
 const HF_API_KEY     = process.env.HF_API_KEY || "";
 const HF_IMAGE_MODEL = process.env.HF_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
 const HF_IMAGE_URL   = process.env.HF_IMAGE_URL || ("https://router.huggingface.co/hf-inference/models/" + HF_IMAGE_MODEL);
+// Puter.com image generation (the BEST free option). Calls Puter's driver API with
+// the DEVELOPER's auth token server-side, so END USERS never sign in to Puter. Gives
+// real GPT-Image / Gemini ("Nano Banana") quality for free. Tried FIRST when the token
+// is set. Get a token at https://puter.com/dashboard#account → API token → Create.
+const PUTER_AUTH_TOKEN    = process.env.PUTER_AUTH_TOKEN || "";
+// Default = gpt-image-1-mini: real GPT-Image quality at the CHEAPEST cost (gpt-image-2
+// "high" + gemini "nano-banana" are pricier and 402 once the free balance is gone).
+const PUTER_IMAGE_MODEL   = process.env.PUTER_IMAGE_MODEL || "gpt-image-1-mini";
+const PUTER_IMAGE_QUALITY = process.env.PUTER_IMAGE_QUALITY || "high"; // only applies to gpt-image-2 / gpt-image-1.5
+const PUTER_DRIVER_URL    = "https://api.puter.com/drivers/call";
+// Friendly aliases (mirrors puter.js so PUTER_IMAGE_MODEL=nano-banana works server-side)
+const PUTER_MODEL_ALIASES = { "nano-banana": "gemini-2.5-flash-image-preview", "nano-banana-pro": "gemini-3-pro-image-preview" };
 
 // Tier -> Ollama model + generation params (env-overridable).
 // num_predict = MAX output tokens. Generous so long outputs (a full single-file
@@ -1134,6 +1146,102 @@ async function handleImageQuota(req, res) {
 
 // Generate an image with Gemini (Google AI Studio). Returns {buf, mime} or null to
 // fall back to pollinations. Free key, ~500 images/day, no card.
+// --- Generated-image disk cache (DATA_DIR/imgcache) -------------------------
+// Reloads of a saved image (same prompt+size+seed+engine) are served from disk so
+// they're instant, don't re-spend Puter credits, and never silently change the
+// picture. Keyed by the ENGINE config too, so switching models yields fresh images.
+const IMG_CACHE_DIR = path.join(DATA_DIR, "imgcache");
+function imgEngineTag() {
+  if (!PUTER_AUTH_TOKEN) return "pollinations";
+  const m = PUTER_MODEL_ALIASES[PUTER_IMAGE_MODEL] || PUTER_IMAGE_MODEL;
+  return m + (/gpt-image-(2|1\.5)/i.test(m) ? ":" + PUTER_IMAGE_QUALITY : "");
+}
+function imgCacheKey(prompt, w, h, seed) {
+  return crypto.createHash("sha1").update(imgEngineTag() + "|" + prompt + "|" + w + "x" + h + "|" + (seed || "")).digest("hex");
+}
+function imgCacheGet(key) {
+  try {
+    const f = path.join(IMG_CACHE_DIR, key), m = path.join(IMG_CACHE_DIR, key + ".t");
+    if (existsSync(f) && existsSync(m)) {
+      const buf = readFileSync(f);
+      if (buf && buf.length) return { buf, mime: (readFileSync(m, "utf8").trim() || "image/png") };
+    }
+  } catch (_) {}
+  return null;
+}
+async function imgCacheSet(key, buf, mime) {
+  try {
+    if (!buf || !buf.length || buf.length > 6_000_000) return; // skip empty/oversized
+    if (!existsSync(IMG_CACHE_DIR)) await mkdir(IMG_CACHE_DIR, { recursive: true });
+    await writeFile(path.join(IMG_CACHE_DIR, key), buf);
+    await writeFile(path.join(IMG_CACHE_DIR, key + ".t"), mime || "image/png");
+  } catch (_) {}
+}
+
+// Generate an image via Puter's driver API using the DEVELOPER's auth token (server-
+// side → end users never sign in to Puter). Real GPT-Image / Gemini quality, free.
+// Returns {buf, mime} or null on any failure (so the chain degrades to the next engine).
+let _puterCooldownUntil = 0; // set when Puter is out of credits → skip it briefly so
+                             // every image isn't slowed by a doomed 402 round-trip.
+async function generateImagePuter(prompt) {
+  if (!PUTER_AUTH_TOKEN) return null;
+  if (Date.now() < _puterCooldownUntil) return null;
+  const model = PUTER_MODEL_ALIASES[PUTER_IMAGE_MODEL] || PUTER_IMAGE_MODEL;
+  const args = { prompt: String(prompt || "").slice(0, 4000), model };
+  if (/gpt-image-(2|1\.5)/i.test(model) && PUTER_IMAGE_QUALITY) args.quality = PUTER_IMAGE_QUALITY;
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(), 120_000); // gpt-image at "high" can be slow
+  try {
+    const r = await fetch(PUTER_DRIVER_URL, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + PUTER_AUTH_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ interface: "puter-image-generation", driver: "ai-image", method: "generate", args }),
+      signal: ac.signal,
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      if (r.status === 402 || /insufficient/i.test(body)) { _puterCooldownUntil = Date.now() + 10 * 60_000; } // out of credits → back off 10 min
+      console.error("[firas] Puter image HTTP " + r.status + ": " + body.slice(0, 200));
+      return null;
+    }
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+    if (ct.startsWith("image/")) {
+      const buf = Buffer.from(await r.arrayBuffer());
+      return buf.length ? { buf, mime: ct } : null;
+    }
+    // Otherwise a JSON envelope or a bare string (data-URL / http URL / base64).
+    const txt = await r.text();
+    let j = null; try { j = JSON.parse(txt); } catch (_) {}
+    if (j && j.success === false) { console.error("[firas] Puter image error: " + txt.slice(0, 200)); return null; }
+    const pick = (v) => {
+      if (!v) return null;
+      if (typeof v === "string") return v;
+      if (typeof v === "object") return v.url || v.image_url || v.image || v.data || v.b64_json || v.base64 || pick(v.result) || null;
+      return null;
+    };
+    let s = j ? (pick(j.result) || pick(j)) : txt;
+    if (typeof s !== "string" || !s) return null;
+    s = s.trim();
+    if (s.startsWith("data:")) {
+      const comma = s.indexOf(","), semi = s.indexOf(";");
+      const mime = semi > 5 ? s.slice(5, semi) : "image/png";
+      const buf = Buffer.from(s.slice(comma + 1), "base64");
+      return buf.length ? { buf, mime } : null;
+    }
+    if (/^https?:\/\//i.test(s)) {
+      const ir = await fetch(s, { signal: ac.signal });
+      if (!ir.ok) return null;
+      const buf = Buffer.from(await ir.arrayBuffer());
+      return buf.length ? { buf, mime: ir.headers.get("content-type") || "image/png" } : null;
+    }
+    if (/^[A-Za-z0-9+/=\s]+$/.test(s) && s.replace(/\s+/g, "").length > 200) {
+      try { const buf = Buffer.from(s.replace(/\s+/g, ""), "base64"); if (buf.length > 100) return { buf, mime: "image/png" }; } catch (_) {}
+    }
+    return null;
+  } catch (e) { console.error("[firas] Puter image exception: " + (e && e.message || e)); return null; }
+  finally { clearTimeout(to); }
+}
+
 async function generateImageGemini(prompt) {
   if (!GEMINI_API_KEY) return null;
   const ac = new AbortController();
@@ -1200,11 +1308,34 @@ async function handleImage(req, res) {
   const w = Math.min(1280, Math.max(256, parseInt(u.searchParams.get("w"), 10) || 1024));
   const h = Math.min(1280, Math.max(256, parseInt(u.searchParams.get("h"), 10) || 1024));
   const seed = (u.searchParams.get("seed") || "").replace(/[^0-9]/g, "").slice(0, 12);
+  // Serve a previously-generated identical image straight from disk: instant, stable
+  // (the saved picture never changes), and zero extra Puter/engine spend on reloads.
+  const ckey = imgCacheKey(prompt, w, h, seed);
+  const cached = imgCacheGet(ckey);
+  if (cached) {
+    if (isNew) { user.imgCids.push(cid); persist(); }
+    res.writeHead(200, { "Content-Type": cached.mime, "Cache-Control": "public, max-age=86400" });
+    return res.end(cached.buf);
+  }
+  // 0) Puter (developer token, server-side) → real GPT-Image/Gemini quality, NO user
+  // login. Best free option; tried FIRST when PUTER_AUTH_TOKEN is set.
+  try {
+    const put = await generateImagePuter(prompt);
+    if (put && put.buf && put.buf.length) {
+      console.log("[firas] image served by Puter (" + imgEngineTag() + ")");
+      await imgCacheSet(ckey, put.buf, put.mime);
+      if (isNew) { user.imgCids.push(cid); persist(); }
+      res.writeHead(200, { "Content-Type": put.mime, "Cache-Control": "public, max-age=86400" });
+      return res.end(put.buf);
+    }
+    if (PUTER_AUTH_TOKEN) console.error("[firas] Puter returned no image → next engine");
+  } catch (_) { if (PUTER_AUTH_TOKEN) console.error("[firas] Puter error → next engine"); }
   // 1) Gemini (free key) → actual Gemini-image quality. Falls back to pollinations.
   try {
     const gem = await generateImageGemini(prompt);
     if (gem && gem.buf && gem.buf.length) {
       console.log("[firas] image served by Gemini (" + GEMINI_IMAGE_MODEL + ")");
+      await imgCacheSet(ckey, gem.buf, gem.mime);
       if (isNew) { user.imgCids.push(cid); persist(); }
       res.writeHead(200, { "Content-Type": gem.mime, "Cache-Control": "public, max-age=86400" });
       return res.end(gem.buf);
@@ -1216,6 +1347,7 @@ async function handleImage(req, res) {
     const hf = await generateImageHF(prompt);
     if (hf && hf.buf && hf.buf.length) {
       console.log("[firas] image served by Hugging Face (" + HF_IMAGE_MODEL + ")");
+      await imgCacheSet(ckey, hf.buf, hf.mime);
       if (isNew) { user.imgCids.push(cid); persist(); }
       res.writeHead(200, { "Content-Type": hf.mime, "Cache-Control": "public, max-age=86400" });
       return res.end(hf.buf);
@@ -1229,11 +1361,10 @@ async function handleImage(req, res) {
     const r = await fetch(src, { headers: { "User-Agent": SEARCH_UA, "Accept": "image/*" } });
     if (!r.ok) { res.writeHead(502); return res.end("image generation failed"); }
     const buf = Buffer.from(await r.arrayBuffer());
+    const pmime = r.headers.get("content-type") || "image/jpeg";
+    await imgCacheSet(ckey, buf, pmime);
     if (isNew) { user.imgCids.push(cid); persist(); } // charge only now (real bytes)
-    res.writeHead(200, {
-      "Content-Type": r.headers.get("content-type") || "image/jpeg",
-      "Cache-Control": "public, max-age=86400",
-    });
+    res.writeHead(200, { "Content-Type": pmime, "Cache-Control": "public, max-age=86400" });
     res.end(buf);
   } catch (_) {
     res.writeHead(502);

@@ -34,6 +34,18 @@ const GEMINI_IMAGE_MODEL = env("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image"
 const HF_API_KEY     = env("HF_API_KEY") || "";
 const HF_IMAGE_MODEL = env("HF_IMAGE_MODEL") || "black-forest-labs/FLUX.1-schnell";
 const HF_IMAGE_URL   = env("HF_IMAGE_URL") || ("https://router.huggingface.co/hf-inference/models/" + HF_IMAGE_MODEL);
+// Puter.com image generation (BEST free option). Server-side call with the DEVELOPER's
+// auth token, so END USERS never sign in to Puter → real GPT-Image/Gemini quality, free.
+// Tried FIRST when set. Token: https://puter.com/dashboard#account → API token → Create.
+const PUTER_AUTH_TOKEN    = env("PUTER_AUTH_TOKEN") || "";
+// Default = gpt-image-1-mini: real GPT-Image quality at the CHEAPEST cost (gpt-image-2
+// "high" + gemini "nano-banana" are pricier and 402 once the free balance is gone).
+const PUTER_IMAGE_MODEL   = env("PUTER_IMAGE_MODEL") || "gpt-image-1-mini";
+const PUTER_IMAGE_QUALITY = env("PUTER_IMAGE_QUALITY") || "high"; // only applies to gpt-image-2 / gpt-image-1.5
+const PUTER_DRIVER_URL    = "https://api.puter.com/drivers/call";
+const PUTER_MODEL_ALIASES = { "nano-banana": "gemini-2.5-flash-image-preview", "nano-banana-pro": "gemini-3-pro-image-preview" };
+function puterEngineTag() { const m = PUTER_MODEL_ALIASES[PUTER_IMAGE_MODEL] || PUTER_IMAGE_MODEL; return m + (/gpt-image-(2|1\.5)/i.test(m) ? " " + PUTER_IMAGE_QUALITY : ""); }
+let _puterCooldownUntil = 0; // set when Puter is out of credits → skip the doomed 402 call briefly
 const UPSTREAM_TIMEOUT_MS = Number(env("REQUEST_TIMEOUT_MS")) || 300000;
 
 const COOKIE_NAME = "firas_session";
@@ -502,6 +514,58 @@ async function imgDayNode(userId) { return (await dbGet(`imgQuota/${userId}/${se
 // scheme as images so concurrent distinct charges never clobber each other.
 async function maxDayNode(userId) { return (await dbGet(`maxQuota/${userId}/${serverDay()}`)) || {}; }
 
+// Generate an image via Puter's driver API using the DEVELOPER's auth token (server-
+// side → end users never sign in). Real GPT-Image/Gemini quality, free. {bytes,mime}|null.
+async function generateImagePuter(prompt) {
+  if (!PUTER_AUTH_TOKEN) return null;
+  if (Date.now() < _puterCooldownUntil) return null;
+  const model = PUTER_MODEL_ALIASES[PUTER_IMAGE_MODEL] || PUTER_IMAGE_MODEL;
+  const args = { prompt: String(prompt || "").slice(0, 4000), model };
+  if (/gpt-image-(2|1\.5)/i.test(model) && PUTER_IMAGE_QUALITY) args.quality = PUTER_IMAGE_QUALITY;
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(), 120000);
+  try {
+    const r = await fetch(PUTER_DRIVER_URL, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + PUTER_AUTH_TOKEN, "content-type": "application/json" },
+      body: JSON.stringify({ interface: "puter-image-generation", driver: "ai-image", method: "generate", args }),
+      signal: ac.signal,
+    });
+    if (!r.ok) {
+      if (r.status === 402 || /insufficient/i.test(await r.text().catch(() => ""))) { _puterCooldownUntil = Date.now() + 10 * 60000; }
+      return null;
+    }
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+    if (ct.startsWith("image/")) {
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      return bytes.length ? { bytes, mime: ct } : null;
+    }
+    const txt = await r.text();
+    let j = null; try { j = JSON.parse(txt); } catch (_) {}
+    if (j && j.success === false) return null;
+    const pick = (v) => { if (!v) return null; if (typeof v === "string") return v; if (typeof v === "object") return v.url || v.image_url || v.image || v.data || v.b64_json || v.base64 || pick(v.result) || null; return null; };
+    let s = j ? (pick(j.result) || pick(j)) : txt;
+    if (typeof s !== "string" || !s) return null;
+    s = s.trim();
+    if (s.startsWith("data:")) {
+      const comma = s.indexOf(","), semi = s.indexOf(";");
+      const mime = semi > 5 ? s.slice(5, semi) : "image/png";
+      try { return { bytes: b64ToBytes(s.slice(comma + 1)), mime }; } catch (_) { return null; }
+    }
+    if (/^https?:\/\//i.test(s)) {
+      const ir = await fetch(s, { signal: ac.signal });
+      if (!ir.ok) return null;
+      const bytes = new Uint8Array(await ir.arrayBuffer());
+      return bytes.length ? { bytes, mime: ir.headers.get("content-type") || "image/png" } : null;
+    }
+    if (/^[A-Za-z0-9+/=\s]+$/.test(s) && s.replace(/\s+/g, "").length > 200) {
+      try { const bytes = b64ToBytes(s.replace(/\s+/g, "")); if (bytes.length > 100) return { bytes, mime: "image/png" }; } catch (_) {}
+    }
+    return null;
+  } catch (_) { return null; }
+  finally { clearTimeout(to); }
+}
+
 // Generate an image with Gemini (Google AI Studio). Returns {bytes, mime} or null to
 // fall back to pollinations. Free key, ~500/day, no card.
 async function generateImageGemini(prompt) {
@@ -743,7 +807,16 @@ export default async (request, context) => {
       const w = Math.min(1280, Math.max(256, parseInt(url.searchParams.get("w"), 10) || 1024));
       const h = Math.min(1280, Math.max(256, parseInt(url.searchParams.get("h"), 10) || 1024));
       const seed = (url.searchParams.get("seed") || "").replace(/[^0-9]/g, "").slice(0, 12);
-      // Gemini (free key) first → actual Gemini-image quality; else keyless pollinations.
+      // Puter (developer token, server-side) FIRST → real GPT-Image/Gemini quality, NO
+      // user login. Browser Cache-Control (below) keeps same-device reloads free/stable.
+      try {
+        const put = await generateImagePuter(prompt);
+        if (put && put.bytes && put.bytes.length) {
+          if (isNew) { try { await dbPut(`imgQuota/${user.id}/${day}/${cid}`, true); } catch (_) {} }
+          return new Response(put.bytes, { headers: { "Content-Type": put.mime, "Cache-Control": "public, max-age=86400" } });
+        }
+      } catch (_) { /* fall through */ }
+      // Gemini (free key) → actual Gemini-image quality; else keyless pollinations.
       try {
         const gem = await generateImageGemini(prompt);
         if (gem && gem.bytes && gem.bytes.length) {
