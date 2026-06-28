@@ -94,7 +94,11 @@ const PUTER_MODEL_ALIASES = { "nano-banana": "gemini-2.5-flash-image-preview", "
 // "Workers AI" permission. Tried after the premium engines, before keyless pollinations.
 const CF_ACCOUNT_ID  = process.env.CF_ACCOUNT_ID || "";
 const CF_API_TOKEN   = process.env.CF_API_TOKEN || "";
-const CF_IMAGE_MODEL = process.env.CF_IMAGE_MODEL || "@cf/black-forest-labs/flux-1-schnell";
+// Default = Leonardo "Lucid Origin": much sharper than flux-1-schnell + far better
+// in-image text (verified: legible "Firas AI"), still free & simple JSON API. Use
+// @cf/black-forest-labs/flux-1-schnell for the cheapest / most-images-per-day option.
+// (FLUX.2 dev/klein are even newer but need a multipart request — not wired here.)
+const CF_IMAGE_MODEL = process.env.CF_IMAGE_MODEL || "@cf/leonardo/lucid-origin";
 const CF_IMAGE_STEPS = Math.min(8, Math.max(1, parseInt(process.env.CF_IMAGE_STEPS || "6", 10) || 6)); // flux-schnell max 8
 
 // Tier -> Ollama model + generation params (env-overridable).
@@ -1253,8 +1257,17 @@ async function generateImagePuter(prompt) {
   finally { clearTimeout(to); }
 }
 
-// Generate an image via Cloudflare Workers AI (free daily quota, reliable). flux-schnell
-// returns base64 in {result:{image}}; SDXL-style models return raw bytes. {buf,mime}|null.
+// Detect image type from magic bytes (Cloudflare models return PNG or JPEG base64).
+function sniffImageMime(buf) {
+  if (!buf || buf.length < 4) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50) return "image/png";
+  if (buf[0] === 0xFF && buf[1] === 0xD8) return "image/jpeg";
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57) return "image/webp";
+  return "image/jpeg";
+}
+
+// Generate an image via Cloudflare Workers AI (free daily quota, reliable). Leonardo /
+// flux return base64 in {result:{image}}; SDXL-style models return raw bytes. {buf,mime}|null.
 async function generateImageCloudflare(prompt) {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN) return null;
   const ac = new AbortController();
@@ -1280,7 +1293,7 @@ async function generateImageCloudflare(prompt) {
     if (typeof b64 === "string" && b64.length > 100) {
       const clean = b64.startsWith("data:") ? b64.slice(b64.indexOf(",") + 1) : b64;
       const buf = Buffer.from(clean, "base64");
-      return buf.length ? { buf, mime: "image/jpeg" } : null;
+      return buf.length ? { buf, mime: sniffImageMime(buf) } : null;
     }
     if (j && j.success === false) console.error("[firas] Cloudflare image error: " + JSON.stringify(j.errors || j).slice(0, 200));
     return null;

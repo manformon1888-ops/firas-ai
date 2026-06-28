@@ -52,8 +52,12 @@ let _puterCooldownUntil = 0; // set when Puter is out of credits → skip the do
 // Cloudflare account → Account ID + an API token with "Workers AI" permission.
 const CF_ACCOUNT_ID  = env("CF_ACCOUNT_ID") || "";
 const CF_API_TOKEN   = env("CF_API_TOKEN") || "";
-const CF_IMAGE_MODEL = env("CF_IMAGE_MODEL") || "@cf/black-forest-labs/flux-1-schnell";
+// Default = Leonardo "Lucid Origin": sharper than flux-1-schnell + far better in-image
+// text, still free & simple JSON API. Set @cf/black-forest-labs/flux-1-schnell for the
+// cheapest / most-images-per-day option. (FLUX.2 needs a multipart request — not wired.)
+const CF_IMAGE_MODEL = env("CF_IMAGE_MODEL") || "@cf/leonardo/lucid-origin";
 const CF_IMAGE_STEPS = Math.min(8, Math.max(1, parseInt(env("CF_IMAGE_STEPS") || "6", 10) || 6));
+function sniffImageMime(b) { if (!b || b.length < 4) return "image/jpeg"; if (b[0] === 0x89 && b[1] === 0x50) return "image/png"; if (b[0] === 0xFF && b[1] === 0xD8) return "image/jpeg"; if (b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57) return "image/webp"; return "image/jpeg"; }
 const UPSTREAM_TIMEOUT_MS = Number(env("REQUEST_TIMEOUT_MS")) || 300000;
 
 const COOKIE_NAME = "firas_session";
@@ -597,7 +601,7 @@ async function generateImageCloudflare(prompt) {
     const b64 = j && j.result && (j.result.image || (Array.isArray(j.result.images) && j.result.images[0]));
     if (typeof b64 === "string" && b64.length > 100) {
       const clean = b64.startsWith("data:") ? b64.slice(b64.indexOf(",") + 1) : b64;
-      try { return { bytes: b64ToBytes(clean), mime: "image/jpeg" }; } catch (_) { return null; }
+      try { const bytes = b64ToBytes(clean); return bytes.length ? { bytes, mime: sniffImageMime(bytes) } : null; } catch (_) { return null; }
     }
     return null;
   } catch (_) { return null; }
