@@ -298,6 +298,45 @@ function normalizeImage(img) {
   s = s.trim(); if (!s || s.length > MAX_IMAGE_B64_BYTES) return null;
   return s;
 }
+/* ---- Persistent per-user memory (mirrors server.mjs; persisted via saveUser) ---- */
+const MEMORY_MAX = 60;
+function userMemory(user) { if (!Array.isArray(user.memory)) user.memory = []; return user.memory; }
+function memoryBlock(user) {
+  const m = userMemory(user);
+  if (!m.length) return "";
+  return "PERSISTENT USER MEMORY — facts you have learned about THIS specific user across past conversations:\n" +
+    m.map((f) => "- " + f).join("\n") +
+    "\nUse these naturally to personalize your replies (their name, language, preferences, ongoing work). " +
+    "Do NOT recite this list or announce 'I remember'; just use it. If the user states something that contradicts a fact, trust the newest statement.";
+}
+async function llmComplete(messages, maxTokens) {
+  try {
+    const r = await fetch(FALLBACK_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: FALLBACK_MODEL, messages, stream: false, max_tokens: maxTokens || 300 }) });
+    if (!r.ok) return "";
+    const j = await r.json().catch(() => null);
+    const c = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    return typeof c === "string" ? c : "";
+  } catch (_) { return ""; }
+}
+async function memoryLearn(user, userText, aiText) {
+  const existing = userMemory(user);
+  const sys =
+    "You maintain a long-term memory of facts about a USER for an assistant. From the exchange, extract any NEW, DURABLE facts " +
+    "about the USER worth remembering across sessions: their name, location/country, job or role, the language they use, stable " +
+    "preferences, ongoing projects or goals, interests, and important personal details they reveal. " +
+    "Return ONLY a compact JSON array of short strings (each <= 12 words), facts about the USER only — never about the assistant, " +
+    "never general knowledge, never one-off task instructions. No duplicates of already-known facts. If nothing durable, return []. " +
+    "Already known: " + (existing.length ? JSON.stringify(existing.slice(-40)) : "[]");
+  const u = "USER: " + userText + (aiText ? "\nASSISTANT: " + aiText : "") + "\n\nJSON array of NEW durable user facts:";
+  let facts = [];
+  for (let a = 0; a < 2 && !facts.length; a++) { const out = await llmComplete([{ role: "system", content: sys }, { role: "user", content: u }], 300); try { const mm = out.match(/\[[\s\S]*\]/); if (mm) facts = JSON.parse(mm[0]); } catch (_) {} }
+  if (!Array.isArray(facts)) facts = [];
+  let added = 0; const seen = new Set(existing.map((f) => String(f).toLowerCase().trim()));
+  for (let f of facts) { f = String(f || "").trim(); if (!f || f.length > 140) continue; const k = f.toLowerCase(); if (seen.has(k)) continue; seen.add(k); existing.push(f); added++; }
+  if (added) { while (existing.length > MEMORY_MAX) existing.shift(); try { await saveUser(user); } catch (_) {} }
+  return added;
+}
+
 function hasImages(messages) {
   for (let i = messages.length - 1; i >= 0; i--) { const m = messages[i]; if (m && m.role === "user") return Array.isArray(m.images) && m.images.length > 0; }
   return false;
@@ -719,6 +758,9 @@ export default async (request, context) => {
       const messages = Array.isArray(payload.messages) ? payload.messages : [];
       const tier = TIERS[payload.tier] ? payload.tier : "pro";
       if (!messages.length) return json({ error: 'body must include a non-empty "messages" array' }, 400);
+      // Inject persistent user memory so every reply is personalized.
+      const memBlk = memoryBlock(user);
+      if (memBlk) { const si = messages.findIndex((m) => m && m.role === "system"); const mm = { role: "system", content: memBlk }; if (si >= 0) messages.splice(si + 1, 0, mm); else messages.unshift(mm); }
       const vision = hasImages(messages);
       const think = vision ? false : !!payload.think;
       // Capped tier (Max): enforce the per-user daily limit and charge one slot per
@@ -861,6 +903,28 @@ export default async (request, context) => {
     }
 
     /* ---- Max tier quota (read-only pre-check) ---- */
+    if (path === "/api/memory" && method === "GET") {
+      const user = await currentUser(context); if (!user) return json({ error: "authentication required" }, 401);
+      return json({ memory: userMemory(user) });
+    }
+    if (path === "/api/memory" && method === "DELETE") {
+      const user = await currentUser(context); if (!user) return json({ error: "authentication required" }, 401);
+      const i = url.searchParams.get("i"); const mem = userMemory(user);
+      if (i != null && i !== "") { const n = parseInt(i, 10); if (n >= 0 && n < mem.length) mem.splice(n, 1); } else user.memory = [];
+      try { await saveUser(user); } catch (_) {}
+      return json({ ok: true, memory: userMemory(user) });
+    }
+    if (path === "/api/memory/learn" && method === "POST") {
+      const user = await currentUser(context); if (!user) return json({ error: "authentication required" }, 401);
+      if (rateLimited("mem:" + user.id, 60, 60000)) return json({ error: "rate limited" }, 429);
+      let payload; try { payload = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const userText = String(payload.user || "").slice(0, 4000).trim();
+      const aiText = String(payload.assistant || "").slice(0, 2000).trim();
+      if (!userText) return json({ ok: true, added: 0 });
+      const added = await memoryLearn(user, userText, aiText);
+      return json({ ok: true, added, total: userMemory(user).length });
+    }
+
     if (path === "/api/max/quota" && method === "POST") {
       const user = await currentUser(context);
       if (!user) return json({ ok: false, error: "auth required" }, 401);
