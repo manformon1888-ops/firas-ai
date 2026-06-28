@@ -908,7 +908,7 @@ export default async (request, context) => {
       if (!user) return json({ error: "not authenticated" }, 401);
       if (method === "GET") {
         const meta = (await dbGet("chatMeta/" + user.id)) || {};
-        const list = Object.keys(meta).map((id) => ({ id, title: meta[id].title, updatedAt: meta[id].updatedAt })).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+        const list = Object.keys(meta).map((id) => ({ id, title: meta[id].title, updatedAt: meta[id].updatedAt, pinned: !!meta[id].pinned })).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
         return json(list);
       }
       if (method === "POST") {
@@ -916,9 +916,9 @@ export default async (request, context) => {
         const meta = (await dbGet("chatMeta/" + user.id)) || {};
         if (Object.keys(meta).length >= MAX_CHATS_PER_USER) return json({ error: "chat limit reached; delete some conversations" }, 409);
         const now = new Date().toISOString();
-        const chat = { id: crypto.randomUUID(), userId: user.id, title: String(b.title ?? "New chat").slice(0, 200) || "New chat", messages: sanitizeMessages(b.messages), createdAt: now, updatedAt: now };
+        const chat = { id: crypto.randomUUID(), userId: user.id, title: String(b.title ?? "New chat").slice(0, 200) || "New chat", messages: sanitizeMessages(b.messages), pinned: !!b.pinned, createdAt: now, updatedAt: now };
         await dbPut(`chats/${user.id}/${chat.id}`, chat);
-        await dbPut(`chatMeta/${user.id}/${chat.id}`, { title: chat.title, updatedAt: now });
+        await dbPut(`chatMeta/${user.id}/${chat.id}`, { title: chat.title, updatedAt: now, pinned: chat.pinned });
         return json({ id: chat.id, title: chat.title, createdAt: now, updatedAt: now }, 201);
       }
       return new Response("method not allowed", { status: 405 });
@@ -937,11 +937,13 @@ export default async (request, context) => {
         let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
         const chat = await dbGet(`chats/${user.id}/${id}`);
         if (!chat) return json({ error: "not found" }, 404);
-        if (typeof b.title === "string") chat.title = b.title.slice(0, 200);
-        if (Array.isArray(b.messages)) chat.messages = sanitizeMessages(b.messages);
-        chat.updatedAt = new Date().toISOString();
+        let touched = false;
+        if (typeof b.title === "string") { chat.title = b.title.slice(0, 200); touched = true; }
+        if (Array.isArray(b.messages)) { chat.messages = sanitizeMessages(b.messages); touched = true; }
+        if (typeof b.pinned === "boolean") chat.pinned = b.pinned; // pin toggle alone must not bump updatedAt
+        if (touched) chat.updatedAt = new Date().toISOString();
         await dbPut(`chats/${user.id}/${id}`, chat);
-        await dbPut(`chatMeta/${user.id}/${id}`, { title: chat.title, updatedAt: chat.updatedAt });
+        await dbPut(`chatMeta/${user.id}/${id}`, { title: chat.title, updatedAt: chat.updatedAt, pinned: !!chat.pinned });
         return json({ ok: true });
       }
       if (method === "DELETE") {

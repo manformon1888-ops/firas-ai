@@ -865,7 +865,7 @@ async function handleListChats(req, res) {
   const list = userChats(user.id)
     .slice()
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt }));
+    .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, pinned: !!c.pinned }));
   return sendJson(res, 200, list);
 }
 
@@ -893,6 +893,7 @@ async function handleCreateChat(req, res) {
     userId: user.id,
     title: String(body.title ?? "New chat").slice(0, 200) || "New chat",
     messages: sanitizeMessages(body.messages),
+    pinned: !!body.pinned,
     createdAt: now,
     updatedAt: now,
   };
@@ -915,9 +916,11 @@ async function handleUpdateChat(req, res, id) {
   const chat = DB.chats.find((c) => c.id === id && c.userId === user.id);
   if (!chat) return sendJson(res, 404, { error: "not found" });
 
-  if (typeof body.title === "string") chat.title = body.title.slice(0, 200);
-  if (Array.isArray(body.messages)) chat.messages = sanitizeMessages(body.messages);
-  chat.updatedAt = new Date().toISOString();
+  let touched = false;
+  if (typeof body.title === "string") { chat.title = body.title.slice(0, 200); touched = true; }
+  if (Array.isArray(body.messages)) { chat.messages = sanitizeMessages(body.messages); touched = true; }
+  if (typeof body.pinned === "boolean") chat.pinned = body.pinned; // pin toggle alone must NOT bump updatedAt (would reorder)
+  if (touched) chat.updatedAt = new Date().toISOString();
   await persist();
   return sendJson(res, 200, { ok: true });
 }

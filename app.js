@@ -141,6 +141,9 @@ const STR = {
     stop: "إيقاف",
     copyCode: "نسخ",
     rename: "إعادة تسمية",
+    pinned: "المثبّتة",
+    pin: "تثبيت",
+    unpin: "إلغاء التثبيت",
     delete: "حذف",
     deleteConfirm: "حذف هذه المحادثة؟",
     errorTitle: "تعذّر الاتصال.",
@@ -277,6 +280,9 @@ const STR = {
     stop: "Stop",
     copyCode: "Copy",
     rename: "Rename",
+    pinned: "Pinned",
+    pin: "Pin",
+    unpin: "Unpin",
     delete: "Delete",
     deleteConfirm: "Delete this conversation?",
     errorTitle: "Couldn't connect.",
@@ -408,6 +414,7 @@ const ICONS = {
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
   caret: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6Z"/><path d="M12 15v5"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
   alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>',
   download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
@@ -824,6 +831,7 @@ async function fetchChats() {
       id: c.id,
       serverId: c.id,
       title: c.title || t().newChat,
+      pinned: !!c.pinned,
       updatedAt: c.updatedAt ? new Date(c.updatedAt).getTime() : Date.now(),
       messages: null, // lazy-loaded on open
     }));
@@ -843,7 +851,7 @@ async function persistChat(chat) {
   // otherwise a concurrent finalize would fire a SECOND POST and duplicate the
   // conversation in history (the create is the only place serverId gets set).
   if (!chat.serverId && chat._creating) { try { await chat._creating; } catch (_) {} }
-  const payload = { title: chat.title, messages: serializeMessages(chat.messages) };
+  const payload = { title: chat.title, messages: serializeMessages(chat.messages), pinned: !!chat.pinned };
   try {
     if (chat.serverId) {
       await apiJson("/api/chats/" + encodeURIComponent(chat.serverId), {
@@ -1589,6 +1597,25 @@ function titleFrom(text) {
   return clean.length > 42 ? clean.slice(0, 42) + "…" : clean || t().newChat;
 }
 
+/** Ask the AI for a SHORT, fitting conversation title (2-5 words) and apply it while
+    the answer streams — fire-and-forget, NEVER clobbers a manual rename. */
+async function autoTitleChat(chat, userText) {
+  const txt = String(userText || "").trim();
+  if (!chat || !txt) return;
+  const before = chat.title; // detect a manual rename mid-flight
+  try {
+    const out = await callAgentText([
+      { role: "system", content: "Generate a SHORT, specific title (2–5 words, ≤40 chars) for a chat starting with the user's message. Use the SAME language as the message. Return ONLY the title — no surrounding quotes, no trailing punctuation, no 'Title:' prefix." },
+      { role: "user", content: txt.slice(0, 500) },
+    ], "pro");
+    let title = String(out || "").trim().replace(/^["'`«»]+|["'`«».]+$/g, "").replace(/^\s*title\s*[:：-]\s*/i, "").replace(/\s+/g, " ").slice(0, 60);
+    if (!title || chat.title !== before) return; // empty, or the user renamed meanwhile
+    chat.title = title;
+    renderHistory();
+    renameChatOnServer(chat, title);
+  } catch (_) { /* keep the truncated fallback title */ }
+}
+
 function deleteChat(id) {
   const chat = state.chats.find((c) => c.id === id);
   // Abort an in-flight stream for the chat being deleted.
@@ -2149,8 +2176,19 @@ function renderHistory() {
     return;
   }
 
+  // Pinned chats float to the top under their own label; the rest group by date.
+  const pinned = chats.filter((c) => c.pinned);
+  const rest = chats.filter((c) => !c.pinned);
+  if (pinned.length) {
+    const label = document.createElement("div");
+    label.className = "history__group-label history__group-label--pinned";
+    label.innerHTML = `<span class="pin-dot">${ICONS.pin}</span>${t().pinned}`;
+    list.appendChild(label);
+    pinned.forEach((c) => list.appendChild(chatItemEl(c)));
+  }
+
   const groups = {};
-  chats.forEach((c) => { (groups[groupKey(c.updatedAt)] ||= []).push(c); });
+  rest.forEach((c) => { (groups[groupKey(c.updatedAt)] ||= []).push(c); });
 
   GROUP_ORDER.forEach((g) => {
     if (!groups[g]) return;
@@ -2164,7 +2202,7 @@ function renderHistory() {
 
 function chatItemEl(chat) {
   const item = document.createElement("div");
-  item.className = "chat-item" + (chat.id === state.activeId ? " is-active" : "");
+  item.className = "chat-item" + (chat.id === state.activeId ? " is-active" : "") + (chat.pinned ? " is-pinned" : "");
   item.setAttribute("role", "button");
   item.tabIndex = 0;
 
@@ -2175,6 +2213,13 @@ function chatItemEl(chat) {
 
   const actions = document.createElement("div");
   actions.className = "chat-item__actions";
+
+  const pinBtn = document.createElement("button");
+  pinBtn.className = "chat-item__pin" + (chat.pinned ? " is-on" : "");
+  pinBtn.setAttribute("aria-label", chat.pinned ? t().unpin : t().pin);
+  pinBtn.title = chat.pinned ? t().unpin : t().pin;
+  pinBtn.innerHTML = ICONS.pin;
+  pinBtn.addEventListener("click", (e) => { e.stopPropagation(); togglePin(chat); });
 
   const renameBtn = document.createElement("button");
   renameBtn.setAttribute("aria-label", t().rename);
@@ -2191,13 +2236,26 @@ function chatItemEl(chat) {
     if (confirm(t().deleteConfirm)) deleteChat(chat.id);
   });
 
-  actions.append(renameBtn, delBtn);
+  actions.append(pinBtn, renameBtn, delBtn);
   item.append(title, actions);
 
   const open = () => { openChat(chat); };
   item.addEventListener("click", open);
   item.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
   return item;
+}
+
+/** Toggle a conversation's pinned state (optimistic; persisted to the server). */
+function togglePin(chat) {
+  if (!chat) return;
+  chat.pinned = !chat.pinned;
+  renderHistory();
+  const sid = chat.serverId;
+  if (sid) {
+    apiJson("/api/chats/" + encodeURIComponent(sid), { method: "PUT", body: JSON.stringify({ pinned: chat.pinned }) })
+      .catch(() => showToast(t().chatsSaveError));
+  }
+  // No serverId yet (brand-new chat): the pin rides along on the next persistChat.
 }
 
 function startRename(chat, item, titleEl) {
@@ -5579,7 +5637,8 @@ async function sendMessage() {
   chat.messages.push(userMsg);
   chat.updatedAt = Date.now();
   if (chat.messages.filter((m) => m.role === "user").length === 1) {
-    chat.title = titleFrom(text || attachLabel);
+    chat.title = titleFrom(text || attachLabel);        // instant fallback title
+    autoTitleChat(chat, text || attachLabel);           // upgrade to a smart AI title, concurrently
   }
 
   // Reset composer + clear attachment tray
