@@ -4754,31 +4754,34 @@ async function runBatchedFileDoc(userText, count, fmt, lang, tierKey, signal, on
   const ranges = [];
   for (let i = 0; i < Math.ceil(count / BATCH); i++) ranges.push({ start: i * BATCH + 1, end: Math.min((i + 1) * BATCH, count), cat: DEFAULT_ITEM_CATEGORIES[i % DEFAULT_ITEM_CATEGORIES.length] });
   onStage("content");
-  let done = 0;
   const PER_BATCH_MS = 120000;   // a single batch that hangs (slow Ollama) is given up on, not allowed to stall the whole run
-  const outs = await mapWithLimit(ranges, 5, async (r) => {
-    // Per-batch abort: its own 120s cap, but still forwards an overall stop/timeout.
+  // One batch with its own 120s cap that still forwards an overall Stop / 12-min timeout.
+  const genBatch = async (r) => {
     const ac = new AbortController();
     const fwd = () => { try { ac.abort(); } catch (_) {} };
     if (signal.aborted) ac.abort(); else signal.addEventListener("abort", fwd, { once: true });
     const to = setTimeout(() => { try { ac.abort(); } catch (_) {} }, PER_BATCH_MS);
-    let res = "";
     try {
-      res = (await callAgentText([
+      return (await callAgentText([
         { role: "system", content: batchAuthorSys(lang) },
         { role: "user", content: batchUserMsg(userText, r.start, r.end, r.cat, lang) },
       ], tierKey, ac.signal)).trim();
     } catch (e) {
       if (signal.aborted) throw e;     // overall Stop / 12-min timeout → propagate
-      res = "";                          // this batch errored or hit its 120s cap → skip it, keep going
-    } finally {
-      clearTimeout(to);
-      try { signal.removeEventListener("abort", fwd); } catch (_) {}
-    }
-    done++;
-    onStage((lang === "ar" ? "يكتب التكاملات… " : "Writing integrals… ") + Math.min(done * BATCH, count) + "/" + count);
-    return res;
-  });
+      return "";                         // this batch errored or hit its 120s cap → skip it
+    } finally { clearTimeout(to); try { signal.removeEventListener("abort", fwd); } catch (_) {} }
+  };
+  const progress = () => onStage((lang === "ar" ? "يكتب التكاملات… " : "Writing integrals… ") +
+    Math.min(outs.filter(Boolean).length * BATCH, count) + "/" + count);
+  // Pass 1 — all batches in parallel.
+  let done = 0;
+  const outs = new Array(ranges.length).fill("");
+  await mapWithLimit(ranges, 5, async (r, i) => { outs[i] = await genBatch(r); done++; progress(); });
+  // Pass 2 — retry the ones that hung/failed, so the workbook reaches its target.
+  const failedIdx = outs.map((o, i) => (o ? -1 : i)).filter((i) => i >= 0);
+  if (failedIdx.length && !signal.aborted) {
+    await mapWithLimit(failedIdx, 3, async (i) => { const res = await genBatch(ranges[i]); if (res) { outs[i] = res; progress(); } });
+  }
   onStage("assemble");
   const probs = [], ans = [];
   for (const out of outs) {
