@@ -329,7 +329,7 @@ async function memoryLearn(user, userText, aiText) {
     "Already known: " + (existing.length ? JSON.stringify(existing.slice(-40)) : "[]");
   const u = "USER: " + userText + (aiText ? "\nASSISTANT: " + aiText : "") + "\n\nJSON array of NEW durable user facts:";
   let facts = [];
-  for (let a = 0; a < 2 && !facts.length; a++) { const out = await llmComplete([{ role: "system", content: sys }, { role: "user", content: u }], 300); try { const mm = out.match(/\[[\s\S]*\]/); if (mm) facts = JSON.parse(mm[0]); } catch (_) {} }
+  for (let a = 0; a < 3 && !facts.length; a++) { const out = await llmComplete([{ role: "system", content: sys }, { role: "user", content: u }], 300); try { const mm = out.match(/\[[\s\S]*\]/); if (mm) facts = JSON.parse(mm[0]); } catch (_) {} }
   if (!Array.isArray(facts)) facts = [];
   let added = 0; const seen = new Set(existing.map((f) => String(f).toLowerCase().trim()));
   for (let f of facts) { f = String(f || "").trim(); if (!f || f.length > 140) continue; const k = f.toLowerCase(); if (seen.has(k)) continue; seen.add(k); existing.push(f); added++; }

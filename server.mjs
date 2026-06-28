@@ -1725,7 +1725,7 @@ async function handleMemoryLearn(req, res) {
   const u = "USER: " + userText + (aiText ? "\nASSISTANT: " + aiText : "") + "\n\nJSON array of NEW durable user facts:";
   const msgs = [{ role: "system", content: sys }, { role: "user", content: u }];
   let facts = [];
-  for (let attempt = 0; attempt < 2 && !facts.length; attempt++) { // pollinations can return an empty body — retry once
+  for (let attempt = 0; attempt < 3 && !facts.length; attempt++) { // pollinations can return an empty body — retry
     const out = await llmComplete(msgs, { maxTokens: 300 });
     try { const m = out.match(/\[[\s\S]*\]/); if (m) facts = JSON.parse(m[0]); } catch (_) {}
   }
