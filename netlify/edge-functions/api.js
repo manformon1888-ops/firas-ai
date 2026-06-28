@@ -88,6 +88,10 @@ const MAX_CHATS_PER_USER = 1000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const IMAGE_DAILY_LIMIT = Math.max(1, parseInt(env("IMAGE_DAILY_LIMIT") || "5", 10) || 5);
 const MAX_DAILY_LIMIT  = Math.max(1, parseInt(env("MAX_DAILY_LIMIT")  || "10", 10) || 10);
+// Admins (the owner) can publish site updates. Comma-separated emails; default the owner.
+const ADMIN_EMAILS = (env("ADMIN_EMAILS") || "firasnozad@gmail.com").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+function isAdmin(user) { return !!(user && user.email && ADMIN_EMAILS.includes(String(user.email).toLowerCase())); }
+const ANN_IMG_OK = (s) => typeof s === "string" && /^(data:image\/(png|jpe?g|webp);base64,|https?:\/\/)/.test(s);
 
 const TIERS = {
   mini:  { model: env("OLLAMA_MODEL_MINI")  || "gpt-oss:120b-cloud",     temperature: 0.5, num_predict: 16384 },
@@ -983,6 +987,39 @@ export default async (request, context) => {
       if (!user) return json({ ok: false, error: "auth required" }, 401);
       // Max is FREE & UNLIMITED for everyone now.
       return json({ ok: true, limit: 0, used: 0, remaining: -1 });
+    }
+
+    /* ---- site updates / announcements (admin publishes, all users see) ---- */
+    if (path === "/api/announcements" && method === "GET") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      const node = (await dbGet("announcements")) || {};
+      const list = Object.values(node).sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 50);
+      return json({ announcements: list, admin: isAdmin(user) });
+    }
+    if (path === "/api/announcements" && method === "POST") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (!isAdmin(user)) return json({ error: "admins only" }, 403);
+      let p; try { p = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const title = String(p.title || "").slice(0, 200).trim();
+      const body = String(p.body || "").slice(0, 4000).trim();
+      let image = String(p.image || "").trim();
+      if (image && !ANN_IMG_OK(image)) image = "";
+      if (image.length > 600000) return json({ error: "image too large" }, 413);
+      if (!title && !body && !image) return json({ error: "empty announcement" }, 400);
+      const id = "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      const item = { id, title, body, image, ts: Date.now(), by: user.name || "Firas" };
+      try { await dbPut("announcements/" + id, item); } catch (_) {}
+      return json({ ok: true, announcement: item });
+    }
+    if (path === "/api/announcements" && method === "DELETE") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (!isAdmin(user)) return json({ error: "admins only" }, 403);
+      const id = url.searchParams.get("id");
+      if (id) { try { await dbPut("announcements/" + id, null); } catch (_) {} }
+      return json({ ok: true });
     }
 
     /* ---- image generation proxy (charge on success by cid) ---- */

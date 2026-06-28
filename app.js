@@ -5622,6 +5622,147 @@ async function openMemoryViewer() {
   }));
 }
 
+/* ----------------------------------------------------------------------------
+   Site updates / notifications. The owner (admin) publishes updates (text +
+   image); every user sees them on every device (stored server-side / Firebase).
+---------------------------------------------------------------------------- */
+const LS_ANN_SEEN = "firas_ann_seen";
+let annCache = [];
+let annIsAdmin = false;
+
+async function fetchAnnouncements() {
+  try {
+    const d = await apiJson("/api/announcements");
+    annCache = (d && Array.isArray(d.announcements)) ? d.announcements : [];
+    annIsAdmin = !!(d && d.admin);
+  } catch (_) { annCache = []; annIsAdmin = false; }
+  updateNotifyBadge();
+}
+function annLastSeen() { const n = parseInt(localStorage.getItem(LS_ANN_SEEN) || "0", 10); return isNaN(n) ? 0 : n; }
+function updateNotifyBadge() {
+  if (!els.notifyBadge) return;
+  const seen = annLastSeen();
+  const unread = annCache.filter((a) => (a.ts || 0) > seen).length;
+  if (unread > 0) { els.notifyBadge.textContent = unread > 9 ? "9+" : String(unread); els.notifyBadge.hidden = false; }
+  else els.notifyBadge.hidden = true;
+}
+const annImgOk = (s) => typeof s === "string" && /^(data:image\/(png|jpe?g|webp);base64,|https?:\/\/)/.test(s);
+// Downscale a picked image to a small JPEG data URL so it stores/syncs cheaply.
+function fileToSmallDataURL(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\//.test(file.type)) return reject(new Error("not an image"));
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.width, h = img.height;
+      const m = maxDim || 1280;
+      if (w > m || h > m) { const r = Math.min(m / w, m / h); w = Math.round(w * r); h = Math.round(h * r); }
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      c.getContext("2d").drawImage(img, 0, 0, w, h);
+      try { resolve(c.toDataURL("image/jpeg", quality || 0.82)); } catch (e) { reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load failed")); };
+    img.src = url;
+  });
+}
+function annDate(ts, ar) {
+  try { return new Date(ts).toLocaleDateString(ar ? "ar" : "en", { year: "numeric", month: "short", day: "numeric" }); }
+  catch (_) { return ""; }
+}
+async function openAnnouncementsPanel() {
+  const ar = state.lang === "ar";
+  await fetchAnnouncements();
+  // Opening = read everything → clear the badge.
+  const newest = annCache.reduce((mx, a) => Math.max(mx, a.ts || 0), 0);
+  if (newest) localStorage.setItem(LS_ANN_SEEN, String(newest));
+  updateNotifyBadge();
+
+  const ov = document.createElement("div");
+  ov.className = "mem-overlay ann-overlay";
+  const close = () => { ov.classList.remove("is-open"); setTimeout(() => ov.remove(), 200); };
+
+  const adminForm = annIsAdmin ? (
+    '<form class="ann-form">' +
+      '<input class="ann-in ann-title" type="text" maxlength="200" placeholder="' + (ar ? "عنوان التحديث" : "Update title") + '">' +
+      '<textarea class="ann-in ann-body" rows="3" maxlength="4000" placeholder="' + (ar ? "نص التحديث…" : "What’s new…") + '"></textarea>' +
+      '<div class="ann-form-row">' +
+        '<label class="ann-img-btn">' + (ar ? "إضافة صورة" : "Add image") + '<input type="file" accept="image/*" class="ann-file" hidden></label>' +
+        '<span class="ann-img-name"></span>' +
+        '<button type="submit" class="ann-post">' + (ar ? "نشر" : "Publish") + '</button>' +
+      '</div>' +
+      '<img class="ann-img-preview" hidden alt="">' +
+    '</form>'
+  ) : "";
+
+  const items = annCache.length ? annCache.map((a) =>
+    '<li class="ann-item" data-id="' + String(a.id).replace(/[^A-Za-z0-9_-]/g, "") + '">' +
+      (annIsAdmin ? '<button class="ann-del" aria-label="delete" title="' + (ar ? "حذف" : "delete") + '">×</button>' : '') +
+      (a.title ? '<h4 class="ann-item-title"></h4>' : '') +
+      (annImgOk(a.image) ? '<img class="ann-item-img" alt="">' : '') +
+      (a.body ? '<p class="ann-item-body"></p>' : '') +
+      '<time class="ann-item-date">' + annDate(a.ts, ar) + '</time>' +
+    '</li>'
+  ).join("") : '<li class="mem-empty">' + (ar ? "لا توجد تحديثات بعد." : "No updates yet.") + '</li>';
+
+  ov.innerHTML =
+    '<div class="mem-card ann-card" role="dialog" aria-modal="true">' +
+      '<div class="mem-head"><div style="flex:1">' +
+        '<h3>' + (ar ? "تحديثات فِراس AI" : "Firas AI updates") + '</h3>' +
+        '<p>' + (ar ? "آخر أخبار وتحديثات المنصّة." : "Latest platform news & updates.") + '</p></div>' +
+        '<button class="mem-x" aria-label="' + (ar ? "إغلاق" : "close") + '"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>' +
+      '</div>' +
+      adminForm +
+      '<ul class="mem-list ann-list">' + items + '</ul>' +
+    '</div>';
+
+  // XSS-safe: inject text + validated image src via the DOM, not the HTML string.
+  ov.querySelectorAll(".ann-item").forEach((li) => {
+    const a = annCache.find((x) => String(x.id).replace(/[^A-Za-z0-9_-]/g, "") === li.getAttribute("data-id"));
+    if (!a) return;
+    const tEl = li.querySelector(".ann-item-title"); if (tEl) tEl.textContent = a.title || "";
+    const bEl = li.querySelector(".ann-item-body"); if (bEl) bEl.textContent = a.body || "";
+    const iEl = li.querySelector(".ann-item-img"); if (iEl && annImgOk(a.image)) iEl.src = a.image;
+  });
+
+  document.body.appendChild(ov);
+  setTimeout(() => ov.classList.add("is-open"), 20);
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  ov.querySelector(".mem-x").addEventListener("click", close);
+
+  if (annIsAdmin) {
+    let pendingImg = "";
+    const fileInput = ov.querySelector(".ann-file");
+    const imgName = ov.querySelector(".ann-img-name");
+    const preview = ov.querySelector(".ann-img-preview");
+    if (fileInput) fileInput.addEventListener("change", async (e) => {
+      const f = e.target.files && e.target.files[0]; if (!f) return;
+      try { pendingImg = await fileToSmallDataURL(f, 1280, 0.82); if (preview) { preview.src = pendingImg; preview.hidden = false; } if (imgName) imgName.textContent = f.name; }
+      catch (_) { showToast(ar ? "تعذّر تحميل الصورة" : "Couldn't load image"); }
+    });
+    const form = ov.querySelector(".ann-form");
+    if (form) form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const title = ov.querySelector(".ann-title").value.trim();
+      const bodyTxt = ov.querySelector(".ann-body").value.trim();
+      if (!title && !bodyTxt && !pendingImg) { showToast(ar ? "اكتب شيئاً أولاً" : "Add some content first"); return; }
+      const btn = ov.querySelector(".ann-post"); if (btn) { btn.disabled = true; btn.textContent = ar ? "يُنشر…" : "Publishing…"; }
+      try {
+        await apiJson("/api/announcements", { method: "POST", body: JSON.stringify({ title, body: bodyTxt, image: pendingImg }) });
+        showToast(ar ? "تم النشر ✓" : "Published ✓");
+        close(); openAnnouncementsPanel();
+      } catch (_) { showToast(ar ? "فشل النشر" : "Publish failed"); if (btn) { btn.disabled = false; btn.textContent = ar ? "نشر" : "Publish"; } }
+    });
+    ov.querySelectorAll(".ann-del").forEach((b) => b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = b.closest(".ann-item").getAttribute("data-id");
+      if (!window.confirm(ar ? "حذف هذا التحديث؟" : "Delete this update?")) return;
+      try { await apiJson("/api/announcements?id=" + encodeURIComponent(id), { method: "DELETE" }); } catch (_) {}
+      close(); openAnnouncementsPanel();
+    }));
+  }
+}
+
 /**
  * Regenerate the assistant message at `index` (optionally with a different
  * tier — used by the Ultra upsell). Truncates everything after the preceding
@@ -5873,6 +6014,7 @@ async function bootApp(user) {
   autoGrow();
   updateSendState();
   els.input.focus();
+  fetchAnnouncements(); // populate the updates badge (fire-and-forget)
 }
 
 /* ----------------------------------------------------------------------------
@@ -6032,7 +6174,8 @@ function cacheEls() {
   els.accountName = $("#accountName");
   els.accountAvatar = $("#accountAvatar");
   els.logoutBtn = $("#logoutBtn");
-  els.memoryBtn = $("#memoryBtn");
+  els.notifyBtn = $("#notifyBtn");
+  els.notifyBadge = $("#notifyBadge");
 }
 
 function wireEvents() {
@@ -6069,7 +6212,8 @@ function wireEvents() {
 
   // Logout
   els.logoutBtn.addEventListener("click", logout);
-  if (els.memoryBtn) els.memoryBtn.addEventListener("click", openMemoryViewer);
+  // Notifications / site updates
+  if (els.notifyBtn) els.notifyBtn.addEventListener("click", openAnnouncementsPanel);
 
   // Search
   els.searchInput.addEventListener("input", (e) => { state.search = e.target.value; renderHistory(); });

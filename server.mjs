@@ -1848,6 +1848,49 @@ async function handleMemoryClear(req, res) {
   return sendJson(res, 200, { ok: true, memory: userMemory(user) });
 }
 
+/* ============================================================================
+   SITE UPDATES / ANNOUNCEMENTS — the owner (admin) publishes updates (text +
+   image); every user sees them on every device. Stored in DB (file / Firebase).
+   ========================================================================== */
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "firasnozad@gmail.com").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+function isAdmin(user) { return !!(user && user.email && ADMIN_EMAILS.includes(String(user.email).toLowerCase())); }
+function announcementsList() { if (!Array.isArray(DB.announcements)) DB.announcements = []; return DB.announcements; }
+const ANN_IMG_OK = (s) => typeof s === "string" && /^(data:image\/(png|jpe?g|webp);base64,|https?:\/\/)/.test(s);
+function handleAnnouncementsGet(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "authentication required" });
+  const list = announcementsList().slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 50);
+  return sendJson(res, 200, { announcements: list, admin: isAdmin(user) });
+}
+async function handleAnnouncementsPost(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "authentication required" });
+  if (!isAdmin(user)) return sendJson(res, 403, { error: "admins only" });
+  let p; try { p = JSON.parse((await readBody(req, CHAT_BODY_LIMIT)) || "{}"); } catch { return sendJson(res, 400, { error: "invalid JSON" }); }
+  const title = String(p.title || "").slice(0, 200).trim();
+  const body = String(p.body || "").slice(0, 4000).trim();
+  let image = String(p.image || "").trim();
+  if (image && !ANN_IMG_OK(image)) image = "";
+  if (image.length > 600000) return sendJson(res, 413, { error: "image too large" });
+  if (!title && !body && !image) return sendJson(res, 400, { error: "empty announcement" });
+  const item = { id: "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), title, body, image, ts: Date.now(), by: user.name || "Firas" };
+  const list = announcementsList();
+  list.unshift(item);
+  while (list.length > 100) list.pop();
+  await persist();
+  return sendJson(res, 200, { ok: true, announcement: item });
+}
+async function handleAnnouncementsDelete(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "authentication required" });
+  if (!isAdmin(user)) return sendJson(res, 403, { error: "admins only" });
+  const id = new URL(req.url, "http://localhost").searchParams.get("id");
+  const list = announcementsList();
+  const i = list.findIndex((a) => a.id === id);
+  if (i >= 0) { list.splice(i, 1); await persist(); }
+  return sendJson(res, 200, { ok: true });
+}
+
 async function handleChat(req, res) {
   // AUTH REQUIRED.
   const user = currentUser(req);
@@ -2021,6 +2064,9 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/memory" && method === "GET") return handleMemoryGet(req, res);
     if (route === "/api/memory" && method === "DELETE") return await handleMemoryClear(req, res);
     if (route === "/api/memory/learn" && method === "POST") return await handleMemoryLearn(req, res);
+    if (route === "/api/announcements" && method === "GET") return handleAnnouncementsGet(req, res);
+    if (route === "/api/announcements" && method === "POST") return await handleAnnouncementsPost(req, res);
+    if (route === "/api/announcements" && method === "DELETE") return await handleAnnouncementsDelete(req, res);
 
     // ---- Build version (lets an open tab auto-reload when code changes) ----
     if (route === "/api/version" && method === "GET") return handleVersion(req, res);
