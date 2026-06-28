@@ -1684,19 +1684,38 @@ function userMemory(user) { if (!Array.isArray(user.memory)) user.memory = []; r
 function memoryBlock(user) {
   const m = userMemory(user);
   if (!m.length) return "";
-  return "PERSISTENT USER MEMORY — facts you have learned about THIS specific user across past conversations:\n" +
+  return "PERSISTENT MEMORY — VERIFIED facts about the user you are talking to RIGHT NOW (saved from past chats). Treat them as TRUE:\n" +
     m.map((f) => "- " + f).join("\n") +
-    "\nUse these naturally to personalize your replies (their name, language, preferences, ongoing work). " +
-    "Do NOT recite this list or announce 'I remember'; just use it. If the user states something that contradicts a fact, trust the newest statement.";
+    "\nUse them to personalize naturally. When the user ASKS what you know/remember about them, answer using EXACTLY these facts and nothing invented — keep their exact name, country, city, age and numbers as written here; never substitute a different place or guess a value. If the user now says something that contradicts a fact, trust their newest statement.";
 }
-// Non-streaming completion via the keyless pollinations engine. Returns text or "".
+// Non-streaming completion for memory extraction. Prefers the STRONG Ollama model
+// (accurate, deterministic at temperature 0 — no hallucination) and falls back to the
+// keyless pollinations engine. Returns text or "".
 async function llmComplete(messages, opts) {
   opts = opts || {};
+  const tok = opts.maxTokens || 1500; // room for a reasoning model to think AND answer
+  const temp = opts.temperature != null ? opts.temperature : 0;
+  // 1) Ollama (strong, accurate) — gpt-oss reasoning model. num_predict must be large
+  // enough that thinking + the JSON answer both fit, or .content comes back empty.
+  try {
+    const r = await fetch(OLLAMA_CHAT_URL, {
+      method: "POST",
+      headers: ollamaHeaders(),
+      body: JSON.stringify({ model: (TIERS.pro && TIERS.pro.model) || "gpt-oss:120b-cloud", messages, stream: false, options: { temperature: temp, num_predict: tok } }),
+      signal: opts.signal,
+    });
+    if (r.ok) {
+      const j = await r.json().catch(() => null);
+      const c = j && j.message && j.message.content;
+      if (typeof c === "string" && c.trim()) return c;
+    }
+  } catch (_) {}
+  // 2) Keyless pollinations fallback.
   try {
     const r = await fetch(FALLBACK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: FALLBACK_MODEL, messages, stream: false, max_tokens: opts.maxTokens || 400 }),
+      body: JSON.stringify({ model: FALLBACK_MODEL, messages, stream: false, temperature: temp, max_tokens: tok }),
       signal: opts.signal,
     });
     if (!r.ok) return "";
@@ -1716,19 +1735,23 @@ async function handleMemoryLearn(req, res) {
   if (!userText) return sendJson(res, 200, { ok: true, added: 0 });
   const existing = userMemory(user);
   const sys =
-    "You maintain a long-term memory of facts about a USER for an assistant. From the exchange, extract any NEW, DURABLE facts " +
-    "about the USER worth remembering across sessions: their name, location/country, job or role, the language they use, stable " +
-    "preferences, ongoing projects or goals, interests, and important personal details they reveal. " +
-    "Return ONLY a compact JSON array of short strings (each <= 12 words), facts about the USER only — never about the assistant, " +
-    "never general knowledge, never one-off task instructions. No duplicates of already-known facts. If nothing durable, return []. " +
-    "Already known: " + (existing.length ? JSON.stringify(existing.slice(-40)) : "[]");
-  const u = "USER: " + userText + (aiText ? "\nASSISTANT: " + aiText : "") + "\n\nJSON array of NEW durable user facts:";
+    "You extract durable facts about a USER. Preserve name, age, country, city EXACTLY as stated " +
+    "(from Iraq -> 'From Iraq'; age 16 -> 'Age: 16'; never change or guess). " +
+    "Capture name, age, country, job, language, likes, projects, goals, interests, and any personal detail. " +
+    "Return ONLY a JSON array of short strings. If nothing, []." +
+    (existing.length ? " Skip facts already in: " + JSON.stringify(existing.slice(-50)) : "");
+  const u = 'The USER said: "' + userText + '". Return JSON array of facts:';
   const msgs = [{ role: "system", content: sys }, { role: "user", content: u }];
-  let facts = [];
-  for (let attempt = 0; attempt < 3 && !facts.length; attempt++) { // pollinations can return an empty body — retry
-    const out = await llmComplete(msgs, { maxTokens: 300 });
-    try { const m = out.match(/\[[\s\S]*\]/); if (m) facts = JSON.parse(m[0]); } catch (_) {}
+  // The cloud model is non-deterministic and often returns PARTIAL facts on any single
+  // call; run a few passes and UNION the results so we capture the full set.
+  const collected = new Map();
+  const temps = [0, 0.5, 0.8]; // vary temperature so passes differ (defeats temp-0 caching) → fuller union
+  for (let attempt = 0; attempt < temps.length; attempt++) {
+    const out = await llmComplete(msgs, { maxTokens: 1500, temperature: temps[attempt] });
+    let arr = []; try { const m = out.match(/\[[\s\S]*\]/); if (m) arr = JSON.parse(m[0]); } catch (_) {}
+    if (Array.isArray(arr)) for (const f of arr) { const s = String(f || "").trim(); if (s && s.length <= 140) { const k = s.toLowerCase(); if (!collected.has(k)) collected.set(k, s); } }
   }
+  let facts = [...collected.values()];
   if (!Array.isArray(facts)) facts = [];
   let added = 0;
   const seen = new Set(existing.map((f) => String(f).toLowerCase().trim()));

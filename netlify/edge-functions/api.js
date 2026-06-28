@@ -304,14 +304,22 @@ function userMemory(user) { if (!Array.isArray(user.memory)) user.memory = []; r
 function memoryBlock(user) {
   const m = userMemory(user);
   if (!m.length) return "";
-  return "PERSISTENT USER MEMORY — facts you have learned about THIS specific user across past conversations:\n" +
+  return "PERSISTENT MEMORY — VERIFIED facts about the user you are talking to RIGHT NOW (saved from past chats). Treat them as TRUE:\n" +
     m.map((f) => "- " + f).join("\n") +
-    "\nUse these naturally to personalize your replies (their name, language, preferences, ongoing work). " +
-    "Do NOT recite this list or announce 'I remember'; just use it. If the user states something that contradicts a fact, trust the newest statement.";
+    "\nUse them to personalize naturally. When the user ASKS what you know/remember about them, answer using EXACTLY these facts and nothing invented — keep their exact name, country, city, age and numbers as written here; never substitute a different place or guess a value. If the user now says something that contradicts a fact, trust their newest statement.";
 }
-async function llmComplete(messages, maxTokens) {
+// Strong, accurate completion: Ollama (gpt-oss, temperature-controlled) → pollinations.
+async function llmComplete(messages, maxTokens, temperature) {
+  const tok = maxTokens || 1500;
+  const temp = temperature != null ? temperature : 0;
   try {
-    const r = await fetch(FALLBACK_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: FALLBACK_MODEL, messages, stream: false, max_tokens: maxTokens || 300 }) });
+    const headers = { "content-type": "application/json" };
+    if (OLLAMA_API_KEY) headers["Authorization"] = "Bearer " + OLLAMA_API_KEY;
+    const r = await fetch(OLLAMA_CHAT_URL, { method: "POST", headers, body: JSON.stringify({ model: (TIERS.pro && TIERS.pro.model) || "gpt-oss:120b-cloud", messages, stream: false, options: { temperature: temp, num_predict: tok } }) });
+    if (r.ok) { const j = await r.json().catch(() => null); const c = j && j.message && j.message.content; if (typeof c === "string" && c.trim()) return c; }
+  } catch (_) {}
+  try {
+    const r = await fetch(FALLBACK_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: FALLBACK_MODEL, messages, stream: false, temperature: temp, max_tokens: tok }) });
     if (!r.ok) return "";
     const j = await r.json().catch(() => null);
     const c = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
@@ -321,18 +329,22 @@ async function llmComplete(messages, maxTokens) {
 async function memoryLearn(user, userText, aiText) {
   const existing = userMemory(user);
   const sys =
-    "You maintain a long-term memory of facts about a USER for an assistant. From the exchange, extract any NEW, DURABLE facts " +
-    "about the USER worth remembering across sessions: their name, location/country, job or role, the language they use, stable " +
-    "preferences, ongoing projects or goals, interests, and important personal details they reveal. " +
-    "Return ONLY a compact JSON array of short strings (each <= 12 words), facts about the USER only — never about the assistant, " +
-    "never general knowledge, never one-off task instructions. No duplicates of already-known facts. If nothing durable, return []. " +
-    "Already known: " + (existing.length ? JSON.stringify(existing.slice(-40)) : "[]");
-  const u = "USER: " + userText + (aiText ? "\nASSISTANT: " + aiText : "") + "\n\nJSON array of NEW durable user facts:";
-  let facts = [];
-  for (let a = 0; a < 3 && !facts.length; a++) { const out = await llmComplete([{ role: "system", content: sys }, { role: "user", content: u }], 300); try { const mm = out.match(/\[[\s\S]*\]/); if (mm) facts = JSON.parse(mm[0]); } catch (_) {} }
-  if (!Array.isArray(facts)) facts = [];
+    "You extract durable facts about a USER. Preserve name, age, country, city EXACTLY as stated " +
+    "(from Iraq -> 'From Iraq'; age 16 -> 'Age: 16'; never change or guess). " +
+    "Capture name, age, country, job, language, likes, projects, goals, interests, and any personal detail. " +
+    "Return ONLY a JSON array of short strings. If nothing, []." +
+    (existing.length ? " Skip facts already in: " + JSON.stringify(existing.slice(-50)) : "");
+  const u = 'The USER said: "' + userText + '". Return JSON array of facts:';
+  const msgs = [{ role: "system", content: sys }, { role: "user", content: u }];
+  const collected = new Map();
+  const temps = [0, 0.5, 0.8]; // vary temperature so passes differ → fuller union
+  for (let a = 0; a < temps.length; a++) {
+    const out = await llmComplete(msgs, 1500, temps[a]);
+    let arr = []; try { const mm = out.match(/\[[\s\S]*\]/); if (mm) arr = JSON.parse(mm[0]); } catch (_) {}
+    if (Array.isArray(arr)) for (const f of arr) { const s = String(f || "").trim(); if (s && s.length <= 140) { const k = s.toLowerCase(); if (!collected.has(k)) collected.set(k, s); } }
+  }
   let added = 0; const seen = new Set(existing.map((f) => String(f).toLowerCase().trim()));
-  for (let f of facts) { f = String(f || "").trim(); if (!f || f.length > 140) continue; const k = f.toLowerCase(); if (seen.has(k)) continue; seen.add(k); existing.push(f); added++; }
+  for (const s of collected.values()) { const k = s.toLowerCase(); if (seen.has(k)) continue; seen.add(k); existing.push(s); added++; }
   if (added) { while (existing.length > MEMORY_MAX) existing.shift(); try { await saveUser(user); } catch (_) {} }
   return added;
 }
