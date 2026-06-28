@@ -1138,7 +1138,7 @@ async function generateImageGemini(prompt) {
       body: JSON.stringify({ contents: [{ parts: [{ text: String(prompt || "").slice(0, 4000) }] }] }),
       signal: ac.signal,
     });
-    if (!r.ok) return null;
+    if (!r.ok) { console.error("[firas] Gemini image HTTP " + r.status + ": " + (await r.text().catch(() => "")).slice(0, 160)); return null; }
     const j = await r.json();
     const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
     if (Array.isArray(parts)) {
@@ -1176,11 +1176,13 @@ async function handleImage(req, res) {
   try {
     const gem = await generateImageGemini(prompt);
     if (gem && gem.buf && gem.buf.length) {
+      console.log("[firas] image served by Gemini (" + GEMINI_IMAGE_MODEL + ")");
       if (isNew) { user.imgCids.push(cid); persist(); }
       res.writeHead(200, { "Content-Type": gem.mime, "Cache-Control": "public, max-age=86400" });
       return res.end(gem.buf);
     }
-  } catch (_) { /* fall through to pollinations */ }
+    if (GEMINI_API_KEY) console.error("[firas] Gemini returned no image → pollinations fallback");
+  } catch (_) { if (GEMINI_API_KEY) console.error("[firas] Gemini error → pollinations fallback"); }
   // 2) Keyless pollinations (flux) with LLM prompt-enhance + private/no-feed for the
   // best free quality (enhance≈doubles detail; private+nofeed keep it off the feed).
   const src = "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
