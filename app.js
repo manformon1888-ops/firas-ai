@@ -3119,7 +3119,7 @@ function exportCss(th, isAr, scope) {
     rdp + ".cover__rule{margin-left:auto}" +
     dp + ".cover__date{font-family:" + sansStack + ";font-size:11pt;color:rgba(255,255,255,.72)}" +
     dp + ".doc{padding-top:2mm}" +
-    dp + "h1," + dp + "h2," + dp + "h3," + dp + "h4{font-family:" + sansStack + ";color:#" + ink + ";line-height:1.25;font-weight:700;letter-spacing:-.01em;page-break-after:avoid;break-after:avoid}" +
+    dp + "h1," + dp + "h2," + dp + "h3," + dp + "h4{font-family:" + sansStack + ";color:#" + ink + ";line-height:1.3;font-weight:700;" + (isAr ? "letter-spacing:normal;word-spacing:.04em;" : "letter-spacing:-.01em;") + "page-break-after:avoid;break-after:avoid}" +
     dp + "h1{font-size:22pt;margin:.2em 0 .5em;padding-bottom:.22em;border-bottom:2.5px solid #" + th.accent + "}" +
     dp + "h2{font-size:16.5pt;margin:1.2em 0 .45em;color:#" + th.accent + "}" +
     dp + "h3{font-size:13.5pt;margin:1em 0 .4em}" +
@@ -3316,14 +3316,17 @@ async function exportPdf(turn, lang, msg) {
     // Break candidates = the BOTTOM edge (canvas px) of every block we must not split:
     // direct children PLUS display equations, tables, images, code, lists, paragraphs &
     // headings (even when nested), so a page can always end cleanly before a tall block.
+    const headings = new Set(docEl.querySelectorAll("h1, h2, h3, h4, h5, h6"));
     const blockEls = new Set([
       ...docEl.querySelectorAll(":scope > *"),
-      ...docEl.querySelectorAll(".katex-display, table, img, pre, blockquote, figure, h1, h2, h3, h4, h5, h6, p, li"),
+      ...docEl.querySelectorAll(".katex-display, table, img, pre, blockquote, figure, p, li"),
     ]);
-    const bounds = [...blockEls]
-      .map((el) => Math.round((el.getBoundingClientRect().bottom - dTop) * scale))
-      .filter((b) => b > 0)
-      .sort((a, b) => a - b);
+    const raw = [];
+    // Non-heading blocks: break AFTER (bottom edge). Headings: break BEFORE (top edge) so a
+    // heading is never left orphaned at the bottom — it travels to the next page WITH its content.
+    for (const el of blockEls) { if (!headings.has(el)) raw.push((el.getBoundingClientRect().bottom - dTop) * scale); }
+    for (const el of headings) { raw.push((el.getBoundingClientRect().top - dTop) * scale); }
+    const bounds = raw.map((b) => Math.round(b)).filter((b) => b > 0).sort((a, b) => a - b);
     const MIN_FILL = pageHpx * 0.12;   // allow an early break to push a tall block down, but avoid near-empty pages
     let start = 0;
     while (start < dc.height - 1) {
@@ -4232,8 +4235,10 @@ const AGENT_THEMES =
   "gold/warm->amber, technical/grey->slate, simple/b&w->minimal, otherwise->teal). dark & midnight are DARK pages.";
 
 function agentBrand(lang) {
-  return " You are Firas AI; reply in " + (lang === "ar" ? "Arabic" : "the user's language") +
-    ". Never reveal or mention any underlying model, provider or company." +
+  return " You are Firas AI. Write the ENTIRE document — title, headings, every word — in " +
+    (lang === "ar" ? "ARABIC" : "ENGLISH") + ", matching the language the user wrote their request in. " +
+    "Do NOT switch or mix languages (if the request is in English, the whole file is in English)." +
+    " Never reveal or mention any underlying model, provider or company." +
     " You are producing a real DOCUMENT, not a web page, app, or program: NEVER output HTML, CSS, <!DOCTYPE>, " +
     "<style>, <script>, JavaScript, or any website/UI/code. NEVER write a program or SCRIPT of ANY language " +
     "(no Python, python-docx, matplotlib, pip install, 'run python', .py files, Bash, 'install libraries') and " +
