@@ -116,8 +116,13 @@
           <span class="auth__label" data-i18n="authPassword">كلمة المرور</span>
           <input type="password" id="authPassword" name="password" autocomplete="current-password" required />
         </label>
+        <label class="auth__field" id="authCodeField" hidden>
+          <span class="auth__label" id="authCodeLabel"></span>
+          <input type="text" id="authCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" />
+        </label>
 
         <button type="button" class="auth__forgot" id="authForgot" hidden></button>
+        <button type="button" class="auth__forgot" id="authResend" hidden></button>
 
         <p class="auth__error" id="authError" role="alert" hidden></p>
         <p class="auth__note" id="authNote" role="status" hidden></p>

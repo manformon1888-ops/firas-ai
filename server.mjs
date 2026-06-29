@@ -711,20 +711,52 @@ async function handleSignup(req, res) {
   if (password.length > 200) return sendJson(res, 400, { error: "password is too long" });
   if (DB.users.some((u) => u.email === email)) return sendJson(res, 409, { error: "email already registered" });
 
+  // Do NOT create the account yet — stash a PENDING signup and email a 6-digit code.
+  // The real user is created only after the code is verified (handleVerifySignup).
   const { salt, passHash } = await hashPassword(password);
-  const user = {
-    id: crypto.randomUUID(),
-    name,
-    email,
-    passHash,
-    salt,
-    createdAt: new Date().toISOString(),
-  };
-  DB.users.push(user);
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  if (!DB.pending) DB.pending = {};
+  DB.pending[email] = { name, email, passHash, salt, codeHash: sha256hex(code), exp: Date.now() + VERIFY_TTL_MS, tries: 0 };
   await persist();
+  const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
+  if (!sent) console.log("[firas] signup verification code for " + email + " = " + code + " (email not configured)");
+  return sendJson(res, 200, { ok: true, pending: true, email });
+}
 
+// Verify the emailed code → create the real account + sign in.
+async function handleVerifySignup(req, res) {
+  if (rateLimited("verify:" + clientIp(req), 15, 60_000)) return sendJson(res, 429, { error: "too many attempts, please wait a minute" });
+  const body = await readJson(req, 100_000);
+  const email = String((body && body.email) || "").trim().toLowerCase();
+  const code = String((body && body.code) || "").trim();
+  const p = DB.pending && DB.pending[email];
+  if (!p || Date.now() > p.exp) { if (p) { delete DB.pending[email]; await persist(); } return sendJson(res, 400, { error: "الرمز غير صالح أو منتهي — اطلب رمزاً جديداً" }); }
+  p.tries = (p.tries || 0) + 1;
+  if (p.tries > 6) { delete DB.pending[email]; await persist(); return sendJson(res, 400, { error: "محاولات كثيرة — أعد التسجيل" }); }
+  if (sha256hex(code) !== p.codeHash) { await persist(); return sendJson(res, 400, { error: "الرمز غير صحيح" }); }
+  if (DB.users.some((u) => u.email === email)) { delete DB.pending[email]; await persist(); return sendJson(res, 409, { error: "email already registered" }); }
+  const user = { id: crypto.randomUUID(), name: p.name, email: p.email, passHash: p.passHash, salt: p.salt, emailVerified: true, createdAt: new Date().toISOString() };
+  DB.users.push(user);
+  delete DB.pending[email];
+  await persist();
   setSessionCookie(res, user.id, req);
-  return sendJson(res, 200, { user: publicUser(user) });
+  return sendJson(res, 200, { ok: true, user: publicUser(user) });
+}
+
+// Re-send a fresh signup code for a pending email.
+async function handleResendCode(req, res) {
+  if (rateLimited("resend:" + clientIp(req), 4, 60_000)) return sendJson(res, 429, { error: "too many requests, wait a minute" });
+  const body = await readJson(req, 100_000);
+  const email = String((body && body.email) || "").trim().toLowerCase();
+  const p = DB.pending && DB.pending[email];
+  if (p) {
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+    p.codeHash = sha256hex(code); p.exp = Date.now() + VERIFY_TTL_MS; p.tries = 0;
+    await persist();
+    const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
+    if (!sent) console.log("[firas] (resend) signup code for " + email + " = " + code + " (email not configured)");
+  }
+  return sendJson(res, 200, { ok: true });
 }
 
 async function handleLogin(req, res) {
@@ -770,6 +802,14 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const RESEND_FROM    = process.env.RESEND_FROM || "Firas AI <onboarding@resend.dev>";
 const RESET_APP_URL  = (process.env.APP_URL || "").replace(/\/+$/, "");
 const RESET_TTL_MS   = 30 * 60_000;
+const VERIFY_TTL_MS  = 15 * 60_000; // signup email-verification code lifetime
+function verifyEmailHtml(code) {
+  return '<div style="font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:480px">' +
+    '<h2 style="margin:0 0 10px">تأكيد حسابك — Firas AI</h2>' +
+    '<p>رمز التحقق الخاص بك (صالح 15 دقيقة):</p>' +
+    '<p style="font-size:32px;font-weight:800;letter-spacing:8px;color:#237A68;margin:6px 0">' + code + '</p>' +
+    '<p style="color:#666;font-size:13px">اكتب هذا الرمز في صفحة التسجيل لإكمال إنشاء حسابك. إذا لم تطلب هذا، تجاهل الرسالة.</p></div>';
+}
 function sha256hex(s) { return crypto.createHash("sha256").update(String(s)).digest("hex"); }
 async function sendEmail(to, subject, html) {
   if (!RESEND_API_KEY) return false;
@@ -2156,6 +2196,8 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Auth ----
     if (route === "/api/auth/signup" && method === "POST") return await handleSignup(req, res);
+    if (route === "/api/auth/verify-signup" && method === "POST") return await handleVerifySignup(req, res);
+    if (route === "/api/auth/resend-code" && method === "POST") return await handleResendCode(req, res);
     if (route === "/api/auth/login" && method === "POST") return await handleLogin(req, res);
     if (route === "/api/auth/firebase" && method === "POST") return await handleFirebaseAuth(req, res);
     if (route === "/api/auth/forgot" && method === "POST") return await handleForgot(req, res);

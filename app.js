@@ -257,6 +257,14 @@ const STR = {
     authNewPassword: "كلمة المرور الجديدة",
     authResetDone: "تم تغيير كلمة المرور — سجّل الدخول الآن.",
     authResetInvalid: "الرابط غير صالح أو منتهي. اطلب رابطاً جديداً.",
+    authVerifyTitle: "تأكيد بريدك الإلكتروني",
+    authVerifySubtitle: "أدخل الرمز المُرسَل إلى",
+    authVerifyBtn: "تأكيد",
+    authCode: "رمز التحقق (٦ أرقام)",
+    authCodeInvalid: "أدخل رمزاً مكوّناً من ٦ أرقام.",
+    authCodeWrong: "الرمز غير صحيح أو منتهي.",
+    authResend: "إعادة إرسال الرمز",
+    authCodeResent: "أرسلنا رمزاً جديداً إلى بريدك.",
     authGoogle: "المتابعة عبر Google",
     authOr: "أو",
     authGoogleError: "تعذّر تسجيل الدخول عبر Google. حاول مرة أخرى.",
@@ -405,6 +413,14 @@ const STR = {
     authNewPassword: "New password",
     authResetDone: "Password changed — sign in now.",
     authResetInvalid: "The link is invalid or expired. Request a new one.",
+    authVerifyTitle: "Verify your email",
+    authVerifySubtitle: "Enter the code sent to",
+    authVerifyBtn: "Verify",
+    authCode: "Verification code (6 digits)",
+    authCodeInvalid: "Enter a 6-digit code.",
+    authCodeWrong: "Wrong or expired code.",
+    authResend: "Resend code",
+    authCodeResent: "We sent a new code to your email.",
     authGoogle: "Continue with Google",
     authOr: "or",
     authGoogleError: "Couldn't sign in with Google. Please try again.",
@@ -5981,14 +5997,38 @@ function cacheAuthEls() {
   authEls.forgot = $("#authForgot");
   authEls.note = $("#authNote");
   authEls.emailField = authEls.email ? authEls.email.closest(".auth__field") : null;
+  authEls.passwordField = authEls.password ? authEls.password.closest(".auth__field") : null;
   authEls.passwordLabel = authEls.password ? authEls.password.closest(".auth__field").querySelector(".auth__label") : null;
   authEls.switchRow = $(".auth__switch");
+  authEls.codeField = $("#authCodeField");
+  authEls.code = $("#authCode");
+  authEls.codeLabel = $("#authCodeLabel");
+  authEls.resend = $("#authResend");
 }
 
 function renderAuthCopy() {
   const isReset = authMode === "reset";
   const isSignup = authMode === "signup";
   if (authEls.note) authEls.note.hidden = true;
+
+  // VERIFY MODE: after signup, a single 6-digit code field. The account is created only
+  // once the emailed code is confirmed.
+  if (authMode === "verify") {
+    authEls.title.textContent = t().authVerifyTitle;
+    authEls.subtitle.textContent = (t().authVerifySubtitle || "") + (_verifyEmail ? " " + _verifyEmail : "");
+    authEls.submit.textContent = t().authVerifyBtn;
+    authEls.nameField.hidden = true; authEls.name.required = false;
+    if (authEls.emailField) authEls.emailField.hidden = true; authEls.email.required = false;
+    if (authEls.passwordField) authEls.passwordField.hidden = true; authEls.password.required = false;
+    if (authEls.codeField) authEls.codeField.hidden = false;
+    if (authEls.codeLabel) authEls.codeLabel.textContent = t().authCode;
+    if (authEls.google) authEls.google.hidden = true;
+    if (authEls.divider) authEls.divider.hidden = true;
+    if (authEls.forgot) authEls.forgot.hidden = true;
+    if (authEls.resend) { authEls.resend.hidden = false; authEls.resend.textContent = t().authResend; }
+    if (authEls.switchRow) authEls.switchRow.hidden = true;
+    return;
+  }
 
   // RESET MODE: a stripped card with only a "new password" field (local-account flow,
   // reached via the emailed ?reset=…&uid=… link). Firebase accounts use Firebase's own
@@ -6000,11 +6040,15 @@ function renderAuthCopy() {
     authEls.nameField.hidden = true; authEls.name.required = false;
     if (authEls.emailField) authEls.emailField.hidden = true;
     authEls.email.required = false;
+    if (authEls.passwordField) authEls.passwordField.hidden = false;
     if (authEls.passwordLabel) authEls.passwordLabel.textContent = t().authNewPassword;
+    authEls.password.required = true;
     authEls.password.setAttribute("autocomplete", "new-password");
+    if (authEls.codeField) authEls.codeField.hidden = true;
     if (authEls.google) authEls.google.hidden = true;
     if (authEls.divider) authEls.divider.hidden = true;
     if (authEls.forgot) authEls.forgot.hidden = true;
+    if (authEls.resend) authEls.resend.hidden = true;
     if (authEls.switchRow) authEls.switchRow.hidden = true;
     return;
   }
@@ -6021,8 +6065,12 @@ function renderAuthCopy() {
   authEls.name.required = isSignup;
   if (authEls.emailField) authEls.emailField.hidden = false;
   authEls.email.required = true;
+  if (authEls.passwordField) authEls.passwordField.hidden = false;
+  authEls.password.required = true;
   if (authEls.passwordLabel) authEls.passwordLabel.textContent = t().authPassword;
   authEls.password.setAttribute("autocomplete", isSignup ? "new-password" : "current-password");
+  if (authEls.codeField) authEls.codeField.hidden = true;
+  if (authEls.resend) authEls.resend.hidden = true;
   if (authEls.switchRow) authEls.switchRow.hidden = false;
   if (authEls.forgot) { authEls.forgot.textContent = t().authForgot; authEls.forgot.hidden = isSignup; }
   // localize standalone labels
@@ -6054,7 +6102,19 @@ function showAuthNote(msg) {
   authEls.note.hidden = false;
 }
 
-let _resetToken = "", _resetUid = "";
+let _resetToken = "", _resetUid = "", _verifyEmail = "";
+
+/** Re-send the signup verification code for the pending email. */
+async function handleResendCode() {
+  if (!_verifyEmail || (authEls.resend && authEls.resend.disabled)) return;
+  if (authEls.resend) authEls.resend.disabled = true;
+  try {
+    await apiJson("/api/auth/resend-code", { method: "POST", body: JSON.stringify({ email: _verifyEmail }) });
+    showAuthNote(t().authCodeResent);
+  } catch (_) { /* ignore */ } finally {
+    setTimeout(() => { if (authEls.resend) authEls.resend.disabled = false; }, 15000); // throttle re-sends
+  }
+}
 
 /** "Forgot password?" → send a reset email. Firebase accounts use Firebase's built-in
     sendPasswordResetEmail (free); otherwise the app's own /api/auth/forgot. */
@@ -6112,6 +6172,24 @@ async function handleAuthSubmit(e) {
   if (authEls.submit.disabled) return;
   hideAuthError();
 
+  // VERIFY MODE: confirm the emailed 6-digit signup code → account created + signed in.
+  if (authMode === "verify") {
+    const code = (authEls.code.value || "").trim();
+    if (!/^\d{6}$/.test(code)) { showAuthError(t().authCodeInvalid); return; }
+    authEls.submit.disabled = true; authEls.submit.classList.add("is-loading");
+    try {
+      const data = await apiJson("/api/auth/verify-signup", { method: "POST", body: JSON.stringify({ email: _verifyEmail, code }) });
+      const user = (data && data.user) || data;
+      _verifyEmail = ""; authEls.code.value = "";
+      await bootApp(user);
+    } catch (err) {
+      showAuthError((err && err.data && (err.data.error || err.data.message)) || t().authCodeWrong);
+    } finally {
+      authEls.submit.disabled = false; authEls.submit.classList.remove("is-loading");
+    }
+    return;
+  }
+
   // RESET MODE: set a new password using the emailed token (local scrypt accounts).
   if (authMode === "reset") {
     const pw = authEls.password.value;
@@ -6155,29 +6233,20 @@ async function handleAuthSubmit(e) {
   authEls.submit.disabled = true;
   authEls.submit.classList.add("is-loading");
   try {
-    if (hasFirebaseConfig()) {
-      // Email/password via Firebase Auth → ID token → server session (same path as Google).
-      const m = await loadFirebase();
-      const auth = await ensureFirebaseAuth();
-      let cred;
-      if (isSignup) {
-        cred = await m.createUserWithEmailAndPassword(auth, email, password);
-        try { if (name) await m.updateProfile(cred.user, { displayName: name }); } catch (_) {}
-      } else {
-        cred = await m.signInWithEmailAndPassword(auth, email, password);
-      }
-      const idToken = await cred.user.getIdToken(true);
-      const data = await apiJson("/api/auth/firebase", { method: "POST", body: JSON.stringify({ idToken, name: isSignup ? name : "" }) });
-      const user = (data && data.user) || data || { email };
-      await bootApp(user);
-    } else {
-      // Fallback (no Firebase config): the app's own scrypt email/password.
-      const path = isSignup ? "/api/auth/signup" : "/api/auth/login";
-      const body = isSignup ? { name, email, password } : { email, password };
-      const data = await apiJson(path, { method: "POST", body: JSON.stringify(body) });
-      const user = (data && data.user) || data || { email };
-      await bootApp(user);
+    // Email/password always uses the app's own backend (scrypt + emailed verification
+    // code on signup). Firebase is used ONLY for "Continue with Google".
+    const path = isSignup ? "/api/auth/signup" : "/api/auth/login";
+    const body = isSignup ? { name, email, password } : { email, password };
+    const data = await apiJson(path, { method: "POST", body: JSON.stringify(body) });
+    if (isSignup && data && data.pending) {
+      // Account not created yet — go to the code-entry step.
+      _verifyEmail = email;
+      setAuthMode("verify");
+      setTimeout(() => { if (authEls.code) authEls.code.focus(); }, 50);
+      return;
     }
+    const user = (data && data.user) || data || { email };
+    await bootApp(user);
   } catch (err) {
     const fbMsg = firebaseAuthMessage(err);
     if (fbMsg) showAuthError(fbMsg);
@@ -6368,6 +6437,7 @@ function wireAuth() {
   authEls.switchBtn.addEventListener("click", () => setAuthMode(authMode === "signup" ? "login" : "signup"));
   if (authEls.google) authEls.google.addEventListener("click", handleGoogleSignIn);
   if (authEls.forgot) authEls.forgot.addEventListener("click", handleForgotPassword);
+  if (authEls.resend) authEls.resend.addEventListener("click", handleResendCode);
 }
 
 /* ----------------------------------------------------------------------------
