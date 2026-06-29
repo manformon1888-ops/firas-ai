@@ -711,50 +711,80 @@ async function handleSignup(req, res) {
   if (password.length > 200) return sendJson(res, 400, { error: "password is too long" });
   if (DB.users.some((u) => u.email === email)) return sendJson(res, 409, { error: "email already registered" });
 
-  // Do NOT create the account yet — stash a PENDING signup and email a 6-digit code.
-  // The real user is created only after the code is verified (handleVerifySignup).
+  // Do NOT create the account yet — stash a PENDING signup and email a verification LINK
+  // (a button). The real account is created when the link is opened (handleVerifySignup).
+  // A poll-id (pid) lets the ORIGINAL device finish the moment the link is opened on ANY
+  // device (open the email on your phone → your computer logs in too).
   const { salt, passHash } = await hashPassword(password);
-  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const token = crypto.randomBytes(24).toString("hex");
+  const pid = crypto.randomBytes(16).toString("hex");
   if (!DB.pending) DB.pending = {};
-  DB.pending[email] = { name, email, passHash, salt, codeHash: sha256hex(code), exp: Date.now() + VERIFY_TTL_MS, tries: 0 };
+  DB.pending[email] = { name, email, passHash, salt, token, pid, exp: Date.now() + VERIFY_TTL_MS, verified: false, userId: null };
   await persist();
-  const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
-  if (!sent) console.log("[firas] signup verification code for " + email + " = " + code + " (not delivered — dev fallback)");
-  return sendJson(res, 200, { ok: true, pending: true, email });
+  const link = resetAppBase(req) + "/?verify=" + token;
+  const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
+  if (!sent) console.log("[firas] signup verify link for " + email + " -> " + link + " (not delivered — dev fallback)");
+  return sendJson(res, 200, { ok: true, pending: true, email, pid });
 }
 
-// Verify the emailed code → create the real account + sign in.
+// Open the emailed LINK → create the real account (idempotent) + sign in THIS device.
 async function handleVerifySignup(req, res) {
-  if (rateLimited("verify:" + clientIp(req), 15, 60_000)) return sendJson(res, 429, { error: "too many attempts, please wait a minute" });
+  if (rateLimited("verify:" + clientIp(req), 30, 60_000)) return sendJson(res, 429, { error: "too many attempts, please wait a minute" });
   const body = await readJson(req, 100_000);
-  const email = String((body && body.email) || "").trim().toLowerCase();
-  const code = String((body && body.code) || "").trim();
-  const p = DB.pending && DB.pending[email];
-  if (!p || Date.now() > p.exp) { if (p) { delete DB.pending[email]; await persist(); } return sendJson(res, 400, { error: "الرمز غير صالح أو منتهي — اطلب رمزاً جديداً" }); }
-  p.tries = (p.tries || 0) + 1;
-  if (p.tries > 6) { delete DB.pending[email]; await persist(); return sendJson(res, 400, { error: "محاولات كثيرة — أعد التسجيل" }); }
-  if (sha256hex(code) !== p.codeHash) { await persist(); return sendJson(res, 400, { error: "الرمز غير صحيح" }); }
-  if (DB.users.some((u) => u.email === email)) { delete DB.pending[email]; await persist(); return sendJson(res, 409, { error: "email already registered" }); }
-  const user = { id: crypto.randomUUID(), name: p.name, email: p.email, passHash: p.passHash, salt: p.salt, emailVerified: true, createdAt: new Date().toISOString() };
-  DB.users.push(user);
-  delete DB.pending[email];
-  await persist();
+  const token = String((body && body.token) || "").trim();
+  if (!token) return sendJson(res, 400, { error: "رابط غير صالح" });
+  const email = Object.keys(DB.pending || {}).find((k) => DB.pending[k].token === token);
+  const p = email && DB.pending[email];
+  if (!p || Date.now() > p.exp) { if (p) { delete DB.pending[email]; await persist(); } return sendJson(res, 400, { error: "الرابط غير صالح أو منتهي — أعد التسجيل" }); }
+  let user;
+  if (p.verified && p.userId) {
+    user = DB.users.find((u) => u.id === p.userId); // idempotent re-open
+  } else {
+    if (DB.users.some((u) => u.email === email)) { delete DB.pending[email]; await persist(); return sendJson(res, 409, { error: "email already registered" }); }
+    user = { id: crypto.randomUUID(), name: p.name, email: p.email, passHash: p.passHash, salt: p.salt, emailVerified: true, createdAt: new Date().toISOString() };
+    DB.users.push(user);
+    p.verified = true; p.userId = user.id; p.verifiedAt = Date.now();
+    await persist();
+  }
+  if (!user) return sendJson(res, 400, { error: "تعذّر التأكيد — أعد التسجيل" });
   setSessionCookie(res, user.id, req);
   return sendJson(res, 200, { ok: true, user: publicUser(user) });
 }
 
-// Re-send a fresh signup code for a pending email.
+// The original device polls this with its pid; once the link is opened ANYWHERE it returns
+// verified and signs THIS device in too (cross-device completion), then cleans up.
+async function handleVerifyStatus(req, res) {
+  if (rateLimited("vstatus:" + clientIp(req), 60, 60_000)) return sendJson(res, 429, { error: "too many requests" });
+  const body = await readJson(req, 100_000);
+  const pid = String((body && body.pid) || "").trim();
+  if (!pid) return sendJson(res, 400, { error: "missing pid" });
+  const email = Object.keys(DB.pending || {}).find((k) => DB.pending[k].pid === pid);
+  const p = email && DB.pending[email];
+  if (!p) return sendJson(res, 200, { verified: false, gone: true });
+  if (Date.now() > p.exp) { delete DB.pending[email]; await persist(); return sendJson(res, 200, { verified: false, expired: true }); }
+  if (p.verified && p.userId) {
+    const user = DB.users.find((u) => u.id === p.userId);
+    if (user) {
+      setSessionCookie(res, user.id, req);
+      delete DB.pending[email]; await persist();   // both devices handled → done
+      return sendJson(res, 200, { verified: true, user: publicUser(user) });
+    }
+  }
+  return sendJson(res, 200, { verified: false });
+}
+
+// Re-send a fresh verification LINK for a pending email.
 async function handleResendCode(req, res) {
   if (rateLimited("resend:" + clientIp(req), 4, 60_000)) return sendJson(res, 429, { error: "too many requests, wait a minute" });
   const body = await readJson(req, 100_000);
   const email = String((body && body.email) || "").trim().toLowerCase();
   const p = DB.pending && DB.pending[email];
-  if (p) {
-    const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
-    p.codeHash = sha256hex(code); p.exp = Date.now() + VERIFY_TTL_MS; p.tries = 0;
+  if (p && !p.verified) {
+    p.token = crypto.randomBytes(24).toString("hex"); p.exp = Date.now() + VERIFY_TTL_MS;
     await persist();
-    const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
-    if (!sent) console.log("[firas] (resend) signup code for " + email + " = " + code + " (not delivered — dev fallback)");
+    const link = resetAppBase(req) + "/?verify=" + p.token;
+    const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
+    if (!sent) console.log("[firas] (resend) signup verify link for " + email + " -> " + link + " (not delivered — dev fallback)");
   }
   return sendJson(res, 200, { ok: true });
 }
@@ -840,16 +870,17 @@ function brandedEmail(o) {
     '<p style="margin:14px 0 0;font-size:11px;color:#555c59;font-family:' + font + ';">© Firas AI</p>' +
     '</td></tr></table></body></html>';
 }
-function verifyEmailHtml(code) {
-  const codeBox = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:8px auto 2px;"><tr>' +
-    '<td style="background:#10211c;border:1px solid #2C8A78;border-radius:14px;padding:18px 30px;font:800 36px/1 \'Segoe UI\',Tahoma,Arial,sans-serif;letter-spacing:14px;color:#57AE9C;text-align:center;">' + code + '</td>' +
-    '</tr></table>';
+function verifyEmailHtml(link) {
+  const btn = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:6px auto;"><tr>' +
+    '<td style="border-radius:11px;background:#2C8A78;"><a href="' + link + '" style="display:inline-block;padding:14px 34px;font:800 15px \'Segoe UI\',Tahoma,Arial,sans-serif;color:#06120f;text-decoration:none;border-radius:11px;">تأكيد الحساب وبدء الاستخدام</a></td>' +
+    '</tr></table>' +
+    '<p style="margin:18px 0 0;font-size:12px;color:#6f7a76;word-break:break-all;">أو افتح هذا الرابط:<br><a href="' + link + '" style="color:#57AE9C;">' + link + '</a></p>';
   return brandedEmail({
-    preheader: "رمز تأكيد حسابك في Firas AI",
+    preheader: "أكمل إنشاء حسابك في Firas AI",
     heading: "تأكيد بريدك الإلكتروني",
-    lead: "أهلاً بك في Firas AI! استخدم الرمز التالي لإكمال إنشاء حسابك:",
-    contentHtml: codeBox,
-    note: "الرمز صالح لمدة 15 دقيقة. إذا لم تطلب إنشاء حساب، تجاهل هذه الرسالة.",
+    lead: "أهلاً بك في Firas AI! اضغط الزر لتأكيد بريدك وتفعيل حسابك — وستدخل مباشرةً.",
+    contentHtml: btn,
+    note: "الرابط صالح لمدة 15 دقيقة. إذا لم تطلب إنشاء حساب، تجاهل هذه الرسالة.",
   });
 }
 function sha256hex(s) { return crypto.createHash("sha256").update(String(s)).digest("hex"); }
@@ -2245,6 +2276,7 @@ const server = http.createServer(async (req, res) => {
     // ---- Auth ----
     if (route === "/api/auth/signup" && method === "POST") return await handleSignup(req, res);
     if (route === "/api/auth/verify-signup" && method === "POST") return await handleVerifySignup(req, res);
+    if (route === "/api/auth/verify-status" && method === "POST") return await handleVerifyStatus(req, res);
     if (route === "/api/auth/resend-code" && method === "POST") return await handleResendCode(req, res);
     if (route === "/api/auth/login" && method === "POST") return await handleLogin(req, res);
     if (route === "/api/auth/firebase" && method === "POST") return await handleFirebaseAuth(req, res);

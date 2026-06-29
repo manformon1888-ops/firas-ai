@@ -258,13 +258,15 @@ const STR = {
     authResetDone: "تم تغيير كلمة المرور — سجّل الدخول الآن.",
     authResetInvalid: "الرابط غير صالح أو منتهي. اطلب رابطاً جديداً.",
     authVerifyTitle: "تأكيد بريدك الإلكتروني",
-    authVerifySubtitle: "أدخل الرمز المُرسَل إلى",
+    authVerifySubtitle: "أرسلنا رابط تأكيد إلى",
+    authVerifyWaiting: "افتح الرابط من بريدك واضغط الزر — وسيكتمل الدخول هنا تلقائياً (حتى لو فتحته من جهاز آخر). تحقّق من صندوق الوارد والـ Spam.",
+    authVerifyBad: "رابط التأكيد غير صالح أو منتهي. أعد التسجيل من جديد.",
     authVerifyBtn: "تأكيد",
     authCode: "رمز التحقق (٦ أرقام)",
     authCodeInvalid: "أدخل رمزاً مكوّناً من ٦ أرقام.",
     authCodeWrong: "الرمز غير صحيح أو منتهي.",
-    authResend: "إعادة إرسال الرمز",
-    authCodeResent: "أرسلنا رمزاً جديداً إلى بريدك.",
+    authResend: "إعادة إرسال الرابط",
+    authCodeResent: "أرسلنا رابطاً جديداً إلى بريدك.",
     authGoogle: "المتابعة عبر Google",
     authOr: "أو",
     authGoogleError: "تعذّر تسجيل الدخول عبر Google. حاول مرة أخرى.",
@@ -414,13 +416,15 @@ const STR = {
     authResetDone: "Password changed — sign in now.",
     authResetInvalid: "The link is invalid or expired. Request a new one.",
     authVerifyTitle: "Verify your email",
-    authVerifySubtitle: "Enter the code sent to",
+    authVerifySubtitle: "We sent a verification link to",
+    authVerifyWaiting: "Open the link from your email and tap the button — this device will finish automatically (even if you open it on another device). Check your inbox and Spam.",
+    authVerifyBad: "The verification link is invalid or expired. Please sign up again.",
     authVerifyBtn: "Verify",
     authCode: "Verification code (6 digits)",
     authCodeInvalid: "Enter a 6-digit code.",
     authCodeWrong: "Wrong or expired code.",
-    authResend: "Resend code",
-    authCodeResent: "We sent a new code to your email.",
+    authResend: "Resend link",
+    authCodeResent: "We sent a new link to your email.",
     authGoogle: "Continue with Google",
     authOr: "or",
     authGoogleError: "Couldn't sign in with Google. Please try again.",
@@ -6011,24 +6015,26 @@ function renderAuthCopy() {
   const isSignup = authMode === "signup";
   if (authEls.note) authEls.note.hidden = true;
 
-  // VERIFY MODE: after signup, a single 6-digit code field. The account is created only
-  // once the emailed code is confirmed.
+  // VERIFY MODE: after signup, a passive "open the link in your email" screen. No code or
+  // submit — the account is created when the emailed BUTTON is opened (on any device), and
+  // this device finishes automatically via polling.
   if (authMode === "verify") {
     authEls.title.textContent = t().authVerifyTitle;
     authEls.subtitle.textContent = (t().authVerifySubtitle || "") + (_verifyEmail ? " " + _verifyEmail : "");
-    authEls.submit.textContent = t().authVerifyBtn;
     authEls.nameField.hidden = true; authEls.name.required = false;
     if (authEls.emailField) authEls.emailField.hidden = true; authEls.email.required = false;
     if (authEls.passwordField) authEls.passwordField.hidden = true; authEls.password.required = false;
-    if (authEls.codeField) authEls.codeField.hidden = false;
-    if (authEls.codeLabel) authEls.codeLabel.textContent = t().authCode;
+    if (authEls.codeField) authEls.codeField.hidden = true;
+    authEls.submit.hidden = true;                    // passive screen — nothing to submit
     if (authEls.google) authEls.google.hidden = true;
     if (authEls.divider) authEls.divider.hidden = true;
     if (authEls.forgot) authEls.forgot.hidden = true;
     if (authEls.resend) { authEls.resend.hidden = false; authEls.resend.textContent = t().authResend; }
     if (authEls.switchRow) authEls.switchRow.hidden = true;
+    showAuthNote(t().authVerifyWaiting);             // "waiting for you to open the link…"
     return;
   }
+  if (authEls.submit) authEls.submit.hidden = false; // restore for other modes
 
   // RESET MODE: a stripped card with only a "new password" field (local-account flow,
   // reached via the emailed ?reset=…&uid=… link). Firebase accounts use Firebase's own
@@ -6082,6 +6088,7 @@ function renderAuthCopy() {
 
 function setAuthMode(mode) {
   authMode = mode;
+  if (mode !== "verify") stopVerifyPolling();
   hideAuthError();
   renderAuthCopy();
 }
@@ -6102,9 +6109,24 @@ function showAuthNote(msg) {
   authEls.note.hidden = false;
 }
 
-let _resetToken = "", _resetUid = "", _verifyEmail = "";
+let _resetToken = "", _resetUid = "", _verifyEmail = "", _verifyPid = "", _verifyPoll = null;
 
-/** Re-send the signup verification code for the pending email. */
+/** Poll the server: once the emailed link is opened on ANY device, sign THIS device in
+    too (cross-device completion). */
+function startVerifyPolling() {
+  stopVerifyPolling();
+  if (!_verifyPid) return;
+  _verifyPoll = setInterval(async () => {
+    if (authMode !== "verify" || !_verifyPid) { stopVerifyPolling(); return; }
+    try {
+      const d = await apiJson("/api/auth/verify-status", { method: "POST", body: JSON.stringify({ pid: _verifyPid }) });
+      if (d && d.verified && d.user) { stopVerifyPolling(); _verifyPid = ""; _verifyEmail = ""; await bootApp(d.user); }
+    } catch (_) { /* keep polling */ }
+  }, 3000);
+}
+function stopVerifyPolling() { if (_verifyPoll) { clearInterval(_verifyPoll); _verifyPoll = null; } }
+
+/** Re-send a fresh verification LINK for the pending email. */
 async function handleResendCode() {
   if (!_verifyEmail || (authEls.resend && authEls.resend.disabled)) return;
   if (authEls.resend) authEls.resend.disabled = true;
@@ -6114,6 +6136,23 @@ async function handleResendCode() {
   } catch (_) { /* ignore */ } finally {
     setTimeout(() => { if (authEls.resend) authEls.resend.disabled = false; }, 15000); // throttle re-sends
   }
+}
+
+/** Clicking-device path: the page was opened via the email verify link (?verify=token).
+    Create/confirm the account and sign in. Returns true if a verify link was handled. */
+async function checkVerifyLink() {
+  let token = "";
+  try { token = new URLSearchParams(location.search).get("verify") || ""; } catch (_) {}
+  if (!token) return false;
+  try { history.replaceState(null, "", location.pathname); } catch (_) {}
+  try {
+    const d = await apiJson("/api/auth/verify-signup", { method: "POST", body: JSON.stringify({ token }) });
+    const user = (d && d.user) || d;
+    if (user) { await bootApp(user); return true; }
+  } catch (_) {}
+  // Invalid/expired link → fall through to the auth screen with a note.
+  showAuthScreen(); setAuthMode("login"); showAuthError(t().authVerifyBad);
+  return true;
 }
 
 /** "Forgot password?" → send a reset email. Firebase accounts use Firebase's built-in
@@ -6168,23 +6207,8 @@ async function handleAuthSubmit(e) {
   if (authEls.submit.disabled) return;
   hideAuthError();
 
-  // VERIFY MODE: confirm the emailed 6-digit signup code → account created + signed in.
-  if (authMode === "verify") {
-    const code = (authEls.code.value || "").trim();
-    if (!/^\d{6}$/.test(code)) { showAuthError(t().authCodeInvalid); return; }
-    authEls.submit.disabled = true; authEls.submit.classList.add("is-loading");
-    try {
-      const data = await apiJson("/api/auth/verify-signup", { method: "POST", body: JSON.stringify({ email: _verifyEmail, code }) });
-      const user = (data && data.user) || data;
-      _verifyEmail = ""; authEls.code.value = "";
-      await bootApp(user);
-    } catch (err) {
-      showAuthError((err && err.data && (err.data.error || err.data.message)) || t().authCodeWrong);
-    } finally {
-      authEls.submit.disabled = false; authEls.submit.classList.remove("is-loading");
-    }
-    return;
-  }
+  // VERIFY MODE is passive (link-based + polling) — nothing to submit here.
+  if (authMode === "verify") return;
 
   // RESET MODE: set a new password using the emailed token (local scrypt accounts).
   if (authMode === "reset") {
@@ -6235,10 +6259,12 @@ async function handleAuthSubmit(e) {
     const body = isSignup ? { name, email, password } : { email, password };
     const data = await apiJson(path, { method: "POST", body: JSON.stringify(body) });
     if (isSignup && data && data.pending) {
-      // Account not created yet — go to the code-entry step.
+      // Account not created yet — show the "open the link in your email" screen and start
+      // polling so this device finishes the moment the link is opened on ANY device.
       _verifyEmail = email;
+      _verifyPid = (data && data.pid) || "";
       setAuthMode("verify");
-      setTimeout(() => { if (authEls.code) authEls.code.focus(); }, 50);
+      startVerifyPolling();
       return;
     }
     const user = (data && data.user) || data || { email };
@@ -6603,7 +6629,9 @@ async function init() {
   autoGrow();
   updateSendState();
 
-  // A password-reset link (?reset=…&uid=…) takes over the screen before the auth gate.
+  // An email verification link (?verify=token) or a password-reset link (?reset=…&uid=…)
+  // takes over the screen before the auth gate.
+  if (await checkVerifyLink()) return;
   if (checkResetLink()) return;
 
   // Auth gate: ask the server who we are. A valid session skips the landing and
