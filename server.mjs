@@ -764,6 +764,74 @@ function handleMe(req, res) {
   return sendJson(res, 200, { user: publicUser(user) });
 }
 
+/* ---- Password reset: email a time-limited link via Resend (zero-dep HTTP API).
+   Without RESEND_API_KEY the link is logged to the server console (dev). ---- */
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const RESEND_FROM    = process.env.RESEND_FROM || "Firas AI <onboarding@resend.dev>";
+const RESET_APP_URL  = (process.env.APP_URL || "").replace(/\/+$/, "");
+const RESET_TTL_MS   = 30 * 60_000;
+function sha256hex(s) { return crypto.createHash("sha256").update(String(s)).digest("hex"); }
+async function sendEmail(to, subject, html) {
+  if (!RESEND_API_KEY) return false;
+  try {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + RESEND_API_KEY },
+      body: JSON.stringify({ from: RESEND_FROM, to: [to], subject, html }),
+    });
+    return r.ok;
+  } catch (_) { return false; }
+}
+function resetAppBase(req) {
+  if (RESET_APP_URL) return RESET_APP_URL;
+  const o = req.headers.origin; if (o) return String(o).replace(/\/+$/, "");
+  return "http://" + (req.headers.host || ("localhost:" + PORT));
+}
+function resetEmailHtml(link) {
+  return '<div style="font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:480px">' +
+    '<h2 style="margin:0 0 10px">إعادة تعيين كلمة المرور — Firas AI</h2>' +
+    '<p>طلبت إعادة تعيين كلمة مرورك. اضغط الزر (الرابط صالح 30 دقيقة):</p>' +
+    '<p><a href="' + link + '" style="display:inline-block;background:#237A68;color:#fff;text-decoration:none;padding:10px 22px;border-radius:8px">تعيين كلمة مرور جديدة</a></p>' +
+    '<p style="color:#666;font-size:13px">أو افتح هذا الرابط:<br>' + link + '</p>' +
+    '<p style="color:#666;font-size:13px">إذا لم تطلب هذا، تجاهل الرسالة.</p></div>';
+}
+async function handleForgot(req, res) {
+  if (rateLimited("forgot:" + (clientIp(req) || "?"), 6, 60_000)) return sendJson(res, 429, { error: "too many requests" });
+  const body = await readJson(req, 100_000);
+  const email = String((body && body.email) || "").trim().toLowerCase();
+  if (EMAIL_RE.test(email)) {
+    const user = DB.users.find((u) => u.email === email && u.passHash); // password accounts only
+    if (user) {
+      const token = crypto.randomBytes(32).toString("hex");
+      user.reset = { hash: sha256hex(token), exp: Date.now() + RESET_TTL_MS };
+      await persist();
+      const link = resetAppBase(req) + "/?reset=" + token + "&uid=" + encodeURIComponent(user.id);
+      const sent = await sendEmail(user.email, "إعادة تعيين كلمة المرور — Firas AI", resetEmailHtml(link));
+      if (!sent) console.log("[firas] password-reset (email not configured) for " + user.email + " -> " + link);
+    }
+  }
+  return sendJson(res, 200, { ok: true }); // anti-enumeration: ALWAYS ok
+}
+async function handleReset(req, res) {
+  if (rateLimited("reset:" + (clientIp(req) || "?"), 10, 60_000)) return sendJson(res, 429, { error: "too many requests" });
+  const body = await readJson(req, 100_000);
+  const uid = String((body && body.uid) || "");
+  const token = String((body && body.token) || "");
+  const password = String((body && body.password) || "");
+  if (password.length < 8) return sendJson(res, 400, { error: "password must be at least 8 characters" });
+  if (password.length > 200) return sendJson(res, 400, { error: "password is too long" });
+  const user = DB.users.find((u) => u.id === uid);
+  if (!user || !user.reset || !user.reset.hash || Date.now() > user.reset.exp || sha256hex(token) !== user.reset.hash) {
+    return sendJson(res, 400, { error: "invalid or expired link" });
+  }
+  const { salt, passHash } = await hashPassword(password);
+  user.salt = salt; user.passHash = passHash;
+  delete user.reset;
+  await persist();
+  setSessionCookie(res, user.id, req); // sign them in after a successful reset
+  return sendJson(res, 200, { ok: true, user: publicUser(user) });
+}
+
 // POST /api/auth/firebase — verify a Google/Firebase ID token and log in,
 // issuing the SAME signed session cookie as email/password login.
 async function handleFirebaseAuth(req, res) {
@@ -2090,6 +2158,8 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/auth/signup" && method === "POST") return await handleSignup(req, res);
     if (route === "/api/auth/login" && method === "POST") return await handleLogin(req, res);
     if (route === "/api/auth/firebase" && method === "POST") return await handleFirebaseAuth(req, res);
+    if (route === "/api/auth/forgot" && method === "POST") return await handleForgot(req, res);
+    if (route === "/api/auth/reset" && method === "POST") return await handleReset(req, res);
     if (route === "/api/auth/logout" && method === "POST") return handleLogout(req, res);
     if (route === "/api/auth/me" && method === "GET") return handleMe(req, res);
 

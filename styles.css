@@ -1804,6 +1804,27 @@ h1, h2, h3 { margin: 0; font-family: var(--font-serif); font-weight: var(--weigh
   text-align: start;
 }
 .auth__error[hidden] { display: none; }
+.auth__forgot {
+  align-self: flex-end;
+  background: none; border: none; cursor: pointer;
+  color: var(--color-text-secondary);
+  font: 500 var(--text-sm)/1.4 var(--font-sans);
+  padding: 2px 2px;
+}
+.auth__forgot:hover { color: var(--color-accent); text-decoration: underline; }
+.auth__forgot[hidden] { display: none; }
+.auth__forgot:disabled { opacity: .55; cursor: default; }
+.auth__note {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-accent-soft);
+  border: var(--border-hairline) solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  text-align: start;
+}
+.auth__note[hidden] { display: none; }
 .auth__submit {
   block-size: 44px;
   margin-block-start: var(--space-1);

@@ -248,6 +248,15 @@ const STR = {
     authToSignupBtn: "إنشاء حساب",
     authGenericError: "تعذّر إتمام العملية. حاول مرة أخرى.",
     authNetworkError: "تعذّر الاتصال بالخادم. تحقّق من اتصالك.",
+    authForgot: "نسيت كلمة المرور؟",
+    authForgotNeedEmail: "اكتب بريدك الإلكتروني أولاً.",
+    authForgotSent: "إذا كان البريد مسجّلاً، أرسلنا له رابط إعادة التعيين. تحقّق من بريدك (وصندوق الـ Spam).",
+    authResetTitle: "تعيين كلمة مرور جديدة",
+    authResetSubtitle: "اختر كلمة مرور جديدة لحسابك.",
+    authResetBtn: "تعيين كلمة المرور",
+    authNewPassword: "كلمة المرور الجديدة",
+    authResetDone: "تم تغيير كلمة المرور — سجّل الدخول الآن.",
+    authResetInvalid: "الرابط غير صالح أو منتهي. اطلب رابطاً جديداً.",
     authGoogle: "المتابعة عبر Google",
     authOr: "أو",
     authGoogleError: "تعذّر تسجيل الدخول عبر Google. حاول مرة أخرى.",
@@ -387,6 +396,15 @@ const STR = {
     authToSignupBtn: "Sign up",
     authGenericError: "Something went wrong. Please try again.",
     authNetworkError: "Couldn't reach the server. Check your connection.",
+    authForgot: "Forgot password?",
+    authForgotNeedEmail: "Enter your email first.",
+    authForgotSent: "If that email is registered, we sent a reset link. Check your inbox (and Spam).",
+    authResetTitle: "Set a new password",
+    authResetSubtitle: "Choose a new password for your account.",
+    authResetBtn: "Set password",
+    authNewPassword: "New password",
+    authResetDone: "Password changed — sign in now.",
+    authResetInvalid: "The link is invalid or expired. Request a new one.",
     authGoogle: "Continue with Google",
     authOr: "or",
     authGoogleError: "Couldn't sign in with Google. Please try again.",
@@ -5960,10 +5978,38 @@ function cacheAuthEls() {
   authEls.googleLabel = $("#authGoogleLabel");
   authEls.divider = $("#authDivider");
   authEls.dividerText = $("#authDividerText");
+  authEls.forgot = $("#authForgot");
+  authEls.note = $("#authNote");
+  authEls.emailField = authEls.email ? authEls.email.closest(".auth__field") : null;
+  authEls.passwordLabel = authEls.password ? authEls.password.closest(".auth__field").querySelector(".auth__label") : null;
+  authEls.switchRow = $(".auth__switch");
 }
 
 function renderAuthCopy() {
+  const isReset = authMode === "reset";
   const isSignup = authMode === "signup";
+  if (authEls.note) authEls.note.hidden = true;
+
+  // RESET MODE: a stripped card with only a "new password" field (local-account flow,
+  // reached via the emailed ?reset=…&uid=… link). Firebase accounts use Firebase's own
+  // reset page, so this only runs for the app's own scrypt accounts.
+  if (isReset) {
+    authEls.title.textContent = t().authResetTitle;
+    authEls.subtitle.textContent = t().authResetSubtitle;
+    authEls.submit.textContent = t().authResetBtn;
+    authEls.nameField.hidden = true; authEls.name.required = false;
+    if (authEls.emailField) authEls.emailField.hidden = true;
+    authEls.email.required = false;
+    if (authEls.passwordLabel) authEls.passwordLabel.textContent = t().authNewPassword;
+    authEls.password.setAttribute("autocomplete", "new-password");
+    if (authEls.google) authEls.google.hidden = true;
+    if (authEls.divider) authEls.divider.hidden = true;
+    if (authEls.forgot) authEls.forgot.hidden = true;
+    if (authEls.switchRow) authEls.switchRow.hidden = true;
+    return;
+  }
+
+  // Normal login/signup (restore anything reset-mode hid).
   authEls.title.textContent = isSignup ? t().authSignupTitle : t().authLoginTitle;
   authEls.subtitle.textContent = isSignup ? t().authSignupSubtitle : t().authLoginSubtitle;
   authEls.submit.textContent = isSignup ? t().authSignupBtn : t().authLoginBtn;
@@ -5973,7 +6019,12 @@ function renderAuthCopy() {
   if (authEls.dividerText) authEls.dividerText.textContent = t().authOr;
   authEls.nameField.hidden = !isSignup;
   authEls.name.required = isSignup;
+  if (authEls.emailField) authEls.emailField.hidden = false;
+  authEls.email.required = true;
+  if (authEls.passwordLabel) authEls.passwordLabel.textContent = t().authPassword;
   authEls.password.setAttribute("autocomplete", isSignup ? "new-password" : "current-password");
+  if (authEls.switchRow) authEls.switchRow.hidden = false;
+  if (authEls.forgot) { authEls.forgot.textContent = t().authForgot; authEls.forgot.hidden = isSignup; }
   // localize standalone labels
   document.querySelectorAll("#authScreen [data-i18n]").forEach((el) => {
     const k = el.getAttribute("data-i18n");
@@ -5990,10 +6041,57 @@ function setAuthMode(mode) {
 function showAuthError(msg) {
   authEls.error.textContent = msg;
   authEls.error.hidden = false;
+  if (authEls.note) authEls.note.hidden = true;
 }
 function hideAuthError() {
   authEls.error.hidden = true;
   authEls.error.textContent = "";
+}
+function showAuthNote(msg) {
+  if (!authEls.note) return;
+  hideAuthError();
+  authEls.note.textContent = msg;
+  authEls.note.hidden = false;
+}
+
+let _resetToken = "", _resetUid = "";
+
+/** "Forgot password?" → send a reset email. Firebase accounts use Firebase's built-in
+    sendPasswordResetEmail (free); otherwise the app's own /api/auth/forgot. */
+async function handleForgotPassword() {
+  hideAuthError();
+  const email = authEls.email.value.trim();
+  if (!email) { showAuthError(t().authForgotNeedEmail); authEls.email.focus(); return; }
+  if (authEls.forgot) authEls.forgot.disabled = true;
+  try {
+    if (hasFirebaseConfig()) {
+      const m = await loadFirebase();
+      const auth = await ensureFirebaseAuth();
+      await m.sendPasswordResetEmail(auth, email);
+    } else {
+      await apiJson("/api/auth/forgot", { method: "POST", body: JSON.stringify({ email }) });
+    }
+    showAuthNote(t().authForgotSent);
+  } catch (err) {
+    if (err && /user-not-found/.test(err.code || "")) showAuthNote(t().authForgotSent); // anti-enumeration
+    else showAuthError(firebaseAuthMessage(err) || t().authNetworkError);
+  } finally {
+    if (authEls.forgot) authEls.forgot.disabled = false;
+  }
+}
+
+/** If the page was opened via the app's own reset link (?reset=…&uid=…), switch the
+    auth card into reset mode. Returns true if a reset link was detected. */
+function checkResetLink() {
+  try {
+    const p = new URLSearchParams(location.search);
+    const token = p.get("reset"), uid = p.get("uid");
+    if (!token || !uid) return false;
+    _resetToken = token; _resetUid = uid;
+    showAuthScreen();
+    setAuthMode("reset");
+    return true;
+  } catch (_) { return false; }
 }
 
 function showAuthScreen() {
@@ -6013,6 +6111,28 @@ async function handleAuthSubmit(e) {
   e.preventDefault();
   if (authEls.submit.disabled) return;
   hideAuthError();
+
+  // RESET MODE: set a new password using the emailed token (local scrypt accounts).
+  if (authMode === "reset") {
+    const pw = authEls.password.value;
+    if (pw.length < 8) {
+      showAuthError(state.lang === "ar" ? "كلمة المرور يجب أن تكون ٨ أحرف على الأقل." : "Password must be at least 8 characters.");
+      return;
+    }
+    authEls.submit.disabled = true; authEls.submit.classList.add("is-loading");
+    try {
+      await apiJson("/api/auth/reset", { method: "POST", body: JSON.stringify({ uid: _resetUid, token: _resetToken, password: pw }) });
+      try { history.replaceState(null, "", location.pathname); } catch (_) {}
+      _resetToken = ""; _resetUid = ""; authEls.password.value = "";
+      setAuthMode("login");
+      showAuthNote(t().authResetDone);
+    } catch (err) {
+      showAuthError((err && err.data && (err.data.message || err.data.error)) || t().authResetInvalid);
+    } finally {
+      authEls.submit.disabled = false; authEls.submit.classList.remove("is-loading");
+    }
+    return;
+  }
 
   const isSignup = authMode === "signup";
   const name = authEls.name.value.trim();
@@ -6163,6 +6283,7 @@ async function loadFirebase() {
     signInWithEmailAndPassword: authMod.signInWithEmailAndPassword,
     createUserWithEmailAndPassword: authMod.createUserWithEmailAndPassword,
     updateProfile: authMod.updateProfile,
+    sendPasswordResetEmail: authMod.sendPasswordResetEmail,
   };
   return _firebaseModules;
 }
@@ -6246,6 +6367,7 @@ function wireAuth() {
   authEls.form.addEventListener("submit", handleAuthSubmit);
   authEls.switchBtn.addEventListener("click", () => setAuthMode(authMode === "signup" ? "login" : "signup"));
   if (authEls.google) authEls.google.addEventListener("click", handleGoogleSignIn);
+  if (authEls.forgot) authEls.forgot.addEventListener("click", handleForgotPassword);
 }
 
 /* ----------------------------------------------------------------------------
@@ -6414,6 +6536,9 @@ async function init() {
   wireAuth();
   autoGrow();
   updateSendState();
+
+  // A password-reset link (?reset=…&uid=…) takes over the screen before the auth gate.
+  if (checkResetLink()) return;
 
   // Auth gate: ask the server who we are. A valid session skips the landing and
   // goes straight to the app; a logged-out visitor sees the polished landing
