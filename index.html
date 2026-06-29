@@ -123,6 +123,7 @@
 
         <button type="button" class="auth__forgot" id="authForgot" hidden></button>
         <button type="button" class="auth__forgot" id="authResend" hidden></button>
+        <button type="button" class="auth__back" id="authBack" hidden></button>
 
         <p class="auth__error" id="authError" role="alert" hidden></p>
         <p class="auth__note" id="authNote" role="status" hidden></p>
@@ -159,7 +160,7 @@
 
       <div class="sidebar__search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <input type="text" id="searchInput" data-i18n-ph="searchPlaceholder" placeholder="ابحث في المحادثات" aria-label="Search conversations" />
+        <input type="search" id="searchInput" name="conversationSearch" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" data-i18n-ph="searchPlaceholder" placeholder="ابحث في المحادثات" aria-label="Search conversations" />
       </div>
 
       <nav class="history" id="historyList" aria-label="Conversation history"></nav>

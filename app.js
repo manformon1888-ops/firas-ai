@@ -267,6 +267,9 @@ const STR = {
     authCodeInvalid: "أدخل رمزاً مكوّناً من ٦ أرقام.",
     authCodeWrong: "الرمز غير صحيح أو منتهي.",
     authResend: "إعادة إرسال الرابط",
+    authBack: "‹ الرجوع لتسجيل الدخول",
+    authResendOk: "📧 أرسلنا رابطاً جديداً إلى بريدك",
+    authResendWait: "انتظر قليلاً قبل إعادة الإرسال",
     authCodeResent: "أرسلنا رابطاً جديداً إلى بريدك.",
     authGoogle: "المتابعة عبر Google",
     authOr: "أو",
@@ -426,6 +429,9 @@ const STR = {
     authCodeInvalid: "Enter a 6-digit code.",
     authCodeWrong: "Wrong or expired code.",
     authResend: "Resend link",
+    authBack: "‹ Back to sign in",
+    authResendOk: "📧 We sent a new link to your email",
+    authResendWait: "Please wait before resending",
     authCodeResent: "We sent a new link to your email.",
     authGoogle: "Continue with Google",
     authOr: "or",
@@ -5927,20 +5933,29 @@ function openSettingsPanel() {
   const close = () => { ov.classList.remove("is-open"); setTimeout(() => ov.remove(), 200); };
 
   const tx = ar ? {
-    title: "الإعدادات", sub: "إدارة حسابك",
+    title: "الإعدادات", sub: "إدارة حسابك وأمانه", account: "الحساب",
     chEmailH: "تغيير البريد الإلكتروني", newEmail: "البريد الجديد", curPw: "كلمة المرور الحالية", saveEmail: "حفظ البريد",
-    chPwH: "تغيير كلمة المرور", newPw: "كلمة المرور الجديدة (8 أحرف فأكثر)", savePw: "حفظ كلمة المرور",
+    chPwH: "تغيير كلمة المرور", newPw: "كلمة المرور الجديدة", newPwHint: "٨ أحرف على الأقل", savePw: "حفظ كلمة المرور",
     dangerH: "منطقة الخطر", dangerP: "حذف الحساب يمسح جميع محادثاتك نهائياً ولا يمكن التراجع عنه.",
     delBtn: "حذف حسابي", delConfirmP: "للتأكيد، أدخل كلمة مرورك ثم اضغط «حذف نهائي».", cancel: "إلغاء", delFinal: "حذف نهائي",
     okEmail: "تم تحديث البريد ✓", okPw: "تم تغيير كلمة المرور ✓", deleted: "تم حذف حسابك", working: "جارٍ…",
   } : {
-    title: "Settings", sub: "Manage your account",
+    title: "Settings", sub: "Manage your account & security", account: "Account",
     chEmailH: "Change email", newEmail: "New email", curPw: "Current password", saveEmail: "Save email",
-    chPwH: "Change password", newPw: "New password (8+ characters)", savePw: "Save password",
+    chPwH: "Change password", newPw: "New password", newPwHint: "at least 8 characters", savePw: "Save password",
     dangerH: "Danger zone", dangerP: "Deleting your account erases all your conversations permanently. This can't be undone.",
     delBtn: "Delete my account", delConfirmP: "To confirm, enter your password then tap “Delete permanently”.", cancel: "Cancel", delFinal: "Delete permanently",
     okEmail: "Email updated ✓", okPw: "Password changed ✓", deleted: "Your account was deleted", working: "Working…",
   };
+  const ICO = {
+    mail: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+    alert: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>',
+  };
+  // A present-but-hidden username field gives the browser somewhere to bind the saved email so
+  // it stops bleeding it into the conversation search box.
+  const hiddenUser = '<input class="set-hidden-user" type="text" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;border:0;opacity:0;pointer-events:none;">';
+  const field = (label, input, hint) => '<label class="set-field"><span class="set-lbl">' + label + (hint ? ' <span class="set-lbl-hint">· ' + hint + '</span>' : '') + '</span>' + input + '</label>';
 
   ov.innerHTML =
     '<div class="mem-card settings-card" role="dialog" aria-modal="true">' +
@@ -5949,31 +5964,33 @@ function openSettingsPanel() {
         '<button class="mem-x" aria-label="' + (ar ? "إغلاق" : "close") + '"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>' +
       '</div>' +
       '<div class="set-body">' +
-        '<section class="set-section set-account">' +
+        '<section class="set-hero">' +
           '<span class="set-avatar"></span>' +
-          '<div class="set-acct-info"><strong class="set-acct-name"></strong><span class="set-acct-email" dir="ltr"></span></div>' +
+          '<div class="set-hero-info"><span class="set-hero-eyebrow">' + tx.account + '</span><strong class="set-acct-name"></strong><span class="set-acct-email" dir="ltr"></span></div>' +
         '</section>' +
-        '<form class="set-section set-form set-email-form" novalidate>' +
-          '<h4>' + tx.chEmailH + '</h4>' +
-          '<input class="set-in set-new-email" type="email" dir="ltr" autocomplete="email" placeholder="' + tx.newEmail + '">' +
-          '<input class="set-in set-email-pw" type="password" dir="ltr" autocomplete="current-password" placeholder="' + tx.curPw + '">' +
+        '<form class="set-card set-email-form" novalidate autocomplete="off">' +
+          '<div class="set-card-h"><span class="set-ico">' + ICO.mail + '</span>' + tx.chEmailH + '</div>' +
+          hiddenUser +
+          field(tx.newEmail, '<input class="set-in set-new-email" type="email" dir="ltr" autocomplete="off" autocapitalize="off" spellcheck="false">') +
+          field(tx.curPw, '<input class="set-in set-email-pw" type="password" dir="ltr" autocomplete="off">') +
           '<div class="set-err" hidden></div>' +
           '<button type="submit" class="set-save">' + tx.saveEmail + '</button>' +
         '</form>' +
-        '<form class="set-section set-form set-pass-form" novalidate>' +
-          '<h4>' + tx.chPwH + '</h4>' +
-          '<input class="set-in set-cur-pw" type="password" dir="ltr" autocomplete="current-password" placeholder="' + tx.curPw + '">' +
-          '<input class="set-in set-new-pw" type="password" dir="ltr" autocomplete="new-password" placeholder="' + tx.newPw + '">' +
+        '<form class="set-card set-pass-form" novalidate autocomplete="off">' +
+          '<div class="set-card-h"><span class="set-ico">' + ICO.lock + '</span>' + tx.chPwH + '</div>' +
+          hiddenUser +
+          field(tx.curPw, '<input class="set-in set-cur-pw" type="password" dir="ltr" autocomplete="off">') +
+          field(tx.newPw, '<input class="set-in set-new-pw" type="password" dir="ltr" autocomplete="new-password">', tx.newPwHint) +
           '<div class="set-err" hidden></div>' +
           '<button type="submit" class="set-save">' + tx.savePw + '</button>' +
         '</form>' +
-        '<section class="set-section set-danger">' +
-          '<h4>' + tx.dangerH + '</h4>' +
+        '<section class="set-card set-danger">' +
+          '<div class="set-card-h set-danger-h"><span class="set-ico">' + ICO.alert + '</span>' + tx.dangerH + '</div>' +
           '<p class="set-danger-note">' + tx.dangerP + '</p>' +
           '<button type="button" class="set-del-btn">' + tx.delBtn + '</button>' +
           '<div class="set-del-confirm" hidden>' +
             '<p class="set-danger-note">' + tx.delConfirmP + '</p>' +
-            '<input class="set-in set-del-pw" type="password" dir="ltr" autocomplete="current-password" placeholder="' + tx.curPw + '">' +
+            '<input class="set-in set-del-pw" type="password" dir="ltr" autocomplete="off" placeholder="' + tx.curPw + '">' +
             '<div class="set-err set-del-err" hidden></div>' +
             '<div class="set-del-row">' +
               '<button type="button" class="set-del-cancel">' + tx.cancel + '</button>' +
@@ -5984,11 +6001,12 @@ function openSettingsPanel() {
       '</div>' +
     '</div>';
 
-  // identity (textContent — XSS-safe)
+  // identity (textContent / .value — XSS-safe)
   const name = (u.name && String(u.name).trim()) || (u.email ? String(u.email).split("@")[0] : "Firas");
   ov.querySelector(".set-avatar").textContent = (name.charAt(0) || "F").toUpperCase();
   ov.querySelector(".set-acct-name").textContent = name;
   ov.querySelector(".set-acct-email").textContent = u.email || "";
+  ov.querySelectorAll(".set-hidden-user").forEach((i) => { i.value = u.email || ""; });
 
   const showErr = (el, msg) => { if (el) { el.textContent = msg; el.hidden = false; } };
   const clrErr = (el) => { if (el) el.hidden = true; };
@@ -6151,6 +6169,7 @@ function cacheAuthEls() {
   authEls.code = $("#authCode");
   authEls.codeLabel = $("#authCodeLabel");
   authEls.resend = $("#authResend");
+  authEls.back = $("#authBack");
 }
 
 function renderAuthCopy() {
@@ -6173,6 +6192,7 @@ function renderAuthCopy() {
     if (authEls.divider) authEls.divider.hidden = true;
     if (authEls.forgot) authEls.forgot.hidden = true;
     if (authEls.resend) { authEls.resend.hidden = false; authEls.resend.textContent = t().authResend; }
+    if (authEls.back) { authEls.back.hidden = false; authEls.back.textContent = t().authBack; }
     if (authEls.switchRow) authEls.switchRow.hidden = true;
     showAuthNote(t().authVerifyWaiting);             // "waiting for you to open the link…"
     return;
@@ -6198,6 +6218,7 @@ function renderAuthCopy() {
     if (authEls.divider) authEls.divider.hidden = true;
     if (authEls.forgot) authEls.forgot.hidden = true;
     if (authEls.resend) authEls.resend.hidden = true;
+    if (authEls.back) { authEls.back.hidden = false; authEls.back.textContent = t().authBack; }
     if (authEls.switchRow) authEls.switchRow.hidden = true;
     return;
   }
@@ -6220,6 +6241,7 @@ function renderAuthCopy() {
   authEls.password.setAttribute("autocomplete", isSignup ? "new-password" : "current-password");
   if (authEls.codeField) authEls.codeField.hidden = true;
   if (authEls.resend) authEls.resend.hidden = true;
+  if (authEls.back) authEls.back.hidden = true;
   if (authEls.switchRow) authEls.switchRow.hidden = false;
   if (authEls.forgot) { authEls.forgot.textContent = t().authForgot; authEls.forgot.hidden = isSignup; }
   // localize standalone labels
@@ -6272,12 +6294,28 @@ function stopVerifyPolling() { if (_verifyPoll) { clearInterval(_verifyPoll); _v
 /** Re-send a fresh verification LINK for the pending email. */
 async function handleResendCode() {
   if (!_verifyEmail || (authEls.resend && authEls.resend.disabled)) return;
-  if (authEls.resend) authEls.resend.disabled = true;
+  const btn = authEls.resend;
+  if (btn) btn.disabled = true;
   try {
     await apiJson("/api/auth/resend-code", { method: "POST", body: JSON.stringify({ email: _verifyEmail }) });
+    showToast(t().authResendOk);            // unmistakable confirmation
     showAuthNote(t().authCodeResent);
-  } catch (_) { /* ignore */ } finally {
-    setTimeout(() => { if (authEls.resend) authEls.resend.disabled = false; }, 15000); // throttle re-sends
+    // visible 30s countdown so it's clear the button is throttled (not broken)
+    if (btn) {
+      let n = 30;
+      const tick = () => {
+        if (authMode !== "verify") { btn.textContent = t().authResend; btn.disabled = false; return; }
+        if (n <= 0) { btn.disabled = false; btn.textContent = t().authResend; return; }
+        const d = (typeof toArabicDigits === "function" && state.lang === "ar") ? toArabicDigits(n) : n;
+        btn.textContent = t().authResend + " (" + d + ")";
+        n -= 1;
+        setTimeout(tick, 1000);
+      };
+      tick();
+    }
+  } catch (err) {
+    showToast((err && err.status === 429) ? t().authResendWait : ((err && err.message) || t().authResendWait));
+    if (btn) setTimeout(() => { btn.disabled = false; }, 5000);
   }
 }
 
@@ -6610,6 +6648,14 @@ function wireAuth() {
   if (authEls.google) authEls.google.addEventListener("click", handleGoogleSignIn);
   if (authEls.forgot) authEls.forgot.addEventListener("click", handleForgotPassword);
   if (authEls.resend) authEls.resend.addEventListener("click", handleResendCode);
+  if (authEls.back) authEls.back.addEventListener("click", () => {
+    // Bail out of reset/verify back to a clean sign-in (e.g. you remembered your password).
+    _resetToken = ""; _resetUid = ""; _verifyEmail = ""; _verifyPid = "";
+    stopVerifyPolling();
+    try { history.replaceState(null, "", location.pathname); } catch (_) {}
+    if (authEls.password) authEls.password.value = "";
+    setAuthMode("login");
+  });
 }
 
 /* ----------------------------------------------------------------------------
