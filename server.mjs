@@ -803,37 +803,46 @@ const RESEND_FROM    = process.env.RESEND_FROM || "Firas AI <onboarding@resend.d
 const RESET_APP_URL  = (process.env.APP_URL || "").replace(/\/+$/, "");
 const RESET_TTL_MS   = 30 * 60_000;
 const VERIFY_TTL_MS  = 15 * 60_000; // signup email-verification code lifetime
-// Professional, email-client-safe template (table layout + inline styles + RTL).
+function fmtNow() {
+  try { return new Date().toLocaleString("ar", { dateStyle: "long", timeStyle: "short" }); }
+  catch (_) { return new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC"; }
+}
+// DARK, bold, professional, email-client-safe template (table layout + inline styles + RTL).
+// Logo is rendered in-email (CSS) so it shows in ALL clients incl. Gmail — external image
+// files are blocked by most clients until the site is on a real domain.
 function brandedEmail(o) {
-  const accent = "#1F6F5F", accent2 = "#237A68", ink = "#1A1A18", cream = "#FAF9F5", muted = "#8A857C", line = "#E7E4DC";
+  const bg = "#0d0f0e", card = "#181c1a", border = "#2c322f", ink = "#ECEAE3", muted = "#9aa39f", soft = "#6f7a76", accent = "#2C8A78", accent2 = "#57AE9C";
   const font = "'Segoe UI',Tahoma,Arial,'Helvetica Neue',sans-serif";
+  const time = o.time || fmtNow();
   return '<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"></head>' +
-    '<body style="margin:0;padding:0;background:#eceae3;">' +
-    '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#eceae3;">' + (o.preheader || "") + '</div>' +
-    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eceae3;padding:28px 12px;"><tr><td align="center">' +
-    '<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid ' + line + ';border-radius:16px;overflow:hidden;">' +
-    '<tr><td style="background:' + accent + ';padding:22px 28px;"><table role="presentation" cellpadding="0" cellspacing="0"><tr>' +
-      '<td style="background:#ffffff;width:40px;height:40px;border-radius:11px;text-align:center;font:800 22px/40px ' + font + ';color:' + accent + ';">F</td>' +
-      '<td style="padding-inline-start:12px;font:700 19px/1 ' + font + ';color:#ffffff;">Firas&nbsp;AI</td>' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"></head>' +
+    '<body style="margin:0;padding:0;background:' + bg + ';">' +
+    '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:' + bg + ';">' + (o.preheader || "") + '</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ';padding:30px 12px;"><tr><td align="center">' +
+    '<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:' + card + ';border:1px solid ' + border + ';border-radius:18px;overflow:hidden;">' +
+    '<tr><td style="height:4px;background:' + accent + ';font-size:0;line-height:0;">&nbsp;</td></tr>' +
+    '<tr><td style="padding:26px 30px 6px;"><table role="presentation" cellpadding="0" cellspacing="0"><tr>' +
+      '<td style="width:46px;height:46px;border-radius:13px;background:' + accent + ';text-align:center;font:800 24px/46px ' + font + ';color:#ffffff;">F</td>' +
+      '<td style="padding-inline-start:13px;font:800 20px/1 ' + font + ';letter-spacing:2px;color:' + ink + ';">FIRAS<span style="color:' + accent2 + ';"> AI</span></td>' +
     '</tr></table></td></tr>' +
-    '<tr><td style="padding:32px 30px 8px;font-family:' + font + ';color:' + ink + ';">' +
-      '<h1 style="margin:0 0 12px;font-size:21px;font-weight:700;color:' + ink + ';">' + o.heading + '</h1>' +
-      '<p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#46443f;">' + o.lead + '</p>' +
+    '<tr><td style="padding:18px 30px 6px;font-family:' + font + ';color:' + ink + ';">' +
+      '<h1 style="margin:0 0 12px;font-size:22px;font-weight:800;color:' + ink + ';">' + o.heading + '</h1>' +
+      '<p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:' + muted + ';">' + o.lead + '</p>' +
       o.contentHtml +
-      (o.note ? '<p style="margin:18px 0 0;font-size:13px;line-height:1.6;color:' + muted + ';">' + o.note + '</p>' : '') +
+      (o.note ? '<p style="margin:20px 0 0;font-size:13px;line-height:1.7;color:' + muted + ';">' + o.note + '</p>' : '') +
     '</td></tr>' +
-    '<tr><td style="padding:0 30px;"><div style="border-top:1px solid ' + line + ';margin-top:24px;"></div></td></tr>' +
-    '<tr><td style="padding:18px 30px 26px;background:' + cream + ';font-family:' + font + ';text-align:center;">' +
-      '<p style="margin:0 0 4px;font-size:13px;font-weight:600;color:' + accent2 + ';">Firas AI</p>' +
-      '<p style="margin:0;font-size:12px;color:' + muted + ';">مساعدك الذكي · هذه رسالة آلية، لا داعي للرد عليها.</p>' +
+    '<tr><td style="padding:14px 30px 2px;font-family:' + font + ';font-size:12px;color:' + soft + ';">أُرسلت في: ' + time + '</td></tr>' +
+    '<tr><td style="padding:18px 30px 0;"><div style="border-top:1px solid ' + border + ';"></div></td></tr>' +
+    '<tr><td style="padding:16px 30px 26px;font-family:' + font + ';text-align:center;">' +
+      '<p style="margin:0 0 4px;font-size:13px;font-weight:700;letter-spacing:1px;color:' + accent2 + ';">FIRAS AI</p>' +
+      '<p style="margin:0;font-size:12px;color:' + soft + ';">مساعدك الذكي · رسالة آلية، لا داعي للرد عليها.</p>' +
     '</td></tr></table>' +
-    '<p style="margin:14px 0 0;font-size:11px;color:#9b968c;font-family:' + font + ';">© Firas AI</p>' +
+    '<p style="margin:14px 0 0;font-size:11px;color:#555c59;font-family:' + font + ';">© Firas AI</p>' +
     '</td></tr></table></body></html>';
 }
 function verifyEmailHtml(code) {
-  const codeBox = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:6px auto 4px;"><tr>' +
-    '<td style="background:#F3F6F4;border:1px solid #CFE0DA;border-radius:12px;padding:16px 26px;font:800 34px/1 \'Segoe UI\',Tahoma,Arial,sans-serif;letter-spacing:12px;color:#1F6F5F;text-align:center;">' + code + '</td>' +
+  const codeBox = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:8px auto 2px;"><tr>' +
+    '<td style="background:#10211c;border:1px solid #2C8A78;border-radius:14px;padding:18px 30px;font:800 36px/1 \'Segoe UI\',Tahoma,Arial,sans-serif;letter-spacing:14px;color:#57AE9C;text-align:center;">' + code + '</td>' +
     '</tr></table>';
   return brandedEmail({
     preheader: "رمز تأكيد حسابك في Firas AI",
@@ -862,10 +871,10 @@ function resetAppBase(req) {
   return "http://" + (req.headers.host || ("localhost:" + PORT));
 }
 function resetEmailHtml(link) {
-  const btn = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:4px auto;"><tr>' +
-    '<td style="border-radius:10px;background:#1F6F5F;"><a href="' + link + '" style="display:inline-block;padding:13px 30px;font:700 15px \'Segoe UI\',Tahoma,Arial,sans-serif;color:#ffffff;text-decoration:none;border-radius:10px;">تعيين كلمة مرور جديدة</a></td>' +
+  const btn = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:6px auto;"><tr>' +
+    '<td style="border-radius:11px;background:#2C8A78;"><a href="' + link + '" style="display:inline-block;padding:14px 32px;font:800 15px \'Segoe UI\',Tahoma,Arial,sans-serif;color:#06120f;text-decoration:none;border-radius:11px;">تعيين كلمة مرور جديدة</a></td>' +
     '</tr></table>' +
-    '<p style="margin:16px 0 0;font-size:12px;color:#8A857C;word-break:break-all;">أو افتح هذا الرابط:<br><a href="' + link + '" style="color:#237A68;">' + link + '</a></p>';
+    '<p style="margin:18px 0 0;font-size:12px;color:#6f7a76;word-break:break-all;">أو افتح هذا الرابط:<br><a href="' + link + '" style="color:#57AE9C;">' + link + '</a></p>';
   return brandedEmail({
     preheader: "رابط إعادة تعيين كلمة المرور — Firas AI",
     heading: "إعادة تعيين كلمة المرور",
