@@ -6124,17 +6124,13 @@ async function handleForgotPassword() {
   if (!email) { showAuthError(t().authForgotNeedEmail); authEls.email.focus(); return; }
   if (authEls.forgot) authEls.forgot.disabled = true;
   try {
-    if (hasFirebaseConfig()) {
-      const m = await loadFirebase();
-      const auth = await ensureFirebaseAuth();
-      await m.sendPasswordResetEmail(auth, email);
-    } else {
-      await apiJson("/api/auth/forgot", { method: "POST", body: JSON.stringify({ email }) });
-    }
+    // ALWAYS the app's own backend (branded email + the in-app reset page that sets the
+    // LOCAL password) — NOT Firebase. Email/password is fully local, so resetting via
+    // Firebase would change a password the local login never checks.
+    await apiJson("/api/auth/forgot", { method: "POST", body: JSON.stringify({ email }) });
     showAuthNote(t().authForgotSent);
   } catch (err) {
-    if (err && /user-not-found/.test(err.code || "")) showAuthNote(t().authForgotSent); // anti-enumeration
-    else showAuthError(firebaseAuthMessage(err) || t().authNetworkError);
+    showAuthNote(t().authForgotSent); // anti-enumeration: same message regardless
   } finally {
     if (authEls.forgot) authEls.forgot.disabled = false;
   }

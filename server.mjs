@@ -719,7 +719,7 @@ async function handleSignup(req, res) {
   DB.pending[email] = { name, email, passHash, salt, codeHash: sha256hex(code), exp: Date.now() + VERIFY_TTL_MS, tries: 0 };
   await persist();
   const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
-  if (!sent) console.log("[firas] signup verification code for " + email + " = " + code + " (email not configured)");
+  if (!sent) console.log("[firas] signup verification code for " + email + " = " + code + " (not delivered — dev fallback)");
   return sendJson(res, 200, { ok: true, pending: true, email });
 }
 
@@ -754,7 +754,7 @@ async function handleResendCode(req, res) {
     p.codeHash = sha256hex(code); p.exp = Date.now() + VERIFY_TTL_MS; p.tries = 0;
     await persist();
     const sent = await sendEmail(email, "رمز تأكيد حسابك — Firas AI", verifyEmailHtml(code));
-    if (!sent) console.log("[firas] (resend) signup code for " + email + " = " + code + " (email not configured)");
+    if (!sent) console.log("[firas] (resend) signup code for " + email + " = " + code + " (not delivered — dev fallback)");
   }
   return sendJson(res, 200, { ok: true });
 }
@@ -852,8 +852,9 @@ async function sendEmail(to, subject, html) {
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + RESEND_API_KEY },
       body: JSON.stringify({ from: RESEND_FROM, to: [to], subject, html }),
     });
-    return r.ok;
-  } catch (_) { return false; }
+    if (!r.ok) { const e = await r.text().catch(() => ""); console.error("[firas] Resend send failed " + r.status + " -> " + e.slice(0, 200)); return false; }
+    return true;
+  } catch (e) { console.error("[firas] Resend send error: " + ((e && e.message) || e)); return false; }
 }
 function resetAppBase(req) {
   if (RESET_APP_URL) return RESET_APP_URL;
@@ -885,7 +886,7 @@ async function handleForgot(req, res) {
       await persist();
       const link = resetAppBase(req) + "/?reset=" + token + "&uid=" + encodeURIComponent(user.id);
       const sent = await sendEmail(user.email, "إعادة تعيين كلمة المرور — Firas AI", resetEmailHtml(link));
-      if (!sent) console.log("[firas] password-reset (email not configured) for " + user.email + " -> " + link);
+      if (!sent) console.log("[firas] password-reset (not delivered — dev fallback) for " + user.email + " -> " + link);
     }
   }
   return sendJson(res, 200, { ok: true }); // anti-enumeration: ALWAYS ok
