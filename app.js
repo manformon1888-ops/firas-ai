@@ -6640,12 +6640,29 @@ function checkResetLink() {
   } catch (_) { return false; }
 }
 
+const LS_COOKIE = "firas_cookie_consent";
+function maybeShowCookieBanner() {
+  const b = document.getElementById("cookieBanner");
+  if (!b) return;
+  let choice = "";
+  try { choice = localStorage.getItem(LS_COOKIE) || ""; } catch (_) {}
+  b.hidden = !!choice;              // only for visitors who haven't chosen yet
+}
+function setupCookieConsent() {
+  const b = document.getElementById("cookieBanner");
+  if (!b) return;
+  const save = (v) => { try { localStorage.setItem(LS_COOKIE, v); } catch (_) {} b.hidden = true; };
+  const a = document.getElementById("cookieAccept"), r = document.getElementById("cookieReject");
+  if (a) a.addEventListener("click", () => save("accepted"));
+  if (r) r.addEventListener("click", () => save("rejected"));
+}
 function showAuthScreen() {
   hideLanding();
   els.appShell.hidden = true;
   authEls.screen.hidden = false;
   renderAuthCopy();
   applyGoogleVisibility();          // show Google button only when configured
+  maybeShowCookieBanner();          // cookie consent shows here only (login/signup), until chosen
   setTimeout(() => authEls.email.focus(), 50);
 }
 function hideAuthScreen() {
@@ -7077,6 +7094,7 @@ async function init() {
   cacheEls();
   startVersionWatch();
   setupAuthChannel();
+  setupCookieConsent();         // cookie-consent banner (auth screen only)
   injectBrandMarks();           // brand the static markup (topbar, sidebar, auth)
   applyTheme(state.theme);
   applyThink();
