@@ -245,9 +245,10 @@ const VERIFY_TTL_MS  = 15 * 60000;
 const RESET_TTL_MS   = 30 * 60000;
 function appBase(request) { try { return new URL(request.url).origin; } catch (_) { return ""; } }
 async function sendViaBrevo(to, subject, html, fromName) {
+  if (!BREVO_API_KEY) { console.error("[firas] Brevo: BREVO_API_KEY is EMPTY on this deploy (set it in Netlify env + redeploy)"); return false; }
   try {
     const r = await fetch("https://api.brevo.com/v3/smtp/email", { method: "POST", headers: { "content-type": "application/json", "accept": "application/json", "api-key": BREVO_API_KEY }, body: JSON.stringify({ sender: { name: fromName || BREVO_FROM_NAME, email: BREVO_FROM }, to: [{ email: to }], subject, htmlContent: html }) });
-    if (!r.ok) { console.error("[firas] Brevo send failed " + r.status); return false; }
+    if (!r.ok) { const b = await r.text().catch(() => ""); console.error("[firas] Brevo send failed " + r.status + " (from=" + BREVO_FROM + ") -> " + b.slice(0, 300)); return false; }
     return true;
   } catch (e) { console.error("[firas] Brevo error: " + ((e && e.message) || e)); return false; }
 }
@@ -257,7 +258,7 @@ async function sendViaResend(to, subject, html, fromName) {
   const from = fromName ? (fromName + " <" + addr + ">") : RESEND_FROM;
   try {
     const r = await fetch("https://api.resend.com/emails", { method: "POST", headers: { "content-type": "application/json", "Authorization": "Bearer " + RESEND_API_KEY }, body: JSON.stringify({ from, to: [to], subject, html }) });
-    if (!r.ok) { console.error("[firas] Resend send failed " + r.status); return false; }
+    if (!r.ok) { const b = await r.text().catch(() => ""); console.error("[firas] Resend send failed " + r.status + " -> " + b.slice(0, 200)); return false; }
     return true;
   } catch (e) { console.error("[firas] Resend error: " + ((e && e.message) || e)); return false; }
 }
