@@ -233,6 +233,72 @@ async function saveUser(u) {
   await dbPut("users/" + u.id, u);
   await dbPut("emailIndex/" + emailKey(u.email), u.id);
 }
+
+/* ---------------- email (Resend) + signup verification + password reset ---------------- */
+const RESEND_API_KEY = env("RESEND_API_KEY") || "";
+const RESEND_FROM    = env("RESEND_FROM") || "Firas AI <onboarding@resend.dev>";
+const VERIFY_TTL_MS  = 15 * 60000;
+const RESET_TTL_MS   = 30 * 60000;
+function appBase(request) { try { return new URL(request.url).origin; } catch (_) { return ""; } }
+async function sendEmail(to, subject, html) {
+  if (!RESEND_API_KEY) return false;
+  try {
+    const r = await fetch("https://api.resend.com/emails", { method: "POST", headers: { "content-type": "application/json", "Authorization": "Bearer " + RESEND_API_KEY }, body: JSON.stringify({ from: RESEND_FROM, to: [to], subject, html }) });
+    if (!r.ok) { console.error("[firas] Resend send failed " + r.status); return false; }
+    return true;
+  } catch (e) { console.error("[firas] Resend error: " + ((e && e.message) || e)); return false; }
+}
+function fmtNow() { try { return new Date().toLocaleString("ar", { dateStyle: "long", timeStyle: "short" }); } catch (_) { return new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC"; } }
+function brandedEmail(o) {
+  const bg = "#0d0f0e", card = "#181c1a", border = "#2c322f", ink = "#ECEAE3", muted = "#9aa39f", soft = "#6f7a76", accent = "#2C8A78", accent2 = "#57AE9C";
+  const font = "'Segoe UI',Tahoma,Arial,'Helvetica Neue',sans-serif";
+  const time = o.time || fmtNow();
+  return '<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"></head>' +
+    '<body style="margin:0;padding:0;background:' + bg + ';">' +
+    '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:' + bg + ';">' + (o.preheader || "") + '</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ';padding:30px 12px;"><tr><td align="center">' +
+    '<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:' + card + ';border:1px solid ' + border + ';border-radius:18px;overflow:hidden;">' +
+    '<tr><td style="height:4px;background:' + accent + ';font-size:0;line-height:0;">&nbsp;</td></tr>' +
+    '<tr><td style="padding:26px 30px 6px;"><table role="presentation" cellpadding="0" cellspacing="0"><tr>' +
+      '<td style="width:46px;height:46px;border-radius:13px;background:' + accent + ';text-align:center;font:800 24px/46px ' + font + ';color:#ffffff;">F</td>' +
+      '<td style="padding-inline-start:13px;font:800 20px/1 ' + font + ';letter-spacing:2px;color:' + ink + ';">FIRAS<span style="color:' + accent2 + ';"> AI</span></td>' +
+    '</tr></table></td></tr>' +
+    '<tr><td style="padding:18px 30px 6px;font-family:' + font + ';color:' + ink + ';">' +
+      '<h1 style="margin:0 0 12px;font-size:22px;font-weight:800;color:' + ink + ';">' + o.heading + '</h1>' +
+      '<p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:' + muted + ';">' + o.lead + '</p>' +
+      o.contentHtml +
+      (o.note ? '<p style="margin:20px 0 0;font-size:13px;line-height:1.7;color:' + muted + ';">' + o.note + '</p>' : '') +
+    '</td></tr>' +
+    '<tr><td style="padding:14px 30px 2px;font-family:' + font + ';font-size:12px;color:' + soft + ';">أُرسلت في: ' + time + '</td></tr>' +
+    '<tr><td style="padding:18px 30px 0;"><div style="border-top:1px solid ' + border + ';"></div></td></tr>' +
+    '<tr><td style="padding:16px 30px 26px;font-family:' + font + ';text-align:center;">' +
+      '<p style="margin:0 0 4px;font-size:13px;font-weight:700;letter-spacing:1px;color:' + accent2 + ';">FIRAS AI</p>' +
+      '<p style="margin:0;font-size:12px;color:' + soft + ';">مساعدك الذكي · رسالة آلية، لا داعي للرد عليها.</p>' +
+    '</td></tr></table>' +
+    '<p style="margin:14px 0 0;font-size:11px;color:#555c59;font-family:' + font + ';">© Firas AI</p>' +
+    '</td></tr></table></body></html>';
+}
+function verifyEmailHtml(link) {
+  const btn = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:6px auto;"><tr>' +
+    '<td style="border-radius:11px;background:#2C8A78;"><a href="' + link + '" style="display:inline-block;padding:14px 34px;font:800 15px \'Segoe UI\',Tahoma,Arial,sans-serif;color:#06120f;text-decoration:none;border-radius:11px;">تأكيد الحساب وبدء الاستخدام</a></td>' +
+    '</tr></table>' +
+    '<p style="margin:18px 0 0;font-size:12px;color:#6f7a76;word-break:break-all;">أو افتح هذا الرابط:<br><a href="' + link + '" style="color:#57AE9C;">' + link + '</a></p>';
+  return brandedEmail({ preheader: "أكمل إنشاء حسابك في Firas AI", heading: "تأكيد بريدك الإلكتروني", lead: "أهلاً بك في Firas AI! اضغط الزر لتأكيد بريدك وتفعيل حسابك — وستدخل مباشرةً.", contentHtml: btn, note: "الرابط صالح لمدة 15 دقيقة. إذا لم تطلب إنشاء حساب، تجاهل هذه الرسالة." });
+}
+function resetEmailHtml(link) {
+  const btn = '<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:6px auto;"><tr>' +
+    '<td style="border-radius:11px;background:#2C8A78;"><a href="' + link + '" style="display:inline-block;padding:14px 32px;font:800 15px \'Segoe UI\',Tahoma,Arial,sans-serif;color:#06120f;text-decoration:none;border-radius:11px;">تعيين كلمة مرور جديدة</a></td>' +
+    '</tr></table>' +
+    '<p style="margin:18px 0 0;font-size:12px;color:#6f7a76;word-break:break-all;">أو افتح هذا الرابط:<br><a href="' + link + '" style="color:#57AE9C;">' + link + '</a></p>';
+  return brandedEmail({ preheader: "رابط إعادة تعيين كلمة المرور — Firas AI", heading: "إعادة تعيين كلمة المرور", lead: "طلبت إعادة تعيين كلمة مرورك. اضغط الزر للمتابعة:", contentHtml: btn, note: "الرابط صالح لمدة 30 دقيقة. إذا لم تطلب هذا، تجاهل الرسالة وكلمة مرورك تبقى كما هي." });
+}
+// Pending signups live in Firebase with reverse-indexes by token + pid (for O(1) lookup).
+async function delPending(ek, rec) {
+  try { await dbDelete("pending/" + ek); } catch (_) {}
+  if (rec && rec.token) { try { await dbDelete("pendingTok/" + rec.token); } catch (_) {} }
+  if (rec && rec.pid) { try { await dbDelete("pendingPid/" + rec.pid); } catch (_) {} }
+}
 async function currentUser(context) {
   if (!SESSION_SECRET) return null;
   const raw = context.cookies.get(COOKIE_NAME);
@@ -862,10 +928,18 @@ export default async (request, context) => {
       if (password.length < 8) return json({ error: "password must be at least 8 characters" }, 400);
       if (password.length > 200) return json({ error: "password is too long" }, 400);
       if (await getUserByEmail(email)) return json({ error: "email already registered" }, 409);
-      const user = { id: crypto.randomUUID(), name, email, passHash: await hashPassword(password), createdAt: new Date().toISOString() };
-      await saveUser(user);
-      await attachSession(context, user.id, request);
-      return json({ user: publicUser(user) });
+      // Don't create the account yet — stash a PENDING signup (Firebase) + email a verify LINK.
+      const ek = emailKey(email);
+      const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+      const pid = crypto.randomUUID().replace(/-/g, "");
+      const rec = { name, email, passHash: await hashPassword(password), token, pid, exp: Date.now() + VERIFY_TTL_MS, verified: false, userId: null };
+      await dbPut("pending/" + ek, rec);
+      await dbPut("pendingTok/" + token, ek);
+      await dbPut("pendingPid/" + pid, ek);
+      const link = appBase(request) + "/?verify=" + token;
+      const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
+      if (!sent) console.log("[firas] signup verify link for " + email + " -> " + link + " (not delivered)");
+      return json({ ok: true, pending: true, email, pid });
     }
 
     if (path === "/api/auth/login" && method === "POST") {
@@ -882,6 +956,90 @@ export default async (request, context) => {
       if (!user || !user.passHash || !(await verifyPassword(password, user.passHash))) return json({ error: "invalid email or password" }, 401);
       await attachSession(context, user.id, request);
       return json({ user: publicUser(user) });
+    }
+
+    if (path === "/api/auth/verify-signup" && method === "POST") {
+      if (rateLimited("verify", 60, 60000)) return json({ error: "too many requests" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const token = String(b.token || "").trim(); if (!token) return json({ error: "رابط غير صالح" }, 400);
+      const ek = await dbGet("pendingTok/" + token);
+      const rec = ek ? await dbGet("pending/" + ek) : null;
+      if (!rec || Date.now() > rec.exp) { if (ek) await delPending(ek, rec); return json({ error: "الرابط غير صالح أو منتهي — أعد التسجيل" }, 400); }
+      let user;
+      if (rec.verified && rec.userId) { user = await getUserById(rec.userId); }
+      else {
+        if (await getUserByEmail(rec.email)) { await delPending(ek, rec); return json({ error: "email already registered" }, 409); }
+        user = { id: crypto.randomUUID(), name: rec.name, email: rec.email, passHash: rec.passHash, emailVerified: true, createdAt: new Date().toISOString() };
+        await saveUser(user);
+        rec.verified = true; rec.userId = user.id; rec.verifiedAt = Date.now();
+        await dbPut("pending/" + ek, rec);
+      }
+      if (!user) return json({ error: "تعذّر التأكيد — أعد التسجيل" }, 400);
+      await attachSession(context, user.id, request);
+      return json({ ok: true, user: publicUser(user) });
+    }
+    if (path === "/api/auth/verify-status" && method === "POST") {
+      if (rateLimited("vstatus", 120, 60000)) return json({ error: "too many requests" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const pid = String(b.pid || "").trim(); if (!pid) return json({ error: "missing pid" }, 400);
+      const ek = await dbGet("pendingPid/" + pid);
+      const rec = ek ? await dbGet("pending/" + ek) : null;
+      if (!rec) return json({ verified: false, gone: true });
+      if (Date.now() > rec.exp) { await delPending(ek, rec); return json({ verified: false, expired: true }); }
+      if (rec.verified && rec.userId) {
+        const user = await getUserById(rec.userId);
+        if (user) { await attachSession(context, user.id, request); await delPending(ek, rec); return json({ verified: true, user: publicUser(user) }); }
+      }
+      return json({ verified: false });
+    }
+    if (path === "/api/auth/resend-code" && method === "POST") {
+      if (rateLimited("resend", 8, 60000)) return json({ error: "too many requests" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const email = String(b.email || "").trim().toLowerCase();
+      const ek = emailKey(email);
+      const rec = await dbGet("pending/" + ek);
+      if (rec && !rec.verified) {
+        if (rec.token) { try { await dbDelete("pendingTok/" + rec.token); } catch (_) {} }
+        const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+        rec.token = token; rec.exp = Date.now() + VERIFY_TTL_MS;
+        await dbPut("pending/" + ek, rec);
+        await dbPut("pendingTok/" + token, ek);
+        const link = appBase(request) + "/?verify=" + token;
+        const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
+        if (!sent) console.log("[firas] (resend) verify link for " + email + " -> " + link);
+      }
+      return json({ ok: true });
+    }
+    if (path === "/api/auth/forgot" && method === "POST") {
+      if (rateLimited("forgot", 6, 60000)) return json({ error: "too many requests" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const email = String(b.email || "").trim().toLowerCase();
+      if (EMAIL_RE.test(email)) {
+        const user = await getUserByEmail(email);
+        if (user && user.passHash) {
+          const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+          user.reset = { token, exp: Date.now() + RESET_TTL_MS };
+          await saveUser(user);
+          const link = appBase(request) + "/?reset=" + token + "&uid=" + encodeURIComponent(user.id);
+          const sent = await sendEmail(email, "إعادة تعيين كلمة المرور — Firas AI", resetEmailHtml(link));
+          if (!sent) console.log("[firas] password-reset link for " + email + " -> " + link);
+        }
+      }
+      return json({ ok: true }); // anti-enumeration
+    }
+    if (path === "/api/auth/reset" && method === "POST") {
+      if (rateLimited("reset", 10, 60000)) return json({ error: "too many requests" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const uid = String(b.uid || ""), token = String(b.token || ""), password = String(b.password || "");
+      if (password.length < 8) return json({ error: "password must be at least 8 characters" }, 400);
+      if (password.length > 200) return json({ error: "password is too long" }, 400);
+      const user = await getUserById(uid);
+      if (!user || !user.reset || !user.reset.token || Date.now() > user.reset.exp || user.reset.token !== token) return json({ error: "invalid or expired link" }, 400);
+      user.passHash = await hashPassword(password);
+      delete user.reset;
+      await saveUser(user);
+      await attachSession(context, user.id, request);
+      return json({ ok: true, user: publicUser(user) });
     }
 
     if (path === "/api/auth/logout" && method === "POST") {
