@@ -475,6 +475,19 @@ async function llmComplete(messages, maxTokens, temperature) {
     return typeof c === "string" ? c : "";
   } catch (_) { return ""; }
 }
+// Translation completion: Gemini first (reliable + fast), then llmComplete (Ollama→pollinations).
+// Hard timeout so the announcements AR/EN toggle never hangs.
+async function translateComplete(messages) {
+  if (GEMINI_API_KEY) {
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 22000);
+    try {
+      const r = await fetch(GEMINI_OAI_URL, { method: "POST", headers: { "content-type": "application/json", "Authorization": "Bearer " + GEMINI_API_KEY }, body: JSON.stringify({ model: GEMINI_TEXT_MODELS[0] || "gemini-2.5-flash", messages, temperature: 0.2 }), signal: ac.signal });
+      if (r.ok) { const j = await r.json().catch(() => null); const c = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content; if (typeof c === "string" && c.trim()) return c; }
+    } catch (_) {} finally { clearTimeout(to); }
+  }
+  return await llmComplete(messages, 1500, 0.2);
+}
 async function memoryLearn(user, userText, aiText) {
   const existing = userMemory(user);
   const sys =
@@ -1411,7 +1424,7 @@ export default async (request, context) => {
         const sys = "You are a professional translator. Translate the update below into " + toName + ". Keep brand/product names as-is, preserve line breaks and emoji. Respond in EXACTLY this format and nothing else:\n<<<TITLE>>>\n{translated title}\n<<<BODY>>>\n{translated body}";
         const usr = "<<<TITLE>>>\n" + title + "\n<<<BODY>>>\n" + btext;
         try {
-          const out = stripEngineAd(String(await llmComplete([{ role: "system", content: sys }, { role: "user", content: usr }], 1500, 0.2) || ""));
+          const out = stripEngineAd(String(await translateComplete([{ role: "system", content: sys }, { role: "user", content: usr }]) || ""));
           const tm = out.indexOf("<<<TITLE>>>"), bm = out.indexOf("<<<BODY>>>");
           if (tm !== -1 && bm !== -1 && bm > tm) return json({ title: out.slice(tm + 11, bm).trim(), body: out.slice(bm + 10).trim() });
           return json({ title, body: out.trim() || btext });
@@ -1420,7 +1433,7 @@ export default async (request, context) => {
       const text = String(p.text || "").slice(0, 8000);
       if (!text.trim()) return json({ text: "" });
       const sys = "You are a professional translator. Translate the user's text into " + toName + ". Output ONLY the translation — preserve line breaks, formatting and emoji, keep brand/product names as-is. No notes, no quotes.";
-      try { const out = stripEngineAd(String(await llmComplete([{ role: "system", content: sys }, { role: "user", content: text }], 1500, 0.2) || "")).trim(); return json({ text: out || text }); }
+      try { const out = stripEngineAd(String(await translateComplete([{ role: "system", content: sys }, { role: "user", content: text }]) || "")).trim(); return json({ text: out || text }); }
       catch (_) { return json({ text }); }
     }
 

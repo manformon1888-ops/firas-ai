@@ -1400,18 +1400,31 @@ function stripEngineAd(text) {
 
 // One-shot, non-streaming translation (keyless pollinations OpenAI-compat). Used for the
 // AR/EN toggle on announcements. Falls back to the original text on any failure.
+const TRANSLATE_TIMEOUT_MS = 22_000;
+// Gemini first (reliable + fast), then keyless pollinations. Each call has a hard timeout so the
+// UI never hangs on a stalled engine. Returns "" on total failure (caller falls back to original).
+async function translateFetch(messages) {
+  const tryOne = async (url, body, headers) => {
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), TRANSLATE_TIMEOUT_MS);
+    try {
+      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ac.signal });
+      if (!r.ok) return "";
+      const j = await r.json();
+      return stripEngineAd(String((j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ""));
+    } catch (_) { return ""; } finally { clearTimeout(to); }
+  };
+  if (GEMINI_API_KEY) {
+    const g = await tryOne(GEMINI_OAI_URL, { model: GEMINI_TEXT_MODELS[0] || "gemini-2.5-flash", messages, temperature: 0.2 },
+      { "Content-Type": "application/json", "Authorization": "Bearer " + GEMINI_API_KEY });
+    if (g) return g;
+  }
+  return await tryOne(FALLBACK_URL, { model: "openai-fast", messages, stream: false, temperature: 0.2 }, { "Content-Type": "application/json" });
+}
 async function translateText(text, toLangName) {
   const sys = "You are a professional translator. Translate the user's text into " + toLangName +
     ". Output ONLY the translation — preserve line breaks, formatting and emoji, keep brand/product names as-is. No notes, no quotes.";
-  const r = await fetch(FALLBACK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai-fast", messages: [{ role: "system", content: sys }, { role: "user", content: text }], stream: false, temperature: 0.2 }),
-  });
-  if (!r.ok) throw new Error("translate " + r.status);
-  const j = await r.json();
-  const out = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-  return stripEngineAd(String(out || "")).trim();
+  return (await translateFetch([{ role: "system", content: sys }, { role: "user", content: text }])).trim();
 }
 // Translate a title + body together in ONE upstream call (avoids concurrent-call failures and
 // is faster), parsing them back out via sentinel markers.
@@ -1419,10 +1432,7 @@ async function translatePair(title, bodyText, toLangName) {
   const sys = "You are a professional translator. Translate the update below into " + toLangName +
     ". Keep brand/product names as-is, preserve line breaks and emoji. Respond in EXACTLY this format and nothing else:\n<<<TITLE>>>\n{translated title}\n<<<BODY>>>\n{translated body}";
   const usr = "<<<TITLE>>>\n" + (title || "") + "\n<<<BODY>>>\n" + (bodyText || "");
-  const r = await fetch(FALLBACK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "openai-fast", messages: [{ role: "system", content: sys }, { role: "user", content: usr }], stream: false, temperature: 0.2 }) });
-  if (!r.ok) throw new Error("translate " + r.status);
-  const j = await r.json();
-  const out = stripEngineAd(String((j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ""));
+  const out = await translateFetch([{ role: "system", content: sys }, { role: "user", content: usr }]);
   const tm = out.indexOf("<<<TITLE>>>"), bm = out.indexOf("<<<BODY>>>");
   if (tm !== -1 && bm !== -1 && bm > tm) return { title: out.slice(tm + 11, bm).trim(), body: out.slice(bm + 10).trim() };
   return { title, body: out.trim() || bodyText };

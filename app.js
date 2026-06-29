@@ -6103,12 +6103,15 @@ function openAnnouncementReader(a, onChange) {
     setActive(l); curLang = l;
     if (a._tr[l]) { render(l); return; }
     const old = b.textContent; b.disabled = true; b.textContent = "…";
+    // Hard client-side timeout so the button NEVER stays stuck on "…" if the engine stalls.
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 28000);
     try {
-      const d = await apiJson("/api/translate", { method: "POST", body: JSON.stringify({ title: a.title || "", body: a.body || "", to: l }) });
+      const d = await apiJson("/api/translate", { method: "POST", body: JSON.stringify({ title: a.title || "", body: a.body || "", to: l }), signal: ac.signal });
       a._tr[l] = { title: d.title || a.title || "", body: d.body || a.body || "" };
       if (curLang === l) render(l);
-    } catch (_) { showToast(ar ? "تعذّرت الترجمة" : "Translation failed"); setActive(curLang === l ? l : "orig"); }
-    finally { b.disabled = false; b.textContent = old; }
+    } catch (_) { showToast(ar ? "تعذّرت الترجمة، حاول مجدداً" : "Translation failed, please try again"); setActive(curLang === l ? l : "orig"); }
+    finally { clearTimeout(to); b.disabled = false; b.textContent = old; }
   }));
 
   document.body.appendChild(ov);
