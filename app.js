@@ -4902,7 +4902,24 @@ async function runFileAgentPipeline(convo, fmt, lang, tierKey, signal, onStage) 
   // BIG-COUNT branch: a request for many items ("1000 integrals/problems/questions…")
   // would truncate in a single author call → generate it in parallel BATCHES instead.
   const cm = userText.match(/(\d[\d,]{1,5})\s*\+?\s*(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|سؤال|تمارين|تمرين|انتيكرل|انتقرل|معادلات?|معادلة)/i);
-  const bigCount = cm ? parseInt(cm[1].replace(/,/g, ""), 10) : 0;
+  let bigCount = cm ? parseInt(cm[1].replace(/,/g, ""), 10) : 0;
+  // Worksheet of math items? Several phrasings should ALSO trigger the batched generator
+  // (otherwise a long worksheet truncates/fails in one author call). Take the LARGEST signal.
+  const isMathWorksheet = /integrals?|تكاملات?|انتيكرل|انتقرل|problems?|مسائل|مسأل[ةه]?|questions?|أسئلة|سؤال|exercises?|تمارين|تمرين|equations?|معادلات?/i.test(userText);
+  if (isMathWorksheet) {
+    // "300 hard JEE integrals" — count with adjectives between (only a 2+ digit number, so a "3
+    // rows" never counts as the item total).
+    const cm2 = userText.match(/(\d{2,5})\s+(?:[A-Za-z؀-ۿ'’.-]+\s+){0,5}(?:integrals?|problems?|questions?|exercises?|equations?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|تمارين|معادلات?)/i);
+    if (cm2) { const n = parseInt(cm2[1], 10); if (n >= 30) bigCount = Math.max(bigCount, n); }
+    // "15 pages" / "15 filled" / "15 sheets" → treat the number as PAGES (~9 items each).
+    const pm = userText.match(/(\d{1,3})\s*\+?\s*(?:pages?|sheets?|filled|صفحات?|صفحة|ورق[ةه]?|اوراق|مملوء)/i);
+    const rm = userText.match(/(\d{1,3})\s*\+?\s*(?:rows?|صفوف?|سطور|أسطر)/i);
+    if (pm) bigCount = Math.max(bigCount, parseInt(pm[1], 10) * 9);
+    else if (rm && parseInt(rm[1], 10) >= 10) bigCount = Math.max(bigCount, parseInt(rm[1], 10) * 3);
+    // "lots of / many / long / full" worksheet but no number → a solid default (~17 pages).
+    else if (!bigCount && /\b(?:many|lots?|several|tons?|full|long)\b|كثير|الكثير|طويل|عديد|مليئ|مليان/i.test(userText)) bigCount = 150;
+    bigCount = Math.min(bigCount, 1000);
+  }
   if (bigCount >= 80 && fmt !== "xlsx" && fmt !== "csv" && fmt !== "pptx") {
     return await runBatchedFileDoc(userText, bigCount, fmt, lang, tierKey, signal, onStage);
   }
