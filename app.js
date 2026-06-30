@@ -539,6 +539,28 @@ const state = {
    ITS chat even if the user opens/switches chats; only Stop aborts it. */
 const activeStreams = new Map();
 
+/* Auto-resume: when a reply is cut off because the browser BACKGROUNDED the tab or a brief
+   connectivity drop hit (very common on phones — iOS freezes background tabs and kills the
+   connection), we do NOT show a "retry" button. We drop the partial turn and re-run it
+   automatically the moment the app is foreground + online again — so the user can fire a task,
+   leave to another app, and come back to it finishing on its own. In-memory: covers the common
+   "switch apps & come back" case (the tab stays alive). */
+const resumeQueue = new Set();   // chat objects whose last turn was interrupted
+function canResumeNow() { return !document.hidden && navigator.onLine !== false; }
+function flushResumeQueue() {
+  if (!canResumeNow()) return;
+  const active = activeChat();
+  for (const chat of Array.from(resumeQueue)) {
+    if (!chat) { resumeQueue.delete(chat); continue; }
+    if (chat !== active) continue;                           // only resume the chat in view (runAssistant renders it)
+    resumeQueue.delete(chat);
+    if (activeStreams.has(chat.id)) continue;                // already running
+    const rp = chat._resume; delete chat._resume;
+    const last = chat.messages && chat.messages[chat.messages.length - 1];
+    if (rp && last && last.role === "user") runAssistant(chat, rp.tier || state.tier, rp.lang || state.lang);
+  }
+}
+
 /* DOM refs */
 const $ = (s) => document.querySelector(s);
 const els = {};
@@ -1736,6 +1758,7 @@ async function openChat(chat) {
   syncShellLangFromChat();
   renderAll();
   syncStreamingUi();   // reflect whether THIS chat is mid-stream (Send vs Stop)
+  flushResumeQueue();  // if this chat's last reply was interrupted, resume it now that it's in view
 }
 
 function showThreadLoading() {
@@ -5196,6 +5219,12 @@ async function streamAnswer(aiMsg, aiNode, chat, convoOverride) {
   // navigation can leave it running.
   activeStreams.set(chatId, { controller, timeoutId, aiMsg });
 
+  // If the tab gets backgrounded (or starts hidden) during this stream, a resulting failure is
+  // an INTERRUPTION (auto-resume), not a real error — track it so the catch can tell them apart.
+  let sawHidden = document.hidden;
+  const onVis = () => { if (document.hidden) sawHidden = true; };
+  document.addEventListener("visibilitychange", onVis);
+
   // Snapshot the thinking pref for THIS reply. When off, no Thinking panel.
   // Max NEVER thinks (disabled there — see setThink), even if the pref was left on
   // from another tier, so it can't be steered into breaking its limits.
@@ -5606,8 +5635,18 @@ async function streamAnswer(aiMsg, aiNode, chat, convoOverride) {
         aiMsg.reasoning = reasoning;
         finalizeAi(aiMsg, chat);
       }
+    } else if (sawHidden || document.hidden || navigator.onLine === false) {
+      // INTERRUPTED by backgrounding / a connectivity drop — NOT a real error. Drop the partial
+      // turn and queue a seamless auto-resume for when the app is foreground + online again, so
+      // the user never sees a "retry" button: they can leave the app and come back to it finishing.
+      const i = chat.messages.indexOf(aiMsg);
+      if (i >= 0) chat.messages.splice(i, 1);
+      chat._resume = { tier: aiMsg.tier, lang: aiMsg.lang };
+      resumeQueue.add(chat);
+      if (activeChat() === chat) renderThread(chat);
+      flushResumeQueue();                         // already back? resume immediately
     } else {
-      // Any failure (offline, CORS, 5xx, timeout, empty): serve fallback.
+      // A genuine failure (server error / offline while foreground): serve fallback + Retry.
       const fb = offlineFallback(convo, aiMsg.lang);
       aiMsg.content = fb;
       aiMsg.reasoning = reasoning;
@@ -5617,6 +5656,7 @@ async function streamAnswer(aiMsg, aiNode, chat, convoOverride) {
       if (liveNode && liveNode.isConnected) showInlineError(liveNode, convo, aiMsg);
     }
   } finally {
+    document.removeEventListener("visibilitychange", onVis);
     activeStreams.delete(chatId);
     endStreaming(chatId);
   }
@@ -7116,6 +7156,12 @@ function wireEvents() {
   // Scroll
   els.chatScroll.addEventListener("scroll", onScroll, { passive: true });
   els.scrollBottomBtn.addEventListener("click", () => { autoScroll = true; scrollToBottom(); });
+
+  // Auto-resume any interrupted reply the moment we're foreground + online again (so a task fired
+  // before switching apps / losing signal finishes itself on return — no "retry").
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) flushResumeQueue(); });
+  window.addEventListener("online", flushResumeQueue);
+  window.addEventListener("focus", flushResumeQueue);
 
   // Drawer
   els.drawerOpen.addEventListener("click", openDrawer);
