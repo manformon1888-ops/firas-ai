@@ -4297,9 +4297,12 @@ function buildMessages(tier, conversation, replyLang) {
     "question or integral (e.g. 'give me a hard JEE integral', 'make a hard problem'), output a GENUINELY " +
     "HARD, ORIGINAL, competition-grade one — JEE-Advanced / Olympiad / Putnam level — that demands a real, " +
     "non-obvious idea or technique. NEVER a routine textbook example, a trivially simple form, or an " +
-    "easily-recognizable standard pattern (e.g. avoid bare $\\int \\ln x/(1+x)\\,dx$ types). It MUST have an " +
-    "EXACT closed-form answer that you have INDEPENDENTLY verified before presenting it; if you can't verify " +
-    "a clean closed form, pick a different problem. Make each generated problem distinct — never repeat a pattern.";
+    "easily-recognizable standard pattern (e.g. avoid bare $\\int \\ln x/(1+x)\\,dx$ types). " +
+    "ZERO MISTAKES — THE PROBLEM MUST BE WELL-POSED AND FULLY SOLVABLE: before you present it, SOLVE it " +
+    "yourself end-to-end and CONFIRM it is properly defined and convergent (check every endpoint/singularity) " +
+    "and yields a clean, correct, FINITE closed-form answer (rationals, π, e, ln, ζ, …). NEVER present a " +
+    "divergent, undefined, ambiguous, or unsolvable problem, and never an unverified answer. If ANYTHING is " +
+    "off or you can't get a clean finite answer, silently discard it and pick another. Each generated problem distinct.";
   const buildRule =
     " When asked to build a website, web app, page or UI, output ONE complete, polished, " +
     "PRODUCTION-QUALITY single HTML file (inline <style> and <script>). Make it LARGE and " +
@@ -4342,9 +4345,17 @@ function buildMessages(tier, conversation, replyLang) {
   // full code/deliverable, which contradicts planSystem and caused the plan itself to be
   // written as a code block (then the Start pill was suppressed). planSystem alone governs.
   const planning = state.mode === "plan";
+  // Difficulty calibration so the tiers are clearly ranked when GENERATING problems — Max the
+  // absolute hardest, Ultra a deliberate notch below (both still error-free & fully solvable).
+  const genLevelRule =
+    tier === "max"
+      ? " DIFFICULTY TIER — you are MAX, the TOP tier: when generating a problem, make it the ABSOLUTE HARDEST you can while keeping it valid and cleanly solvable (hardest-JEE-Advanced / Olympiad-final / Putnam level)."
+      : tier === "ultra"
+      ? " DIFFICULTY TIER — you are ULTRA: when generating a problem, make it VERY HARD (advanced competition), but DELIBERATELY one notch EASIER than the Max tier so the difference is clear — still completely valid and error-free."
+      : "";
   const system = {
     role: "system",
-    content: model.persona + identityRule + langRule + mathRule + accuracyRule + codeRule + (planning ? "" : buildRule + engineerRule),
+    content: model.persona + identityRule + langRule + mathRule + accuracyRule + codeRule + genLevelRule + (planning ? "" : buildRule + engineerRule),
   };
 
   // PLAN MODE: a per-turn system message (inserted right after the persona).
