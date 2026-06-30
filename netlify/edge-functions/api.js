@@ -107,6 +107,40 @@ const MAX_DAILY_LIMIT  = Math.max(1, parseInt(env("MAX_DAILY_LIMIT")  || "10", 1
 // Admins (the owner) can publish site updates. Comma-separated emails; default the owner.
 const ADMIN_EMAILS = (env("ADMIN_EMAILS") || "firasnozad@gmail.com").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 function isAdmin(user) { return !!(user && user.email && ADMIN_EMAILS.includes(String(user.email).toLowerCase())); }
+// Admin knowledge base (RAG) — silently grounds answers in the admin's uploaded books.
+function kbNorm(s) { return String(s || "").replace(/[ً-ْـ]/g, "").replace(/[آأإٱ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim(); }
+const KB_STOP = new Set("the a an of to in on for and or is are و ما هو هي أو ثم عند كل لا ان أن إن هذا هذه ذلك التي الذي مع شنو وش كيف في من على عن الى إلى با".split(/\s+/));
+function kbTokens(s) { return kbNorm(s).split(" ").filter((t) => t.length > 1 && !KB_STOP.has(t)); }
+function kbChunk(text) {
+  const clean = String(text || "").replace(/\r/g, "").replace(/\n{2,}/g, "\n").trim();
+  const parts = clean.split(/(?<=[.!?؟\n])\s+/);
+  const ch = []; let buf = "";
+  for (const p of parts) { if ((buf + " " + p).length > 700 && buf) { ch.push(buf.trim()); buf = p; } else buf = (buf + " " + p).trim(); }
+  if (buf.trim()) ch.push(buf.trim());
+  return ch.filter((c) => c.length > 25).slice(0, 4000);
+}
+function kbSearchChunks(books, query, maxChunks) {
+  const qt = kbTokens(query); if (!qt.length) return [];
+  const qset = new Set(qt); const scored = [];
+  for (const book of books) for (const c of (book.chunks || [])) {
+    const ct = kbTokens(c); if (!ct.length) continue;
+    let hits = 0; for (const t of ct) if (qset.has(t)) hits++;
+    if (!hits) continue;
+    const cov = (new Set(ct.filter((t) => qset.has(t)))).size / qset.size;
+    scored.push({ score: cov * 2 + hits / Math.sqrt(ct.length + 5), text: c });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, maxChunks || 4).filter((h) => h.score > 0.25);
+}
+async function kbContext(query) {
+  let node; try { node = await dbGet("kb"); } catch (_) { return ""; }
+  if (!node) return "";
+  const hits = kbSearchChunks(Object.values(node), query, 4);
+  if (!hits.length) return "";
+  return "REFERENCE MATERIAL (authoritative — use it to answer accurately and completely, then organize " +
+    "clearly. NEVER mention, quote, cite, or hint that this material or a book exists — answer as your own knowledge):\n" +
+    hits.map((h, i) => (i + 1) + ". " + h.text).join("\n\n");
+}
 const ANN_IMG_OK = (s) => typeof s === "string" && /^(data:image\/(png|jpe?g|webp);base64,|https?:\/\/)/.test(s);
 
 const TIERS = {
@@ -1092,6 +1126,17 @@ export default async (request, context) => {
       // personal facts never leak into generated documents. Memory is for CHAT only.
       const memBlk = payload.nomem ? "" : memoryBlock(user);
       if (memBlk) { const si = messages.findIndex((m) => m && m.role === "system"); if (si >= 0) messages[si] = { role: "system", content: String(messages[si].content || "") + "\n\n" + memBlk }; else messages.unshift({ role: "system", content: memBlk }); }
+      // ADMIN KNOWLEDGE BASE: silently ground the answer in the admin's uploaded books (topic match).
+      if (!payload.nomem) {
+        try {
+          let li = -1;
+          for (let i = messages.length - 1; i >= 0; i--) if (messages[i] && messages[i].role === "user") { li = i; break; }
+          if (li >= 0 && typeof messages[li].content === "string") {
+            const kbctx = await kbContext(messages[li].content);
+            if (kbctx) messages.splice(li, 0, { role: "system", content: kbctx });
+          }
+        } catch (_) {}
+      }
       const vision = hasImages(messages);
       const think = vision ? false : !!payload.think;
       // Capped tier (Max): enforce the per-user daily limit and charge one slot per
@@ -1465,6 +1510,38 @@ export default async (request, context) => {
       if (!isAdmin(user)) return json({ error: "admins only" }, 403);
       const id = url.searchParams.get("id");
       if (id) { try { await dbPut("announcements/" + id, null); } catch (_) {} }
+      return json({ ok: true });
+    }
+    // ---- Admin knowledge base (RAG reference books) ----
+    if (path === "/api/kb" && method === "GET") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (!isAdmin(user)) return json({ error: "admins only" }, 403);
+      const node = (await dbGet("kb")) || {};
+      const books = Object.values(node).map((b) => ({ id: b.id, title: b.title, chunks: (b.chunks || []).length, ts: b.ts })).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      return json({ books });
+    }
+    if (path === "/api/kb" && method === "POST") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (!isAdmin(user)) return json({ error: "admins only" }, 403);
+      let p; try { p = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const title = String(p.title || "").slice(0, 200).trim() || "Untitled";
+      const text = String(p.text || "");
+      if (text.trim().length < 20) return json({ error: "text too short" }, 400);
+      const chunks = kbChunk(text);
+      if (!chunks.length) return json({ error: "no usable text" }, 400);
+      const id = "kb" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const book = { id, title, chunks, ts: Date.now() };
+      try { await dbPut("kb/" + id, book); } catch (_) {}
+      return json({ ok: true, id, title, chunks: chunks.length });
+    }
+    if (path === "/api/kb" && method === "DELETE") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (!isAdmin(user)) return json({ error: "admins only" }, 403);
+      const id = url.searchParams.get("id");
+      if (id) { try { await dbPut("kb/" + id, null); } catch (_) {} }
       return json({ ok: true });
     }
     if (path === "/api/translate" && method === "POST") {

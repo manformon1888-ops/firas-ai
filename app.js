@@ -4069,6 +4069,20 @@ async function extractPdfText(file) {
   }
   return text.trim();
 }
+/** Higher-capacity PDF extraction for the admin reference library (whole books). */
+async function extractPdfTextForKb(file) {
+  const pdfjs = await loadPdfJs();
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = "";
+  const pages = Math.min(pdf.numPages, 400);
+  for (let i = 1; i <= pages; i++) {
+    const page = await pdf.getPage(i);
+    const tc = await page.getTextContent();
+    text += tc.items.map((it) => it.str).join(" ") + "\n\n";
+    if (text.length > 1500000) break;   // ~1.5M chars cap per book
+  }
+  return text.trim();
+}
 
 /** Load a File into an HTMLImageElement (off the main render path). */
 function fileToImage(file) {
@@ -6037,6 +6051,67 @@ function unlockBodyScroll() { if (_annScrollLock > 0 && --_annScrollLock === 0) 
 const ANN_SVG_X = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
 const ANN_SVG_EDIT = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 const ANN_SVG_TRASH = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+/** Admin reference library (RAG): upload books → the model silently grounds answers in them. */
+async function openKbManager() {
+  const ar = state.lang === "ar";
+  const tx = ar
+    ? { title: "المكتبة المرجعية", sub: "ارفع كتباً/مراجع — النموذج يستفيد منها تلقائياً (بصمت) لتقوية الإجابات.", titleP: "اسم الكتاب/المرجع (اختياري)", pick: "اختر ملف PDF أو نصّي", uploading: "جارٍ المعالجة والتخزين…", chunks: "مقطع", empty: "لا توجد كتب بعد — ارفع أول مرجع.", err: "تعذّر — حاول مجدداً", notAdmin: "للأدمن فقط", added: (t, n) => "تمت إضافة «" + t + "» (" + n + " مقطع) ✓" }
+    : { title: "Reference library", sub: "Upload books/material — the model silently grounds answers in them.", titleP: "Book/source name (optional)", pick: "Choose a PDF or text file", uploading: "Processing & storing…", chunks: "chunks", empty: "No books yet — upload your first reference.", err: "Failed — try again", notAdmin: "Admins only", added: (t, n) => 'Added “' + t + '” (' + n + " chunks) ✓" };
+  const ov = document.createElement("div");
+  ov.className = "mem-overlay";
+  const close = () => { ov.classList.remove("is-open"); setTimeout(() => ov.remove(), 200); };
+  ov.innerHTML =
+    '<div class="mem-card" role="dialog" aria-modal="true" style="max-width:560px">' +
+      '<div class="mem-head"><div style="flex:1"><h3>📚 ' + tx.title + '</h3><p>' + tx.sub + '</p></div>' +
+        '<button class="mem-x" aria-label="close">' + ANN_SVG_X + '</button></div>' +
+      '<div style="display:flex;flex-direction:column;gap:9px;margin:0 0 14px">' +
+        '<input class="ann-in kb-title" type="text" maxlength="200" placeholder="' + tx.titleP + '">' +
+        '<label class="ann-img-btn" style="text-align:center;cursor:pointer">' + tx.pick + '<input type="file" accept=".pdf,.txt,.md,text/plain" class="kb-file" hidden></label>' +
+        '<span class="kb-status" style="font-size:13px;line-height:1.6;color:#A9A69D;min-height:18px"></span>' +
+      '</div>' +
+      '<ul class="mem-list kb-list"></ul>' +
+    '</div>';
+  document.body.appendChild(ov);
+  setTimeout(() => ov.classList.add("is-open"), 20);
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  ov.querySelector(".mem-x").addEventListener("click", close);
+
+  const statusEl = ov.querySelector(".kb-status");
+  const listEl = ov.querySelector(".kb-list");
+  const titleEl = ov.querySelector(".kb-title");
+  const fileEl = ov.querySelector(".kb-file");
+
+  const renderList = async () => {
+    try {
+      const d = await apiJson("/api/kb");
+      const books = (d && d.books) || [];
+      listEl.innerHTML = books.length
+        ? books.map((b) => '<li class="mem-item" style="display:flex;align-items:center;gap:8px"><span style="flex:1">' +
+            "<b>" + escapeHtml(b.title) + "</b> <small style=\"color:#A9A69D\">(" + (b.chunks || 0) + " " + tx.chunks + ")</small></span>" +
+            '<button class="mem-del" data-id="' + escapeHtml(b.id) + '" aria-label="delete">&times;</button></li>').join("")
+        : '<li class="mem-empty">' + tx.empty + "</li>";
+      listEl.querySelectorAll(".mem-del").forEach((btn) => btn.addEventListener("click", async () => {
+        try { await apiJson("/api/kb?id=" + encodeURIComponent(btn.getAttribute("data-id")), { method: "DELETE" }); renderList(); } catch (_) {}
+      }));
+    } catch (e) { listEl.innerHTML = '<li class="mem-empty">' + (e && e.status === 403 ? tx.notAdmin : tx.err) + "</li>"; }
+  };
+  renderList();
+
+  fileEl.addEventListener("change", async () => {
+    const f = fileEl.files && fileEl.files[0];
+    if (!f) return;
+    statusEl.textContent = tx.uploading;
+    try {
+      const text = /\.pdf$/i.test(f.name) ? await extractPdfTextForKb(f) : await f.text();
+      const title = titleEl.value.trim() || f.name.replace(/\.[^.]+$/, "");
+      const r = await apiJson("/api/kb", { method: "POST", body: JSON.stringify({ title, text }) });
+      statusEl.textContent = tx.added(title, (r && r.chunks) || 0);
+      titleEl.value = ""; fileEl.value = "";
+      renderList();
+    } catch (e) { statusEl.textContent = (e && e.status === 403) ? tx.notAdmin : tx.err; }
+  });
+}
+
 async function openAnnouncementsPanel() {
   const ar = state.lang === "ar";
   await fetchAnnouncements();
@@ -6084,6 +6159,7 @@ async function openAnnouncementsPanel() {
         '<button class="mem-x" aria-label="' + (ar ? "إغلاق" : "close") + '">' + ANN_SVG_X + '</button>' +
       '</div>' +
       adminForm +
+      (annIsAdmin ? '<button type="button" class="ann-post ann-kb-open" style="width:100%;margin:0 0 12px">📚 ' + (ar ? "المكتبة المرجعية" : "Reference library") + '</button>' : '') +
       '<ul class="mem-list ann-list">' + items + '</ul>' +
     '</div>';
 
@@ -6107,6 +6183,9 @@ async function openAnnouncementsPanel() {
   ov.querySelector(".mem-x").addEventListener("click", close);
   onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
+
+  const kbBtn = ov.querySelector(".ann-kb-open");
+  if (kbBtn) kbBtn.addEventListener("click", () => { close(); openKbManager(); });
 
   if (annIsAdmin) {
     let pendingImg = "";

@@ -324,6 +324,8 @@ function normalizeDb(parsed) {
     // announcements MUST persist across restarts (admin posts them once for everyone);
     // pending signups are transient but harmless to carry over (a sweep drops expired ones).
     announcements: arr(parsed && parsed.announcements),
+    // Admin knowledge base (reference books for RAG grounding) — MUST persist across restarts.
+    kb: arr(parsed && parsed.kb),
     pending: (parsed && parsed.pending && typeof parsed.pending === "object" && !Array.isArray(parsed.pending)) ? parsed.pending : {},
     secret: parsed && typeof parsed.secret === "string" ? parsed.secret : "",
   };
@@ -2410,6 +2412,95 @@ async function handleAnnouncementsPatch(req, res) {
   return sendJson(res, 200, { ok: true, announcement: item });
 }
 
+/* ============================================================================
+   ADMIN KNOWLEDGE BASE (RAG) — the admin uploads reference books/material; on any
+   user question we silently retrieve the most relevant passages (topic/keyword
+   match) and feed them to the model as HIDDEN reference, so answers are grounded
+   in the books WITHOUT citing them. Strengthens science, grammar, etc.
+   ========================================================================== */
+function kbList() { if (!Array.isArray(DB.kb)) DB.kb = []; return DB.kb; }
+// Normalize Arabic (+ generic) for robust topic matching: strip harakat/tatweel,
+// unify alef/ya/ta-marbuta, lowercase, keep letters/numbers.
+function kbNorm(s) {
+  return String(s || "")
+    .replace(/[ً-ْـ]/g, "")
+    .replace(/[آأإٱ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ").trim();
+}
+const KB_STOP = new Set("the a an of to in on for and or is are was were be this that با في من على عن الى إلى ما هو هي و أو ثم عند كل لا ان أن إن هذا هذه ذلك التي الذي مع شنو وش كيف".split(/\s+/));
+function kbTokens(s) { return kbNorm(s).split(" ").filter((t) => t.length > 1 && !KB_STOP.has(t)); }
+function kbChunk(text) {
+  const clean = String(text || "").replace(/\r/g, "").replace(/\n{2,}/g, "\n").trim();
+  const parts = clean.split(/(?<=[.!?؟\n])\s+/);
+  const chunks = []; let buf = "";
+  for (const p of parts) {
+    if ((buf + " " + p).length > 700 && buf) { chunks.push(buf.trim()); buf = p; }
+    else buf = (buf + " " + p).trim();
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks.filter((c) => c.length > 25).slice(0, 4000);
+}
+function kbSearch(query, maxChunks) {
+  const qt = kbTokens(query);
+  if (!qt.length) return [];
+  const qset = new Set(qt);
+  const scored = [];
+  for (const book of kbList()) {
+    for (const ch of (book.chunks || [])) {
+      const ct = kbTokens(ch);
+      if (!ct.length) continue;
+      let hits = 0; for (const t of ct) if (qset.has(t)) hits++;
+      if (!hits) continue;
+      const cov = (new Set(ct.filter((t) => qset.has(t)))).size / qset.size;
+      scored.push({ score: cov * 2 + hits / Math.sqrt(ct.length + 5), text: ch });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, maxChunks || 4).filter((h) => h.score > 0.25);
+}
+function kbContext(query) {
+  const hits = kbSearch(query, 4);
+  if (!hits.length) return "";
+  return "REFERENCE MATERIAL (authoritative — use it to answer accurately and completely, then organize " +
+    "the answer clearly. NEVER mention, quote, cite, or hint that this material or a book exists — just give " +
+    "the polished answer as your own knowledge):\n" + hits.map((h, i) => (i + 1) + ". " + h.text).join("\n\n");
+}
+async function handleKbList(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "auth required" });
+  if (!isAdmin(user)) return sendJson(res, 403, { error: "admins only" });
+  return sendJson(res, 200, { books: kbList().map((b) => ({ id: b.id, title: b.title, chunks: (b.chunks || []).length, ts: b.ts })) });
+}
+async function handleKbAdd(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "auth required" });
+  if (!isAdmin(user)) return sendJson(res, 403, { error: "admins only" });
+  let p; try { p = JSON.parse((await readBody(req, 24_000_000)) || "{}"); } catch { return sendJson(res, 400, { error: "invalid JSON" }); }
+  const title = String(p.title || "").slice(0, 200).trim() || "Untitled";
+  const text = String(p.text || "");
+  if (text.trim().length < 20) return sendJson(res, 400, { error: "text too short" });
+  const chunks = kbChunk(text);
+  if (!chunks.length) return sendJson(res, 400, { error: "no usable text" });
+  const book = { id: "kb" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), title, chunks, ts: Date.now() };
+  kbList().unshift(book);
+  await persist();
+  return sendJson(res, 200, { ok: true, id: book.id, title, chunks: chunks.length });
+}
+async function handleKbDelete(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "auth required" });
+  if (!isAdmin(user)) return sendJson(res, 403, { error: "admins only" });
+  const id = new URL(req.url, "http://localhost").searchParams.get("id");
+  const list = kbList();
+  const i = list.findIndex((b) => b.id === id);
+  if (i >= 0) { list.splice(i, 1); await persist(); }
+  return sendJson(res, 200, { ok: true });
+}
+
 async function handleChat(req, res) {
   // AUTH REQUIRED.
   const user = currentUser(req);
@@ -2430,6 +2521,19 @@ async function handleChat(req, res) {
 
   if (!messages.length) {
     return sendJson(res, 400, { error: 'body must include a non-empty "messages" array' });
+  }
+
+  // ADMIN KNOWLEDGE BASE: silently ground the answer in the admin's uploaded books. Find the last
+  // user TEXT question, retrieve relevant passages by topic, and inject them as hidden context.
+  if (kbList().length) {
+    try {
+      let li = -1;
+      for (let i = messages.length - 1; i >= 0; i--) if (messages[i] && messages[i].role === "user") { li = i; break; }
+      if (li >= 0 && typeof messages[li].content === "string") {
+        const ctx = kbContext(messages[li].content);
+        if (ctx) messages.splice(li, 0, { role: "system", content: ctx });   // right before the question
+      }
+    } catch (_) {}
   }
 
   // Capped tier (Max): enforce the per-user daily limit and charge one slot per
@@ -2603,6 +2707,11 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/announcements" && method === "PATCH") return await handleAnnouncementsPatch(req, res);
     if (route === "/api/announcements" && method === "DELETE") return await handleAnnouncementsDelete(req, res);
     if (route === "/api/translate" && method === "POST") return await handleTranslate(req, res);
+
+    // ---- Admin knowledge base (RAG reference books) ----
+    if (route === "/api/kb" && method === "GET") return await handleKbList(req, res);
+    if (route === "/api/kb" && method === "POST") return await handleKbAdd(req, res);
+    if (route === "/api/kb" && method === "DELETE") return await handleKbDelete(req, res);
 
     // ---- Build version (lets an open tab auto-reload when code changes) ----
     if (route === "/api/version" && method === "GET") return handleVersion(req, res);
