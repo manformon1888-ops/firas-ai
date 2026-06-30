@@ -35,6 +35,11 @@ const GEMINI_OAI_URL     = "https://generativelanguage.googleapis.com/v1beta/ope
 // /api/image uses it FIRST, falling back to keyless pollinations. Free key, no card.
 const GEMINI_API_KEY     = env("GEMINI_API_KEY") || "";
 const GEMINI_IMAGE_MODEL = env("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image";
+// NVIDIA NIM — FREE OpenAI-compatible API. Max tier PRIMARY engine (DeepSeek V4 Pro, frontier-class).
+// Set NVIDIA_API_KEY in Netlify env vars; Max falls back to Gemini when unset or rate-limited.
+const NVIDIA_API_KEY = env("NVIDIA_API_KEY") || "";
+const NVIDIA_OAI_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const NVIDIA_MODEL   = env("NVIDIA_MODEL") || "deepseek-ai/deepseek-v4-pro";
 // Hugging Face image model — only FLUX.1-schnell is still free (dev/SDXL/SD3.5 = 410/400).
 const HF_API_KEY     = env("HF_API_KEY") || "";
 const HF_IMAGE_MODEL = env("HF_IMAGE_MODEL") || "black-forest-labs/FLUX.1-schnell";
@@ -568,7 +573,8 @@ function chatStreamResponse(messages, tier, think, vision) {
         // Max tier → premium external engines FIRST: Claude Sonnet (paid), then
         // OpenRouter free (DeepSeek-R1) when Claude has no credit/fails.
         if (tier === "max" && !vision && !served) {
-          served = await streamGeminiInto(enc, messages, ac.signal);
+          served = await streamDeepSeekInto(enc, messages, ac.signal);   // PRIMARY: DeepSeek V4 Pro (NVIDIA)
+          if (!served && !closed) served = await streamGeminiInto(enc, messages, ac.signal);   // fallback
           if (!served && !closed) served = await streamAnthropicInto(enc, messages, ac.signal);
           if (!served && !closed) served = await streamOpenRouterInto(enc, messages, ac.signal);
         }
@@ -732,6 +738,50 @@ async function streamGeminiInto(enc, messages, signal) {
       if (any) return true;   // served by this id; otherwise try the next candidate
     } catch (e) { return signal.aborted ? true : any; }
   }
+  return false;
+}
+// Max-tier PRIMARY engine: DeepSeek V4 Pro via NVIDIA NIM (free, OpenAI-compatible). 15s "first
+// response" timeout → bails to Gemini fast if NVIDIA is slow/unreachable. Returns true if it streamed.
+async function streamDeepSeekInto(enc, messages, signal) {
+  if (!NVIDIA_API_KEY) return false;
+  const msgs = messages.filter((m) => m.role === "system" || m.role === "user" || m.role === "assistant").map((m) => ({ role: m.role, content: String(m.content || "") }));
+  if (!msgs.length) return false;
+  const ac = new AbortController();
+  const fwd = () => { try { ac.abort(); } catch (_) {} };
+  if (signal.aborted) ac.abort(); else signal.addEventListener("abort", fwd, { once: true });
+  const cleanup = () => { try { signal.removeEventListener("abort", fwd); } catch (_) {} };
+  const headTimer = setTimeout(() => { try { ac.abort(); } catch (_) {} }, 15000);
+  let upstream;
+  try {
+    upstream = await fetch(NVIDIA_OAI_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", "Authorization": "Bearer " + NVIDIA_API_KEY },
+      body: JSON.stringify({ model: NVIDIA_MODEL, messages: msgs, temperature: 0.6, top_p: 0.95, max_tokens: 16384, chat_template_kwargs: { thinking: false }, stream: true }),
+      signal: ac.signal,
+    });
+  } catch (e) { clearTimeout(headTimer); cleanup(); return signal.aborted ? true : false; }
+  clearTimeout(headTimer);
+  if (!upstream.ok || !upstream.body) { try { upstream && upstream.body && upstream.body.cancel(); } catch (_) {} cleanup(); return false; }
+  const reader = upstream.body.getReader(); let buffer = "", any = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      buffer += td.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        let line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let evt; try { evt = JSON.parse(payload); } catch { continue; }
+        const delta = evt.choices && evt.choices[0] && evt.choices[0].delta;
+        if (delta && delta.content) { const f = sseFrame(delta.content); if (f) enc(f); any = true; }
+      }
+    }
+    if (any) { cleanup(); return true; }
+  } catch (e) { cleanup(); return signal.aborted ? true : any; }
+  cleanup();
   return false;
 }
 
