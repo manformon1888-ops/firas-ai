@@ -40,6 +40,9 @@ const GEMINI_IMAGE_MODEL = env("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image"
 const NVIDIA_API_KEY = env("NVIDIA_API_KEY") || "";
 const NVIDIA_OAI_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const NVIDIA_MODEL   = env("NVIDIA_MODEL") || "deepseek-ai/deepseek-v4-pro";
+// CREDIT GUARD: max DeepSeek calls per day (GLOBAL, counted in Firebase since edge is stateless).
+// Beyond it, Max uses Gemini (free) so the NVIDIA credit can't be drained. Tune with NVIDIA_DAILY_CAP.
+const NVIDIA_DAILY_CAP = parseInt(env("NVIDIA_DAILY_CAP")) || 100;
 // Hugging Face image model — only FLUX.1-schnell is still free (dev/SDXL/SD3.5 = 410/400).
 const HF_API_KEY     = env("HF_API_KEY") || "";
 const HF_IMAGE_MODEL = env("HF_IMAGE_MODEL") || "black-forest-labs/FLUX.1-schnell";
@@ -573,8 +576,17 @@ function chatStreamResponse(messages, tier, think, vision) {
         // Max tier → premium external engines FIRST: Claude Sonnet (paid), then
         // OpenRouter free (DeepSeek-R1) when Claude has no credit/fails.
         if (tier === "max" && !vision && !served) {
-          served = await streamDeepSeekInto(enc, messages, ac.signal);   // PRIMARY: DeepSeek V4 Pro (NVIDIA)
-          if (!served && !closed) served = await streamGeminiInto(enc, messages, ac.signal);   // fallback
+          // Daily-capped DeepSeek (credit guard): use it only while today's global count is under the cap.
+          let nvDay = null, nvN = 0, tryDS = false;
+          if (NVIDIA_API_KEY) {
+            try { nvDay = serverDay(); nvN = (await dbGet(`nvidiaDay/${nvDay}`)) || 0; tryDS = nvN < NVIDIA_DAILY_CAP; }
+            catch (_) { tryDS = true; }   // counter unavailable → don't block DeepSeek
+          }
+          if (tryDS) {
+            served = await streamDeepSeekInto(enc, messages, ac.signal);   // PRIMARY: DeepSeek V4 Pro (within daily cap)
+            if (served && nvDay) { try { dbPut(`nvidiaDay/${nvDay}`, nvN + 1).catch(() => {}); } catch (_) {} }   // count successful calls
+          }
+          if (!served && !closed) served = await streamGeminiInto(enc, messages, ac.signal);   // fallback (cap reached / no key / rate-limit)
           if (!served && !closed) served = await streamAnthropicInto(enc, messages, ac.signal);
           if (!served && !closed) served = await streamOpenRouterInto(enc, messages, ac.signal);
         }

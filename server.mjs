@@ -66,6 +66,12 @@ const OPENROUTER_MODEL   = process.env.OPENROUTER_MODEL || "nvidia/nemotron-3-ul
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 const NVIDIA_OAI_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const NVIDIA_MODEL   = process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-pro";
+// CREDIT GUARD: cap DeepSeek (NVIDIA) calls per day so the free credit can't be drained — beyond the
+// cap, Max uses Gemini (free). Tune with NVIDIA_DAILY_CAP. (server.mjs: in-memory per-process day count.)
+const NVIDIA_DAILY_CAP = parseInt(process.env.NVIDIA_DAILY_CAP, 10) || 100;
+let _nvDay = "", _nvCount = 0;
+function nvidiaUnderCap() { const d = new Date().toISOString().slice(0, 10); if (d !== _nvDay) { _nvDay = d; _nvCount = 0; } return _nvCount < NVIDIA_DAILY_CAP; }
+function nvidiaCharge() { _nvCount++; }
 const OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions";
 // Gemini TEXT for the Max tier — Google AI Studio FREE tier (Flash family is free,
 // ~1500 req/day, no credit card; the stronger Pro tier is paid since Apr 2026). Uses
@@ -2478,8 +2484,11 @@ async function handleChat(req, res) {
     // (paid) → OpenRouter free (Nemotron). Each returns false if it failed before any
     // bytes, so the chain degrades cleanly to the next engine.
     if (tier === "max" && !vision && !served) {
-      served = await streamDeepSeek(res, messages, ac.signal);   // PRIMARY: DeepSeek V4 Pro (NVIDIA, frontier)
-      if (!served && !res.writableEnded) served = await streamGemini(res, messages, ac.signal);   // fallback (rate-limit/no key)
+      if (NVIDIA_API_KEY && nvidiaUnderCap()) {
+        served = await streamDeepSeek(res, messages, ac.signal);   // PRIMARY: DeepSeek V4 Pro (within daily cap)
+        if (served) nvidiaCharge();                                // count only successful credit-using calls
+      }
+      if (!served && !res.writableEnded) served = await streamGemini(res, messages, ac.signal);   // fallback (cap reached / no key / rate-limit)
       if (!served && !res.writableEnded) served = await streamAnthropic(res, messages, ac.signal);
       if (!served && !res.writableEnded) served = await streamOpenRouter(res, messages, ac.signal);
     }
