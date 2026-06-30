@@ -4292,7 +4292,14 @@ function buildMessages(tier, conversation, replyLang) {
     "state a numeric or symbolic result you have not checked. Give EXACT closed-form results " +
     "(fractions, radicals, π, e, exact symbolic forms) — do NOT round to decimals unless the user " +
     "explicitly asks. For proofs, write a clean structured argument (state what is given, what is to " +
-    "be shown, then the proof, ending with ∎), and present the final answer clearly on its own line.";
+    "be shown, then the proof, ending with ∎), and present the final answer clearly on its own line." +
+    " PROBLEM GENERATION: when the user asks you to CREATE / GENERATE / MAKE / DESIGN a problem, exercise, " +
+    "question or integral (e.g. 'give me a hard JEE integral', 'make a hard problem'), output a GENUINELY " +
+    "HARD, ORIGINAL, competition-grade one — JEE-Advanced / Olympiad / Putnam level — that demands a real, " +
+    "non-obvious idea or technique. NEVER a routine textbook example, a trivially simple form, or an " +
+    "easily-recognizable standard pattern (e.g. avoid bare $\\int \\ln x/(1+x)\\,dx$ types). It MUST have an " +
+    "EXACT closed-form answer that you have INDEPENDENTLY verified before presenting it; if you can't verify " +
+    "a clean closed form, pick a different problem. Make each generated problem distinct — never repeat a pattern.";
   const buildRule =
     " When asked to build a website, web app, page or UI, output ONE complete, polished, " +
     "PRODUCTION-QUALITY single HTML file (inline <style> and <script>). Make it LARGE and " +
