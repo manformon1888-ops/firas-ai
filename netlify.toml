@@ -50,3 +50,57 @@
   for = "/*.css"
   [headers.values]
     Cache-Control = "public, max-age=300, stale-while-revalidate=86400"
+
+# ── Security headers (all pages) ─────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+# ── Hide non-frontend repo files from the public deploy (publish = ".") ──────
+# Backend source, docs and config are not secrets by themselves, but exposing
+# them maps the attack surface for free. Serve 404 for all of them.
+[[redirects]]
+  from = "/server.mjs"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/*.md"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/*.toml"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/*.yaml"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/package.json"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/package-lock.json"
+  to = "/index.html"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/.env*"
+  to = "/index.html"
+  status = 404
+  force = true

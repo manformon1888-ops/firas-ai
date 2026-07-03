@@ -1203,7 +1203,7 @@ export default async (request, context) => {
       await dbPut("pendingPid/" + pid, ek);
       const link = appBase(request) + "/?verify=" + token;
       const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
-      if (!sent) console.log("[firas] signup verify link for " + email + " -> " + link + " (not delivered)");
+      if (!sent && env("DEV_LOG_LINKS")) console.log("[firas] signup verify link for " + email + " -> " + link + " (not delivered)");   // token link: dev-only, never in prod logs
       return json({ ok: true, pending: true, email, pid });
     }
 
@@ -1277,7 +1277,7 @@ export default async (request, context) => {
         await dbPut("pendingTok/" + token, ek);
         const link = appBase(request) + "/?verify=" + token;
         const sent = await sendEmail(email, "تأكيد حسابك — Firas AI", verifyEmailHtml(link));
-        if (!sent) console.log("[firas] (resend) verify link for " + email + " -> " + link);
+        if (!sent && env("DEV_LOG_LINKS")) console.log("[firas] (resend) verify link for " + email + " -> " + link);
       }
       return json({ ok: true });
     }
@@ -1293,7 +1293,7 @@ export default async (request, context) => {
           await saveUser(user);
           const link = appBase(request) + "/?reset=" + token + "&uid=" + encodeURIComponent(user.id);
           const sent = await sendEmail(email, "إعادة تعيين كلمة المرور — Firas AI", resetEmailHtml(link));
-          if (!sent) console.log("[firas] password-reset link for " + email + " -> " + link);
+          if (!sent && env("DEV_LOG_LINKS")) console.log("[firas] password-reset link for " + email + " -> " + link);
         }
       }
       return json({ ok: true }); // anti-enumeration
@@ -1638,10 +1638,17 @@ export default async (request, context) => {
       if (rateLimited("img:" + user.id, 240, 60000)) return new Response("rate limited", { status: 429 });
       const prompt = (url.searchParams.get("prompt") || "").trim().slice(0, 1000);
       if (!prompt) return new Response("no prompt", { status: 400 });
-      const cid = (url.searchParams.get("cid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+      // No/invalid cid must still COUNT against the daily quota (an omitted cid was a full bypass) —
+      // synthesize one from the prompt so retries of the same prompt don't double-count.
+      let cid = (url.searchParams.get("cid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+      if (!cid) {
+        let hsh = 0; const pk = prompt + "|" + (url.searchParams.get("seed") || "");
+        for (let i = 0; i < pk.length; i++) hsh = ((hsh << 5) - hsh + pk.charCodeAt(i)) | 0;
+        cid = "auto" + (hsh >>> 0).toString(36);
+      }
       const day = serverDay();
       const node = await imgDayNode(user.id);
-      const isNew = !!cid && !(cid in node);
+      const isNew = !(cid in node);
       if (isNew && Object.keys(node).length >= IMAGE_DAILY_LIMIT) return new Response("daily limit reached", { status: 429 });
       const w = Math.min(1280, Math.max(256, parseInt(url.searchParams.get("w"), 10) || 1024));
       const h = Math.min(1280, Math.max(256, parseInt(url.searchParams.get("h"), 10) || 1024));
@@ -1703,11 +1710,90 @@ export default async (request, context) => {
       } catch (_) {}
       return json({ q, results });
     }
+    if (path === "/api/images" && method === "GET") {
+      const user = await currentUser(context);
+      if (!user) return json({ results: [], error: "auth" }, 401);
+      if (rateLimited("images:" + user.id, 40, 60000)) return json({ results: [], error: "rate" }, 429);
+      const q = (url.searchParams.get("q") || "").trim().slice(0, 120);
+      if (!q) return json({ results: [] }, 400);
+      let results = [];
+      try {
+        const r = await fetch("https://api.openverse.org/v1/images/?format=json&mature=false&page_size=10&q=" + encodeURIComponent(q), { headers: { "User-Agent": SEARCH_UA, "Accept": "application/json" } });
+        if (r.ok) { const d = await r.json(); results = (Array.isArray(d.results) ? d.results : []).map((x) => ({ url: x.thumbnail || x.url, title: String(x.title || "").slice(0, 100) })).filter((x) => x.url && /^https:\/\//.test(x.url)).slice(0, 8); }
+      } catch (_) {}
+      return json({ q, results });
+    }
+    if (path === "/api/imgproxy" && method === "GET") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "auth" }, 401);
+      if (rateLimited("imgproxy:" + user.id, 80, 60000)) return new Response(null, { status: 429 });
+      const target = (url.searchParams.get("u") || "").trim();
+      let host = "";
+      try { host = new URL(target).hostname.toLowerCase(); } catch { return new Response(null, { status: 400 }); }
+      if (!/^https:\/\//i.test(target) || proxyHostBlocked(host)) return new Response(null, { status: 400 });
+      try {
+        const r = await safeProxyFetch(target, { "User-Agent": SEARCH_UA, "Accept": "image/*" }, 3);
+        const ct = r.headers.get("content-type") || "";
+        if (!r.ok || !/^image\//i.test(ct)) return new Response(null, { status: 415 });
+        const buf = await r.arrayBuffer();
+        if (buf.byteLength > 4000000) return new Response(null, { status: 413 });
+        return new Response(buf, { status: 200, headers: { "Content-Type": ct, "Cache-Control": "public, max-age=86400" } });
+      } catch (_) { return new Response(null, { status: 502 }); }
+    }
+    if (path === "/api/fetch" && method === "GET") {
+      const user = await currentUser(context);
+      if (!user) return json({ text: "", error: "auth" }, 401);
+      if (rateLimited("fetch:" + user.id, 20, 60000)) return json({ text: "", error: "rate" }, 429);
+      let target = (url.searchParams.get("url") || "").trim();
+      if (!/^https?:\/\//i.test(target)) target = "https://" + target;
+      let host = "";
+      try { host = new URL(target).hostname.toLowerCase(); } catch { return json({ text: "", error: "bad url" }, 400); }
+      if (proxyHostBlocked(host)) return json({ text: "", error: "blocked" }, 400);
+      let text = "", title = "";
+      try {
+        const r = await safeProxyFetch(target, { "User-Agent": SEARCH_UA, "Accept": "text/html,application/xhtml+xml,text/plain" }, 3);
+        if (r.ok) {
+          const ct = r.headers.get("content-type") || "";
+          const raw = (await r.text()).slice(0, 800000);
+          if (/html/i.test(ct)) {
+            const tm = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i); title = tm ? tm[1].replace(/\s+/g, " ").trim().slice(0, 200) : "";
+            text = raw.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim().slice(0, 40000);
+          } else if (/text|json|xml|markdown/i.test(ct)) { text = raw.slice(0, 40000); }
+        }
+      } catch (_) {}
+      return json({ url: target, title, text });
+    }
 
     return json({ error: "not found" }, 404);
   } catch (e) {
-    return json({ error: "internal error", detail: String((e && e.message) || e).slice(0, 200) }, 500);
+    // Never echo internal error text (Firebase status codes / response fragments) to the client.
+    try { console.error("api error:", e); } catch (_) {}
+    return json({ error: "internal error" }, 500);
   }
 };
+
+/* SSRF guard shared by the proxies: hostname must not be private/loopback/link-local. */
+function proxyHostBlocked(host) {
+  return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|::1|\[)/.test(host) || /\.local$/.test(host) || host === "metadata.google.internal";
+}
+/* Fetch with MANUAL redirect handling: every hop's hostname is re-validated, so a public host
+   can't 302 the proxy into localhost / the cloud metadata service (classic SSRF bypass). */
+async function safeProxyFetch(target, headers, maxHops) {
+  let cur = target;
+  for (let hop = 0; hop <= (maxHops || 3); hop++) {
+    const host = new URL(cur).hostname.toLowerCase();
+    if (proxyHostBlocked(host)) throw new Error("blocked host");
+    const r = await fetch(cur, { headers, redirect: "manual" });
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get("location");
+      if (!loc) return r;
+      cur = new URL(loc, cur).href;
+      if (!/^https?:\/\//i.test(cur)) throw new Error("bad redirect");
+      continue;
+    }
+    return r;
+  }
+  throw new Error("too many redirects");
+}
 
 export const config = { path: "/api/*" };

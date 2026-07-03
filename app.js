@@ -917,6 +917,7 @@ async function fetchChats() {
       serverId: c.id,
       title: c.title || t().newChat,
       pinned: !!c.pinned,
+      agent: !!c.agent,   // KEEP the product flag — otherwise agent chats land in the normal list after reload
       updatedAt: c.updatedAt ? new Date(c.updatedAt).getTime() : Date.now(),
       messages: null, // lazy-loaded on open
     }));
@@ -1100,6 +1101,9 @@ function buildFileDisclosure(content) {
 function detectImageRequest(text) {
   const s = String(text || "");
   if (!s.trim()) return false;
+  // AI image GENERATION is a Firas AI (normal chat) feature ONLY — the Agent never generates
+  // images; it fetches REAL web photos for its builds instead.
+  if (state.product === "agent" || (activeChat() && activeChat().agent)) return false;
   // A MATH function graph / equation / geometric figure ("ارسم y = …", رسم بياني, دالة, مثلث،
   // sin(x)…) is a chat plot/tikz — NOT an AI image. Never route those to the image generator.
   if (/y\s*=|f\s*\(\s*x\s*\)|رسم\s*بياني|الكراف|الغراف|\bgraph\b|\bplot\b|دال[ةه]|منحن[يى]|\bfunction\b|معادلة|\b(?:sin|cos|tan|cot|sec|csc|exp|log|ln|lg|sqrt|cbrt|arctan|arcsin|arccos|sinh|cosh|tanh)\s*\(|مثلث|\bمربع\b|مستطيل|\bدائرة\b|قطع\s*مكافئ|\bparabola\b|متجه|\bvector\b|إحداثي|احداثي/i.test(s)) return false;
@@ -3113,18 +3117,11 @@ function renderWelcome() {
   w.classList.remove("hidden");
   if (state.product === "agent") {
     // Firas Agent home: its own identity + task starters — a different environment.
-    const ar = state.lang === "ar";
-    const starters = ar
-      ? ["سوّي كورس كامل لتعلم التفاضل مع رسوم وتمارين", "اكتب بحثًا جامعيًا 20 صفحة بمصادر من الويب", "حضّر ملزمة فيزياء شاملة من مكتبتي المرجعية", "ابنِ موقعًا كاملًا متعدد الأقسام"]
-      : ["Build a full calculus course with figures & exercises", "Write a 20-page cited research paper", "Prepare a complete physics study booklet", "Build a full multi-section website"];
     w.innerHTML = `
       <div class="welcome agent-welcome">
         <span class="nib welcome__mark" data-size="lg" aria-hidden="true"><span class="glyph">F</span></span>
         <h1 class="welcome__title">Firas <span class="agent-welcome__grad">Agent</span></h1>
-        <p class="agent-welcome__sub">${ar ? "كلّفه بمهمة كبيرة — يخطّط، ينفّذ خطوة خطوة، يراجع نفسه، ويسلّمك النتيجة كاملة." : "Give it a big task — it plans, executes step by step, reviews itself, and delivers."}</p>
-        <div class="agent-welcome__starters">${starters.map((s) => `<button type="button" class="agent-starter">${escapeHtml(s)}</button>`).join("")}</div>
       </div>`;
-    w.querySelectorAll(".agent-starter").forEach((b) => b.addEventListener("click", () => { els.input.value = b.textContent; autoGrow(); updateSendState(); els.input.focus(); }));
     injectBrandMarks(w);
     return;
   }
@@ -3317,10 +3314,14 @@ function aiTurnEl(msg, index) {
   // Head: speaker avatar + name + per-message tier badge
   const head = document.createElement("div");
   head.className = "msg-ai__head";
-  head.innerHTML =
-    `<span class="msg-ai__avatar" aria-hidden="true"><span class="glyph">F</span></span>` +
-    `<span class="msg-ai__name">Firas</span>` +
-    `<span class="msg-ai__badge" data-tier="${tier.key}"><span class="dot"></span>${(tier.short[lang] || tier.short.en).toUpperCase()}</span>`;
+  const inAgentChat = !!(activeChat() && activeChat().agent);
+  head.innerHTML = inAgentChat
+    ? `<span class="msg-ai__avatar msg-ai__avatar--agent" aria-hidden="true"><span class="glyph">F</span></span>` +
+      `<span class="msg-ai__name">Firas Agent</span>` +
+      `<span class="msg-ai__badge msg-ai__badge--agent"><span class="dot"></span>AGENT</span>`
+    : `<span class="msg-ai__avatar" aria-hidden="true"><span class="glyph">F</span></span>` +
+      `<span class="msg-ai__name">Firas</span>` +
+      `<span class="msg-ai__badge" data-tier="${tier.key}"><span class="dot"></span>${(tier.short[lang] || tier.short.en).toUpperCase()}</span>`;
   turn.appendChild(head);
 
   // Thinking disclosure (Pro/Ultra only, when reasoning exists and was enabled)
@@ -3336,11 +3337,14 @@ function aiTurnEl(msg, index) {
   md.className = "md";
   const imgMeta = parseImageMeta(msg.content);
   const agentMeta = !imgMeta ? parseAgentMeta(msg.content) : null;
-  const projMeta = !imgMeta && !agentMeta ? parseProjectMeta(msg.content) : null;
-  const codeMeta = !imgMeta && !agentMeta && !projMeta ? parseCodeMeta(msg.content) : null;
-  const fileFmt = !imgMeta && !agentMeta && !projMeta && !codeMeta && msg.content && msg.content.trim() ? isFileStreamReply(msg, activeChat()) : null;
+  const deckMeta = !imgMeta && !agentMeta ? parseDeckMeta(msg.content) : null;
+  const projMeta = !imgMeta && !agentMeta && !deckMeta ? parseProjectMeta(msg.content) : null;
+  const codeMeta = !imgMeta && !agentMeta && !deckMeta && !projMeta ? parseCodeMeta(msg.content) : null;
+  const fileFmt = !imgMeta && !agentMeta && !deckMeta && !projMeta && !codeMeta && msg.content && msg.content.trim() ? isFileStreamReply(msg, activeChat()) : null;
   if (agentMeta) {
     md.appendChild(buildAgentCard(agentMeta, lang)); // Firas Agent run (live plan card, survives reload)
+  } else if (deckMeta) {
+    md.appendChild(buildDeckCard(deckMeta, lang, msg)); // editable slide deck (live build + edit + present)
   } else if (projMeta) {
     md.appendChild(buildProjectCard(projMeta, lang)); // multi-file folder (viewer + ZIP download)
   } else if (imgMeta) {
@@ -3360,8 +3364,9 @@ function aiTurnEl(msg, index) {
   turn.appendChild(body);
 
   // File card — when this reply answered a file request (re-derived on render so
-  // it survives a reload) and is a real reply (not the offline fallback).
-  if (msg.content && msg.content.trim() && !msg.offline && !imgMeta && !codeMeta) {
+  // it survives a reload) and is a real reply (not the offline fallback). Never under an
+  // agent/deck card — those carry their own actions (a stray file card would export the card JSON).
+  if (msg.content && msg.content.trim() && !msg.offline && !imgMeta && !codeMeta && !deckMeta && !agentMeta) {
     const fmt = requestedFormatForAssistant(activeChat(), index);
     if (fmt) {
       const card = fileCardEl(msg, fmt);
@@ -3848,12 +3853,17 @@ function fileCardEl(msg, fmt) {
       `<span class="file-card__name" dir="ltr">${escapeHtml(name)}</span>` +
       `<span class="file-card__label">${escapeHtml(label)}</span>` +
     `</span>` +
+    ((meta.ext === "pptx" && typeof openDeckPresenter === "function")
+      ? `<button type="button" class="file-card__present">▶<span>${escapeHtml(state.lang === "ar" ? "اعرض" : "Present")}</span></button>`
+      : "") +
     `<button type="button" class="file-card__dl">${ICONS.download}<span>${escapeHtml(t().fileDownload)}</span></button>`;
 
   const run = () => {
     const turn = card.closest(".msg-ai");
     meta.run(turn, msg);
   };
+  const prBtn = card.querySelector(".file-card__present");
+  if (prBtn) prBtn.addEventListener("click", (e) => { e.stopPropagation(); openDeckPresenter(msg); });
   const dlBtn = card.querySelector(".file-card__dl");
   dlBtn.addEventListener("click", (e) => { e.stopPropagation(); run(); });
   // The whole card is clickable too (button stays the primary affordance).
@@ -3967,9 +3977,34 @@ const FILE_THEMES = {
   dark:     { accent: "C9A24B", deep: "0E0E0C", coverAccent: "E6CB82", soft: "26251F", zebra: "201F1B", bg: "1A1916", ink: "ECE7DA", border: "3A372E" },
   midnight: { accent: "8FB4E0", deep: "0B1422", coverAccent: "BBD3F1", soft: "1B2433", zebra: "151D29", bg: "121A25", ink: "E5EBF3", border: "2B3748" },
 };
+/* Mix a 6-digit hex with white (t>0) or black (t<0). t in [0..1]. */
+function hexMix(hex, t, toWhite) {
+  const h = String(hex).replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return hex;
+  const to = toWhite ? 255 : 0;
+  const c = [0, 2, 4].map((i) => {
+    const v = parseInt(h.slice(i, i + 2), 16);
+    return Math.round(v + (to - v) * t).toString(16).padStart(2, "0");
+  });
+  return c.join("").toUpperCase();
+}
 function themeFor(meta) {
   const key = meta && String(meta.theme || "").toLowerCase().trim();
-  return FILE_THEMES[key] || FILE_THEMES.teal;
+  const base = FILE_THEMES[key] || FILE_THEMES.teal;
+  // DESIGN-ON-REQUEST: when the model set a custom accent (from the user's requested colors/style),
+  // derive a full matching theme from that single hex — cover, headings, tables, tints.
+  const acc = meta && String(meta.accent || "").replace("#", "").trim();
+  if (/^[0-9a-fA-F]{6}$/.test(acc)) {
+    return {
+      ...base,
+      accent: acc.toUpperCase(),
+      deep: hexMix(acc, 0.55, false),
+      coverAccent: hexMix(acc, 0.45, true),
+      soft: hexMix(acc, 0.93, true),
+      zebra: hexMix(acc, 0.955, true),
+    };
+  }
+  return base;
 }
 
 /** Strip the ```firas-file {json}``` metadata block from content (so it never
@@ -4063,31 +4098,121 @@ async function ensureExportFonts(isAr) {
   } catch (_) { /* offline / blocked → system fonts */ }
 }
 
-function exportCss(th, isAr, scope) {
+/* ── ③ NAMED DOCUMENT TEMPLATES — full layout identities, not just colors. ── */
+function templateCss(tpl, th, isAr, scope) {
+  const dp = scope ? scope + " " : "";
+  const sans = isAr ? '"Cairo","Tajawal","Segoe UI",Arial,sans-serif' : '"Inter","Helvetica Neue",Arial,sans-serif';
+  const serif = isAr ? '"Tajawal","Segoe UI",Arial,sans-serif' : '"Lora",Georgia,serif';
+  const ink = th.ink || "1A1A18";
+  if (tpl === "academic") return (
+    // Numbered headings (1. / 1.1) + formal light cover + abstract-style first blockquote.
+    dp + ".doc{counter-reset:ach1}" +
+    dp + ".doc h1{counter-increment:ach1;counter-reset:ach2}" +
+    dp + ".doc h1::before{content:counter(ach1) '. ';color:#" + th.accent + "}" +
+    dp + ".doc h2{counter-increment:ach2}" +
+    dp + ".doc h2::before{content:counter(ach1) '.' counter(ach2) ' ';color:#" + th.accent + "}" +
+    dp + ".cover{background:#FBFAF7!important;color:#" + ink + "!important}" +
+    dp + ".cover::before," + dp + ".cover::after{display:none}" +
+    dp + ".cover__pad{align-items:center;text-align:center}" +
+    dp + ".cover__mid{margin-top:34mm}" +
+    dp + ".cover__kicker{color:#" + th.accent + "!important;letter-spacing:.22em}" +
+    dp + ".cover__title{color:#" + ink + "!important;font-size:30pt}" +
+    dp + ".cover__sub{color:rgba(0,0,0,.6)!important;margin-inline:auto}" +
+    dp + ".cover__rule{margin-inline:auto;background:#" + th.accent + "!important}" +
+    dp + "blockquote{background:#F6F5F1;border-inline-start-color:#" + th.accent + ";font-style:italic}"
+  );
+  if (tpl === "ministry") return (
+    // Official exam paper: centered double-ruled title, hard-bordered tables, bold marks, end mark.
+    dp + ".doc>h1:first-of-type{text-align:center;border-top:3px double #" + ink + ";border-bottom:3px double #" + ink + ";padding:.35em 0;font-family:" + serif + "}" +
+    dp + "table," + dp + "th," + dp + "td{border:1.6px solid #" + ink + "!important}" +
+    dp + "th{background:#EFEDE6!important;color:#" + ink + "!important}" +
+    dp + "ol.li-explicit>li>.li-n{color:#" + ink + ";font-size:1.05em}" +
+    dp + "strong{color:#" + ink + "}" +
+    dp + ".doc::after{content:'— " + (isAr ? "انتهت الأسئلة" : "End of questions") + " —';font-family:" + sans + ";font-size:11pt;color:#" + ink + ";opacity:1}" +
+    dp + ".cover{background:linear-gradient(160deg,#" + th.deep + ",#" + th.deep + ")!important}"
+  );
+  if (tpl === "corporate") return (
+    // Executive report: sans headings with accent bars, blockquotes become KPI/callout cards.
+    dp + "h1," + dp + "h2," + dp + "h3{font-family:" + sans + "}" +
+    dp + "h2{border-inline-start-width:6px;text-transform:none;letter-spacing:0}" +
+    dp + "blockquote{background:#" + th.accent + ";color:#fff;border:none;border-radius:10px;padding:1em 1.2em;font-family:" + sans + ";font-weight:600;box-shadow:0 3px 12px rgba(0,0,0,.14)}" +
+    dp + "blockquote strong{color:#fff}" +
+    dp + ".doc>p:first-of-type{font-size:13pt;font-family:" + sans + ";border-inline-start:4px solid #" + th.accent + ";padding-inline-start:.7em}"
+  );
+  if (tpl === "magazine") return (
+    // Editorial magazine: drop cap, pull-quotes, kicker line over h2.
+    dp + ".doc>p:first-of-type::first-letter{font-size:3.1em;line-height:1;font-weight:700;color:#" + th.accent + ";float:" + (isAr ? "right" : "left") + ";padding-inline-end:.12em;font-family:" + serif + "}" +
+    dp + "blockquote{background:none;border:none;border-block:2px solid #" + th.accent + ";border-radius:0;text-align:center;font-size:14.5pt;font-style:italic;font-family:" + serif + ";padding:.9em .4em;margin:1.2em 8mm}" +
+    dp + "h2{border-inline-start:none;padding-inline-start:0;padding-top:.35em;border-top:3px solid #" + th.accent + ";display:table}"
+  );
+  return "";
+}
+/* Infer the best-fit document TEMPLATE from a request (used when the agent delivers a doc, so an
+   exam looks ministerial, a thesis academic, a business report corporate, an article editorial). */
+function docTemplateFor(task) {
+  const t = String(task || "");
+  if (/امتحان|اختبار|كويز|ورقة\s*(امتحان|أسئلة)|نموذج\s*امتحان|\bexam\b|\bquiz\b|\btest\s*paper\b/i.test(t)) return "ministry";
+  if (/بحث|أطروحة|اطروحة|رسالة\s*(ماجستير|دكتوراه)|أكاديم|اكاديم|thesis|dissertation|research\s*paper|academic/i.test(t)) return "academic";
+  if (/تقرير\s*(عمل|شركة|أعمال|إداري)|خطة\s*عمل|دراسة\s*جدوى|business\s*(report|plan)|corporate|executive\s*(summary|report)|\bkpi\b/i.test(t)) return "corporate";
+  if (/مقال|article|magazine|مجلة|editorial|blog\s*post|نشرة/i.test(t)) return "magazine";
+  return "";
+}
+/* ① Split a very large document body into VOLUMES on chapter boundaries (## / #), each ≤ maxLen, so a
+   mega-book that exceeds the per-message storage cap is delivered as several numbered volume files. */
+function splitIntoVolumes(body, maxLen) {
+  const parts = String(body || "").split(/(?=^#{1,2}\s)/m);   // keep each heading with its content
+  const vols = []; let cur = "";
+  for (const p of parts) {
+    if (cur && (cur.length + p.length) > maxLen) { vols.push(cur); cur = ""; }
+    if (p.length > maxLen) {                                   // a single chapter bigger than a volume → hard-split
+      if (cur) { vols.push(cur); cur = ""; }
+      for (let i = 0; i < p.length; i += maxLen) vols.push(p.slice(i, i + maxLen));
+      continue;
+    }
+    cur += p;
+  }
+  if (cur.trim()) vols.push(cur);
+  return vols.length ? vols : [String(body || "")];
+}
+function exportCss(th, isAr, scope, tpl) {
   const fontStack = isAr ? '"Tajawal","Segoe UI","Tahoma",Arial,sans-serif' : '"Lora",Georgia,"Times New Roman","Cambria",serif';
   const sansStack = isAr ? '"Cairo","Tajawal","Segoe UI",Arial,sans-serif' : '"Inter","Helvetica Neue","Segoe UI",Arial,sans-serif';
   const bg = th.bg || "FFFFFF", ink = th.ink || "1A1A18", line = th.border || "D8D6CB";
   const root = scope || "body";
   const dp = scope ? scope + " " : "";
   const rdp = scope ? scope + "[dir=rtl] " : "[dir=rtl] ";
+  const rgba = (hex, a) => { const h = String(hex).replace("#", ""); return "rgba(" + parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16) + "," + parseInt(h.slice(4, 6), 16) + "," + a + ")"; };
   return (
     (scope ? scope + "{width:794px;overflow:hidden}" : "@page{size:A4;margin:18mm 16mm}") +
     dp + "*{box-sizing:border-box}" +
     root + "{font-family:" + fontStack + ";color:#" + ink + ";background:#" + bg + ";line-height:1.7;font-size:11.5pt;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}" +
-    dp + ".cover{position:relative;height:251mm;background:#" + th.deep + ";color:#FFF;page-break-after:always;break-after:page;overflow:hidden}" +
+    // ── COVER: premium layered art — soft accent glows over a deep gradient, a fine ring
+    // ornament, elegant serif title. No brand, no date — clean and editorial.
+    dp + ".cover{position:relative;height:251mm;color:#FFF;page-break-after:always;break-after:page;overflow:hidden;" +
+      "background:radial-gradient(150mm 150mm at 88% -12%," + rgba(th.coverAccent, 0.30) + ",transparent 62%)," +
+      "radial-gradient(120mm 120mm at -10% 112%," + rgba(th.coverAccent, 0.22) + ",transparent 60%)," +
+      "radial-gradient(70mm 70mm at 14% 22%," + rgba(th.coverAccent, 0.10) + ",transparent 70%)," +
+      "linear-gradient(158deg,#" + th.deep + " 0%,#" + hexMix(th.deep, 0.35, false) + " 100%)}" +
+    dp + ".cover::before{content:'';position:absolute;top:16mm;inset-inline-end:16mm;width:44mm;height:44mm;border:1.2px solid " + rgba(th.coverAccent, 0.55) + ";border-radius:50%}" +
+    dp + ".cover::after{content:'';position:absolute;top:23mm;inset-inline-end:35mm;width:20mm;height:20mm;background:" + rgba(th.coverAccent, 0.16) + ";border-radius:50%}" +
     dp + ".cover__pad{position:absolute;inset:0;padding:26mm 22mm;display:flex;flex-direction:column}" +
     dp + ".cover__brand{font-family:" + sansStack + ";font-size:13pt;font-weight:700;letter-spacing:.06em;color:#" + th.coverAccent + ";text-transform:uppercase}" +
     dp + ".cover__mid{margin-top:auto;margin-bottom:auto}" +
-    dp + ".cover__title{font-family:" + fontStack + ";font-size:34pt;line-height:1.15;font-weight:700;margin:0;color:#FFF}" +
-    dp + ".cover__sub{font-family:" + sansStack + ";font-size:15pt;line-height:1.4;margin:.6em 0 0;color:#" + th.coverAccent + ";font-weight:400}" +
-    dp + ".cover__rule{width:64mm;height:4px;background:#" + th.coverAccent + ";margin-top:10mm;border-radius:2px}" +
-    rdp + ".cover__rule{margin-left:auto}" +
+    dp + ".cover__kicker{font-family:" + sansStack + ";font-size:10.5pt;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:" + rgba(th.coverAccent, 0.95) + ";margin:0 0 6mm}" +
+    dp + ".cover__title{font-family:" + fontStack + ";font-size:38pt;line-height:1.18;font-weight:700;margin:0;color:#FFF;text-wrap:balance}" +
+    dp + ".cover__sub{font-family:" + sansStack + ";font-size:14pt;line-height:1.55;margin:.7em 0 0;color:rgba(255,255,255,.82);font-weight:400;max-width:120mm}" +
+    dp + ".cover__rule{width:52mm;height:3px;background:linear-gradient(90deg,#" + th.coverAccent + "," + rgba(th.coverAccent, 0.25) + ");margin-top:11mm;border-radius:2px}" +
+    rdp + ".cover__rule{background:linear-gradient(270deg,#" + th.coverAccent + "," + rgba(th.coverAccent, 0.25) + ")}" +
+    dp + ".cover__foot{display:flex;align-items:center;gap:4mm;font-family:" + sansStack + ";font-size:10pt;color:rgba(255,255,255,.55)}" +
+    dp + ".cover__foot::before{content:'';flex:0 0 14mm;height:1px;background:rgba(255,255,255,.35)}" +
     dp + ".cover__date{font-family:" + sansStack + ";font-size:11pt;color:rgba(255,255,255,.72)}" +
     dp + ".doc{padding-top:2mm}" +
+    // Editorial lead: the opening paragraph reads slightly larger, like a professional report.
+    dp + ".doc>p:first-of-type{font-size:12.6pt;line-height:1.75;color:" + rgba(ink, 0.92) + "}" +
     dp + "h1," + dp + "h2," + dp + "h3," + dp + "h4{font-family:" + sansStack + ";color:#" + ink + ";line-height:1.3;font-weight:700;" + (isAr ? "letter-spacing:normal;word-spacing:.04em;" : "letter-spacing:-.01em;") + "page-break-after:avoid;break-after:avoid}" +
-    dp + "h1{font-size:22pt;margin:.2em 0 .5em;padding-bottom:.22em;border-bottom:2.5px solid #" + th.accent + "}" +
-    dp + "h2{font-size:16.5pt;margin:1.2em 0 .45em;color:#" + th.accent + "}" +
-    dp + "h3{font-size:13.5pt;margin:1em 0 .4em}" +
+    dp + "h1{font-size:22pt;margin:.2em 0 .5em;padding-bottom:.24em;border-bottom:2.5px solid #" + th.accent + "}" +
+    dp + "h2{font-size:16.5pt;margin:1.35em 0 .5em;color:#" + ink + ";padding-inline-start:.55em;border-inline-start:4.5px solid #" + th.accent + "}" +
+    dp + "h3{font-size:13.5pt;margin:1em 0 .4em;color:#" + th.accent + "}" +
     dp + "h4{font-size:12pt;margin:.9em 0 .35em}" +
     dp + "p{margin:0 0 .75em;orphans:2;widows:2}" +
     dp + "ul," + dp + "ol{margin:0 0 .8em;padding-inline-start:1.5em}" + dp + "li{margin:.3em 0;page-break-inside:avoid}" +
@@ -4116,6 +4241,11 @@ function exportCss(th, isAr, scope) {
     dp + "tr,td,th{break-inside:avoid;page-break-inside:avoid}" +
     dp + "li,.katex-display,blockquote,pre,figure{break-inside:avoid}" +
     dp + "img{max-width:100%;page-break-inside:avoid;break-inside:avoid;border-radius:6px}" +
+    // Real web images placed by the author: centered, framed, magazine-like.
+    dp + "p>img:only-child," + dp + "p>img:first-child{display:block;margin:1.1em auto .5em;max-width:88%;max-height:80mm;object-fit:cover;border-radius:10px;box-shadow:0 3px 14px " + rgba(th.deep, 0.22) + ";border:1px solid #" + line + "}" +
+    dp + "p>img+em," + dp + "img+em{display:block;text-align:center;font-family:" + sansStack + ";font-size:9.5pt;color:" + rgba(ink, 0.62) + ";margin-top:.2em}" +
+    // Editorial end ornament after the last section.
+    dp + ".doc::after{content:'❖';display:block;text-align:center;color:#" + th.accent + ";font-size:13pt;margin:2.2em 0 .5em;opacity:.85}" +
     dp + ".tikz-figure{margin:1.1em 0;text-align:center;page-break-inside:avoid;break-inside:avoid}" +
     dp + ".tikz-figure svg{max-width:100%;height:auto}" +
     dp + ".plot-figure{max-width:480px;margin-inline:auto}" +
@@ -4136,7 +4266,8 @@ function exportCss(th, isAr, scope) {
     dp + ".katex{font-size:1.05em}" +
     dp + ".katex-display{margin:1.15em 0;max-width:100%;overflow:visible;page-break-inside:avoid;direction:ltr;text-align:center}" +
     dp + ".katex{max-width:100%;direction:ltr}" +
-    dp + ".katex-display>.katex{display:inline-block;text-align:initial}"
+    dp + ".katex-display>.katex{display:inline-block;text-align:initial}" +
+    templateCss(String(tpl || "").toLowerCase().trim(), th, isAr, scope)
   );
 }
 
@@ -4188,7 +4319,7 @@ function buildExportHtml(mdNode, lang, meta) {
   const { cover, body } = exportBody(mdNode, lang, meta);
   return (
     '<!doctype html><html dir="' + dir + '" lang="' + (isAr ? "ar" : "en") + '">' +
-    '<head><meta charset="utf-8"><style>' + exportCss(th, isAr, "") + "</style></head><body>" +
+    '<head><meta charset="utf-8"><style>' + exportCss(th, isAr, "", meta.template) + "</style></head><body>" +
     cover + "<div class='doc'>" + body + "</div></body></html>"
   );
 }
@@ -4208,7 +4339,7 @@ function buildExportRoot(mdNode, lang, meta) {
   // position:absolute (NOT fixed) + a real on-page offset so html2pdf's bundled
   // html2canvas can scroll to and capture it; far off-screen keeps it invisible.
   root.style.cssText = "position:absolute;left:-10000px;top:0;width:794px;background:#" + (th.bg || "FFFFFF") + ";z-index:-1";
-  root.innerHTML = "<style>" + exportCss(th, isAr, "#firasExportRoot") + "</style>" + cover + "<div class='doc'>" + body + "</div>";
+  root.innerHTML = "<style>" + exportCss(th, isAr, "#firasExportRoot", meta.template) + "</style>" + cover + "<div class='doc'>" + body + "</div>";
   numberListsExplicitly(root.querySelector(".doc"));
   return root;
 }
@@ -4335,7 +4466,7 @@ async function exportPdf(turn, lang, msg) {
   root.id = "firasExportRoot";
   root.setAttribute("dir", isAr ? "rtl" : "ltr");
   root.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1";
-  root.innerHTML = "<style>" + exportCss(th, isAr, "#firasExportRoot") +
+  root.innerHTML = "<style>" + exportCss(th, isAr, "#firasExportRoot", meta.template) +
     "#firasExportRoot{width:794px!important;overflow:visible!important;margin:0;padding:0}#firasExportRoot .cover{height:1150px}</style>" +
     cover + "<div class='doc'>" + body + "</div>";
   numberListsExplicitly(root.querySelector(".doc"));
@@ -4354,34 +4485,133 @@ async function exportPdf(turn, lang, msg) {
     await loadScripts(EXPORT_LIBS.pdf);           // html2canvas@1.4.1 + jsPDF@2.5.1 (the html2pdf bundle produced blank PDFs)
     const H2C = window.html2canvas, JSPDF = window.jspdf && window.jspdf.jsPDF;
     if (typeof H2C !== "function" || typeof JSPDF !== "function") throw new Error("pdf libs unavailable");
-    const canvas = await H2C(root, { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
-    if (!canvas || !canvas.width || !canvas.height) throw new Error("blank capture");
+    // ═══ MEGA-BOOK CHUNKED ENGINE ═══════════════════════════════════════════════════════════
+    // Browsers cap a canvas at ~16,384px tall — one big capture dies at ~14 A4 pages. So the
+    // document is rendered in CHUNKS (each safely under the cap), paginated with CARRY-OVER so
+    // pages flow seamlessly across chunk boundaries, with real page numbers stamped. This lifts
+    // the ceiling from ~14 pages to effectively unlimited (hundreds+).
     const pdf = new JSPDF("p", "mm", "a4");
-    const pageW = 210, pageH = 297, margin = 12, contentWmm = pageW - 2 * margin;
-    const pxPerMm = canvas.width / contentWmm;                   // canvas px per mm
-    const pageContentPx = (pageH - 2 * margin) * pxPerMm;        // usable page height, in canvas px
-    // Safe break points = BOTTOM of block elements, so a page never cuts through a line / figure / row.
-    const rr = root.getBoundingClientRect(), sc = canvas.height / rr.height;
-    const breaks = [0];
-    root.querySelectorAll("p,li,h1,h2,h3,h4,figure,tr,blockquote,pre,.katex-display,.tikz-figure,.plot-figure,table,.cover,hr").forEach((el) => {
-      const y = (el.getBoundingClientRect().bottom - rr.top) * sc;
-      if (y > 1 && y < canvas.height) breaks.push(y);
-    });
-    breaks.push(canvas.height); breaks.sort((a, b) => a - b);
-    let srcY = 0, firstPage = true;
-    while (srcY < canvas.height - 2) {
-      const limit = srcY + pageContentPx;
-      let cut = 0;
-      for (const bp of breaks) { if (bp > srcY + 24 && bp <= limit + 0.5) cut = bp; }
-      if (!cut) cut = Math.min(limit, canvas.height);            // an element taller than a page → forced cut
-      cut = Math.min(cut, canvas.height);
-      const sliceH = Math.max(1, Math.round(cut - srcY));
-      const slice = document.createElement("canvas"); slice.width = canvas.width; slice.height = sliceH;
-      slice.getContext("2d").drawImage(canvas, 0, srcY, canvas.width, sliceH, 0, 0, canvas.width, sliceH);
-      if (!firstPage) pdf.addPage();
-      pdf.addImage(slice.toDataURL("image/jpeg", 0.95), "JPEG", margin, margin, contentWmm, sliceH / pxPerMm);
-      firstPage = false; srcY = cut;
+    const pageW = 210, pageH = 297, margin = 12, contentWmm = pageW - 2 * margin, pageContentMm = pageH - 2 * margin;
+    const docEl = root.querySelector(".doc");
+    const coverEl = root.querySelector(".cover");
+    // — Split any single block taller than a chunk (a 1000-item list / giant table) into parts —
+    const CHUNK_CSS_MAX = 6200;   // css px per chunk (~5.5 pages) → canvas ≤ 12.4k px at scale 2
+    const splitTall = () => {
+      [...docEl.children].forEach((el) => {
+        if (el.offsetHeight <= CHUNK_CSS_MAX) return;
+        const tag = el.tagName;
+        if (tag === "OL" || tag === "UL") {
+          // Chain-split: every time the running height fills a part, open a NEW sibling list and
+          // keep moving the following items into it (works for 1000-item workbooks).
+          const items = [...el.children];
+          let target = el, h = 0;
+          items.forEach((li) => {
+            const lh = li.offsetHeight || 24;
+            if (h + lh > CHUNK_CSS_MAX * 0.75 && h > 0) {
+              const nt = el.cloneNode(false);
+              target.parentNode.insertBefore(nt, target.nextSibling);
+              target = nt; h = 0;
+            }
+            if (target !== el) target.appendChild(li);
+            h += lh;
+          });
+        } else if (tag === "TABLE") {
+          const tbody = el.tBodies && el.tBodies[0];
+          if (!tbody) return;
+          const rows = [...tbody.rows];
+          let target = null, h = 0;
+          rows.forEach((tr) => {
+            const rh = tr.offsetHeight || 28;
+            if (h + rh > CHUNK_CSS_MAX * 0.75 && h > 0) {
+              const nt = el.cloneNode(false);
+              if (el.tHead) nt.appendChild(el.tHead.cloneNode(true));
+              nt.appendChild(document.createElement("tbody"));
+              (target || el).parentNode.insertBefore(nt, (target || el).nextSibling);
+              target = nt; h = 0;
+            }
+            if (target) target.tBodies[target.tBodies.length - 1].appendChild(tr);
+            h += rh;
+          });
+        }
+      });
+    };
+    splitTall();
+    // — Group top-level blocks into chunks —
+    const blocks = [...docEl.children];
+    const totalCssH = docEl.scrollHeight + (coverEl ? 1160 : 0);
+    // Adaptive quality: short docs get crisp scale-2; big books trade a little sharpness for a
+    // sane file size (raster PDFs grow linearly with page count).
+    const baseScale = totalCssH > 120000 ? 1.25 : totalCssH > 40000 ? 1.4 : 2;
+    const jpegQ = totalCssH > 120000 ? 0.74 : totalCssH > 40000 ? 0.8 : 0.95;
+    const chunks = [];                              // each: { nodes:[...], scale }
+    if (coverEl) chunks.push({ nodes: [coverEl], scale: baseScale, isCover: true });
+    let cur = [], curH = 0;
+    for (const b of blocks) {
+      const h = Math.max(1, b.offsetHeight);
+      if (curH + h > CHUNK_CSS_MAX && cur.length) { chunks.push({ nodes: cur, scale: baseScale }); cur = []; curH = 0; }
+      cur.push(b); curH += h;
     }
+    if (cur.length) chunks.push({ nodes: cur, scale: baseScale });
+    const styleTxt = (root.querySelector("style") || {}).textContent || "";
+    // — Render each chunk and paginate with carry-over —
+    let usedMm = 0, pageNo = 1, anyPage = false;
+    const stampNo = () => {
+      if (coverEl && pageNo === 1) return;          // no number on the cover
+      pdf.setFontSize(9); pdf.setTextColor(120);
+      pdf.text(String(pageNo), pageW / 2, pageH - 5.5, { align: "center" });
+      pdf.setTextColor(0);
+    };
+    const closePage = () => { stampNo(); pdf.addPage(); pageNo++; usedMm = 0; };
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const ch = chunks[ci];
+      if (chunks.length > 4) showToast((isAr ? "يُصدّر الكتاب… " : "Exporting… ") + Math.round((ci / chunks.length) * 100) + "%");
+      const cr = document.createElement("div");
+      cr.id = "firasExportChunk";
+      cr.setAttribute("dir", root.getAttribute("dir") || "rtl");
+      cr.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1";
+      const st = document.createElement("style"); st.textContent = styleTxt.replace(/#firasExportRoot/g, "#firasExportChunk"); cr.appendChild(st);
+      if (ch.isCover) { cr.appendChild(ch.nodes[0]); }
+      else { const dd = document.createElement("div"); dd.className = "doc"; ch.nodes.forEach((n) => dd.appendChild(n)); cr.appendChild(dd); }
+      document.body.appendChild(cr);
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 20)));
+      const cssH = cr.scrollHeight;
+      const chScale = Math.min(ch.scale, 13800 / Math.max(cssH, 1));   // never exceed the canvas cap
+      const canvas = await H2C(cr, { scale: chScale, useCORS: true, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
+      if (!canvas || !canvas.width || !canvas.height) { cr.remove(); continue; }
+      const pxPerMm = canvas.width / contentWmm;
+      const rr = cr.getBoundingClientRect(), sc = canvas.height / Math.max(rr.height, 1);
+      const breaks = [];
+      cr.querySelectorAll("p,li,h1,h2,h3,h4,figure,tr,blockquote,pre,.katex-display,.tikz-figure,.plot-figure,table,hr").forEach((el) => {
+        const y = (el.getBoundingClientRect().bottom - rr.top) * sc;
+        if (y > 1 && y < canvas.height) breaks.push(y);
+      });
+      breaks.push(canvas.height); breaks.sort((a, b) => a - b);
+      let srcY = 0;
+      while (srcY < canvas.height - 2) {
+        let availMm = pageContentMm - usedMm;
+        if (availMm < 16) { closePage(); availMm = pageContentMm; }   // don't start content in a sliver
+        const capacityPx = availMm * pxPerMm;
+        const limit = srcY + capacityPx;
+        let cut = 0;
+        for (const bp of breaks) { if (bp > srcY + 24 && bp <= limit + 0.5) cut = bp; }
+        if (!cut) cut = Math.min(limit, canvas.height);
+        cut = Math.min(cut, canvas.height);
+        const sliceH = Math.max(1, Math.round(cut - srcY));
+        const slice = document.createElement("canvas"); slice.width = canvas.width; slice.height = sliceH;
+        slice.getContext("2d").drawImage(canvas, 0, srcY, canvas.width, sliceH, 0, 0, canvas.width, sliceH);
+        pdf.addImage(slice.toDataURL("image/jpeg", jpegQ), "JPEG", margin, margin + usedMm, contentWmm, sliceH / pxPerMm);
+        anyPage = true;
+        slice.width = 0;                                              // free the slice bitmap
+        srcY = cut;
+        if (srcY < canvas.height - 2) { closePage(); }                // more content in THIS chunk → page was filled
+        else { usedMm += sliceH / pxPerMm; }                          // chunk done → keep page open (carry-over)
+      }
+      if (ch.isCover) { closePage(); }                                // the cover always owns its page
+      canvas.width = 0;                                               // free the chunk bitmap
+      cr.remove();
+    }
+    if (!anyPage) throw new Error("blank capture");
+    stampNo();                                                        // number the final page
     pdf.save(fileTitle + ".pdf");
     cleanup();
     showToast(isAr ? "تم تنزيل الملف ✓" : "File downloaded ✓");
@@ -4547,29 +4777,504 @@ function slidesFromMarkdown(md, fallbackTitle) {
   const lines = (md || "").replace(/```[\s\S]*?```/g, "").split(/\n/); // strip fenced code (was a no-op)
   const slides = [];
   let cur = null;
-  const push = () => { if (cur && (cur.title || cur.bullets.length)) slides.push(cur); };
+  const push = () => { if (cur && (cur.title || cur.bullets.length || cur.image)) slides.push(cur); };
   lines.forEach((raw) => {
     const line = raw.replace(/\r$/, "");
     const h = line.match(/^(#{1,3})\s+(.*)$/);
     if (h) {
       push();
-      cur = { title: h[2].replace(/[*_`#]/g, "").trim(), bullets: [] };
+      // A level-1 heading with an em-dash / colon reads as a SECTION divider cue; kept as a hint.
+      cur = { title: h[2].replace(/[*_`#]/g, "").trim(), bullets: [], notes: "", image: "", lvl: h[1].length };
       return;
     }
-    const txt = line.replace(/^[-*+]\s+/, "").replace(/[*_`#>]/g, "").trim();
+    // Speaker notes — a "Notes:/ملاحظات:" line (optionally blockquoted) → the slide's presenter notes,
+    // NOT a visible bullet. Everything after the colon is spoken script.
+    const nm = line.match(/^\s*>?\s*(?:notes?|speaker\s*notes?|ملاحظات(?:\s*المتحدث)?|الملقي|شرح)\s*[:：]\s*(.*)$/i);
+    if (nm) { if (!cur) cur = { title: fallbackTitle, bullets: [], notes: "", image: "", lvl: 2 }; cur.notes += (cur.notes ? " " : "") + nm[1].trim(); return; }
+    // A chart — 'Chart: {"type":"bar","title":"…","labels":[…],"data":[…]}' → an ANIMATED chart in the
+    // presenter and a REAL native chart in the exported PowerPoint.
+    const chm = line.match(/^\s*>?\s*(?:chart|graph|رسم\s*بياني|مخطط)\s*[:：]\s*(\{.*\})\s*$/i);
+    if (chm) {
+      if (!cur) cur = { title: fallbackTitle, bullets: [], notes: "", image: "", lvl: 2 };
+      if (!cur.chart) { const ch = normalizeDeckChart(chm[1]); if (ch) cur.chart = ch; }
+      return;
+    }
+    // An image on its own line → the slide's visual (first one wins). Keep alt text for a caption.
+    const im = line.match(/^\s*>?\s*!\[([^\]]*)\]\(([^)\s]+)[^)]*\)\s*$/);
+    if (im) { if (!cur) cur = { title: fallbackTitle, bullets: [], notes: "", image: "", lvl: 2 }; if (!cur.image) { cur.image = im[2]; cur.imageAlt = im[1].trim(); } return; }
+    const txt = line.replace(/^[-*+]\s+/, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[*_`#>]/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").trim();
     if (!txt) return;
-    if (!cur) cur = { title: fallbackTitle, bullets: [] };
+    if (!cur) cur = { title: fallbackTitle, bullets: [], notes: "", image: "", lvl: 2 };
     cur.bullets.push(txt);
   });
   push();
-  // Cap bullets per slide so content stays readable.
-  return slides.map((s) => ({ title: s.title, bullets: s.bullets.slice(0, 12) }));
+  // A lone heading (no bullets, no image, no chart) is a SECTION DIVIDER; everything else caps bullets.
+  return slides.map((s) => ({
+    title: s.title,
+    bullets: s.bullets.slice(0, 10),
+    notes: (s.notes || "").slice(0, 900),
+    image: s.image || "",
+    imageAlt: s.imageAlt || "",
+    chart: s.chart || null,
+    section: !s.bullets.length && !s.image && !s.chart && !!s.title,
+  }));
+}
+
+/* Validate + normalize a chart spec (from the model or an edit). Accepts {type,title,labels,data}
+   or {type,title,labels,series:[{name,data}]}. Returns null when unusable. */
+function normalizeDeckChart(raw) {
+  try {
+    const o = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!o || !Array.isArray(o.labels) || !o.labels.length) return null;
+    const type = /^(line|pie|doughnut|donut)$/i.test(String(o.type || "")) ? String(o.type).toLowerCase().replace("donut", "doughnut").replace("pie", "doughnut") : "bar";
+    const labels = o.labels.slice(0, 12).map((l) => String(l).slice(0, 28));
+    let series = Array.isArray(o.series) && o.series.length
+      ? o.series.slice(0, 4).map((se) => ({ name: String(se.name || "").slice(0, 40), data: (Array.isArray(se.data) ? se.data : []).slice(0, 12).map((v) => { const n = Number(v); return isFinite(n) ? n : 0; }) }))
+      : [{ name: String(o.name || "").slice(0, 40), data: (Array.isArray(o.data) ? o.data : []).slice(0, 12).map((v) => { const n = Number(v); return isFinite(n) ? n : 0; }) }];
+    series = series.filter((se) => se.data.length);
+    if (!series.length) return null;
+    series.forEach((se) => { while (se.data.length < labels.length) se.data.push(0); se.data = se.data.slice(0, labels.length); });
+    if (type === "doughnut") series = series.slice(0, 1);       // a pie has ONE series
+    return { type, title: String(o.title || "").slice(0, 70), labels, series };
+  } catch (_) { return null; }
+}
+
+/* ── ANIMATED PROFESSIONAL CHART (inline SVG) — bars grow, lines draw themselves, doughnut fills;
+   used on presenter slides. `uid` scopes the <style> so animations never leak to other slides. ── */
+function deckChartSvg(chart, th, animated) {
+  const ch = normalizeDeckChart(chart); if (!ch) return "";
+  const uid = "dpc" + Math.random().toString(36).slice(2, 8);
+  const A = "#" + th.accent, D = "#" + th.deep;
+  const PAL = [A, "#E0A458", D, "#8FA98F", "#C97B84", "#6B8CAE"];
+  const W = 460, H = 320, padL = 46, padR = 14, padT = ch.title ? 42 : 18, padB = 44;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const allVals = ch.series.flatMap((se) => se.data);
+  const maxV = Math.max(1, ...allVals.map((v) => Math.abs(v)));
+  const nice = maxV <= 5 ? Math.ceil(maxV) : Math.ceil(maxV / 4) * 4;
+  let body = "", css = "";
+  const grid = [0.25, 0.5, 0.75, 1].map((f) => {
+    const y = padT + innerH - innerH * f;
+    return '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#00000014" stroke-width="1"/>' +
+      '<text x="' + (padL - 7) + '" y="' + (y + 4) + '" font-size="10" fill="#00000066" text-anchor="end">' + Math.round(nice * f) + "</text>";
+  }).join("");
+  const title = ch.title ? '<text x="' + (W / 2) + '" y="24" font-size="15" font-weight="700" fill="' + D + '" text-anchor="middle">' + esc(ch.title) + "</text>" : "";
+  if (ch.type === "bar") {
+    const groups = ch.labels.length, sN = ch.series.length;
+    const gw = innerW / groups, bw = Math.min(34, (gw * 0.72) / sN);
+    ch.labels.forEach((lb, i) => {
+      body += '<text x="' + (padL + gw * i + gw / 2) + '" y="' + (H - padB + 16) + '" font-size="10.5" fill="#000000AA" text-anchor="middle">' + esc(lb) + "</text>";
+      ch.series.forEach((se, s2) => {
+        const v = se.data[i] || 0, bh = Math.max(2, innerH * Math.abs(v) / nice);
+        const x = padL + gw * i + gw / 2 - (bw * sN) / 2 + bw * s2;
+        const y = padT + innerH - bh;
+        const k = i * sN + s2;
+        body += '<rect class="b' + k + '" x="' + x + '" y="' + y + '" width="' + (bw - 3) + '" height="' + bh + '" rx="3.5" fill="' + PAL[s2 % PAL.length] + '"/>' +
+          '<text class="v' + k + '" x="' + (x + (bw - 3) / 2) + '" y="' + (y - 5) + '" font-size="10" font-weight="600" fill="' + D + '" text-anchor="middle">' + v + "</text>";
+        if (animated) css += "#" + uid + " .b" + k + "{transform-origin:" + (x + (bw - 3) / 2) + "px " + (padT + innerH) + "px;animation:" + uid + "g .7s " + (0.15 + k * 0.08) + "s cubic-bezier(.2,.7,.3,1) both}" +
+          "#" + uid + " .v" + k + "{animation:" + uid + "f .4s " + (0.55 + k * 0.08) + "s both}";
+      });
+    });
+    if (animated) css += "@keyframes " + uid + "g{from{transform:scaleY(0)}to{transform:scaleY(1)}}@keyframes " + uid + "f{from{opacity:0}to{opacity:1}}";
+  } else if (ch.type === "line") {
+    const step = innerW / Math.max(1, ch.labels.length - 1);
+    ch.labels.forEach((lb, i) => { body += '<text x="' + (padL + step * i) + '" y="' + (H - padB + 16) + '" font-size="10.5" fill="#000000AA" text-anchor="middle">' + esc(lb) + "</text>"; });
+    ch.series.forEach((se, s2) => {
+      const pts = se.data.map((v, i) => [padL + step * i, padT + innerH - innerH * Math.max(0, v) / nice]);
+      const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+      const col = PAL[s2 % PAL.length];
+      body += '<path class="l' + s2 + '" d="' + d + '" fill="none" stroke="' + col + '" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" pathLength="100"/>';
+      pts.forEach((p, i) => { body += '<circle class="d' + s2 + '_' + i + '" cx="' + p[0] + '" cy="' + p[1] + '" r="4" fill="#fff" stroke="' + col + '" stroke-width="2.5"/>'; if (animated) css += "#" + uid + " .d" + s2 + "_" + i + "{animation:" + uid + "f .3s " + (0.25 + i * 0.12) + "s both}"; });
+      if (animated) css += "#" + uid + " .l" + s2 + "{stroke-dasharray:100;stroke-dashoffset:100;animation:" + uid + "w 1.1s " + (0.15 + s2 * 0.2) + "s cubic-bezier(.4,0,.2,1) forwards}";
+    });
+    if (animated) css += "@keyframes " + uid + "w{to{stroke-dashoffset:0}}@keyframes " + uid + "f{from{opacity:0;transform:scale(.4)}to{opacity:1;transform:scale(1)}}";
+  } else { // doughnut
+    const se = ch.series[0];
+    const total = se.data.reduce((a, b) => a + Math.max(0, b), 0) || 1;
+    const cx = W / 2 - 70, cy = padT + innerH / 2 + 4, r = Math.min(innerH, 210) / 2.35, C = 2 * Math.PI * r;
+    let acc = 0;
+    se.data.forEach((v, i) => {
+      const frac = Math.max(0, v) / total, seg = frac * C;
+      body += '<circle class="s' + i + '" cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + PAL[i % PAL.length] + '" stroke-width="30" stroke-dasharray="' + seg.toFixed(1) + " " + (C - seg).toFixed(1) + '" stroke-dashoffset="' + (-acc * C).toFixed(1) + '" transform="rotate(-90 ' + cx + " " + cy + ')"/>';
+      if (animated) css += "#" + uid + " .s" + i + "{animation:" + uid + "f .5s " + (0.15 + i * 0.14) + "s both}";
+      acc += frac;
+    });
+    body += '<text x="' + cx + '" y="' + (cy + 5) + '" font-size="17" font-weight="700" fill="' + D + '" text-anchor="middle">' + total + "</text>";
+    ch.labels.forEach((lb, i) => {
+      const y = padT + 18 + i * 21, lx = W - 148;
+      const pct = Math.round((Math.max(0, se.data[i]) / total) * 100);
+      body += '<rect x="' + lx + '" y="' + (y - 9) + '" width="11" height="11" rx="3" fill="' + PAL[i % PAL.length] + '"/>' +
+        '<text x="' + (lx + 17) + '" y="' + (y + 1) + '" font-size="11" fill="#000000BB">' + esc(lb) + " — " + pct + "%</text>";
+    });
+    if (animated) css += "@keyframes " + uid + "f{from{opacity:0}to{opacity:1}}";
+  }
+  return '<svg id="' + uid + '" viewBox="0 0 ' + W + " " + H + '" xmlns="http://www.w3.org/2000/svg" role="img" style="width:100%;height:auto;display:block;direction:ltr">' +
+    (css ? "<style>" + css + "</style>" : "") + title + grid + body + "</svg>";
+}
+
+/* ── DECK block (```firas-deck {json}```): the editable multi-slide deliverable. ── */
+function parseDeckMeta(content) {
+  const s = String(content || "");
+  if (!/^\s*```firas-deck[ \t]*\r?\n/.test(s)) return null;
+  const body = s.replace(/^\s*```firas-deck[ \t]*\r?\n/, "").replace(/\r?\n```[ \t]*$/, "");
+  try { const o = JSON.parse(body); if (o && Array.isArray(o.slides)) return o; } catch (_) {}
+  const start = body.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < body.length; i++) {
+    const c = body[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\") { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try { const o = JSON.parse(body.slice(start, i + 1)); return (o && Array.isArray(o.slides)) ? o : null; } catch (_) { return null; }
+    }
+  }
+  return null;
+}
+function serializeDeck(deck) {
+  const slim = {
+    v: 1,
+    title: String(deck.title || "").slice(0, 140),
+    subtitle: String(deck.subtitle || "").slice(0, 140),
+    theme: deck.theme || "navy",
+    lang: deck.lang || "ar",
+    phase: deck.phase === "building" ? "building" : "done",
+    slides: (deck.slides || []).slice(0, 48).map((s) => ({
+      t: s.t === "section" || s.section ? "section" : "slide",
+      title: String(s.title || "").slice(0, 160),
+      bullets: (s.bullets || []).slice(0, 10).map((b) => String(b).slice(0, 300)),
+      image: String(s.image || "").slice(0, 600),
+      imageAlt: String(s.imageAlt || "").slice(0, 90),
+      notes: String(s.notes || "").slice(0, 900),
+      chart: s.chart ? normalizeDeckChart(s.chart) : null,
+    })),
+  };
+  // HARD BUDGET (like serializeAgentRun): the server caps content at ~200K — a truncated block
+  // loses its fence and won't re-parse on reload, silently losing the whole deliverable.
+  let out = JSON.stringify(slim), capB = 300, capN = 900;
+  while (out.length > 165000 && capB > 40) {
+    capB = Math.floor(capB * 0.7); capN = Math.floor(capN * 0.7);
+    slim.slides.forEach((s) => { s.bullets = s.bullets.map((b) => b.slice(0, capB)); s.notes = s.notes.slice(0, capN); });
+    out = JSON.stringify(slim);
+  }
+  if (out.length > 165000) { slim.slides = slim.slides.slice(0, Math.max(8, Math.floor(slim.slides.length * 0.7))); out = JSON.stringify(slim); }
+  return "```firas-deck\n" + out + "\n```";
+}
+
+/* ── DECK CARD — the combined home of all slides. While the agent BUILDS, slides stream into it
+   one-by-one (editing locked). Once DONE it unlocks: edit any slide's text, delete bullets/image/
+   chart/slide, or have the AI REGENERATE a slide from scratch — plus Present & PowerPoint. ── */
+async function regenerateDeckSlide(deck, i, instruction, signal) {
+  const s = deck.slides[i];
+  const ctxList = deck.slides.map((x, k) => (k + 1) + ". " + (x.t === "section" ? "[قسم] " : "") + x.title).join("\n");
+  const sys = "You are an ELITE keynote designer REGENERATING ONE SLIDE of an existing deck. Output ONLY that one slide in EXACTLY this Markdown format: '### Slide Title' + 3-5 SHORT punchy bullets (≤10 words each)" +
+    (s.image ? ", keep this exact image line: ![" + (s.imageAlt || "") + "](" + s.image + ")" : "") +
+    ". If the slide presents numbers/statistics you MAY include one line Chart: {\"type\":\"bar|line|doughnut\",\"title\":\"…\",\"labels\":[…],\"data\":[…]} with REAL plausible values. Add one 'Notes: <1-2 spoken sentences>' line. Write in the deck's language. No preamble, no extra slides.";
+  const usr = "DECK: " + deck.title + "\nALL SLIDES:\n" + ctxList + "\n\nREGENERATE SLIDE " + (i + 1) + " (current title: " + s.title + ")." +
+    (instruction ? "\nUSER DIRECTION (follow precisely): " + instruction : "\nMake it clearly better: sharper insight, stronger specifics.");
+  const out = await callAgentText([{ role: "system", content: sys }, { role: "user", content: usr }], "max", signal);
+  const parsedS = slidesFromMarkdown(String(out || ""), s.title).filter((x) => !x.section);
+  if (!parsedS.length) throw new Error("bad slide");
+  const ns = parsedS[0];
+  return { t: "slide", title: ns.title || s.title, bullets: ns.bullets, image: ns.image || s.image || "", imageAlt: ns.imageAlt || s.imageAlt || "", notes: ns.notes || "", chart: ns.chart || null };
+}
+function buildDeckCard(deck, lang, msg) {
+  const ar = (deck.lang || lang) === "ar";
+  // "building" is only real while this chat actually has a live stream — a deck persisted mid-build
+  // and reloaded later must UNLOCK (otherwise it would stay locked forever).
+  const chBuild = activeChat();
+  const building = deck.phase === "building" && !!(chBuild && activeStreams.has(chBuild.id));
+  const L = ar
+    ? { deck: "عرض تقديمي", slides: "شريحة", building: "يبني الشرائح…", done: "جاهز — يمكنك التعديل الآن", locked: "🔒 التعديل يتاح بعد اكتمال كل الشرائح", present: "اعرض", ppt: "PowerPoint", section: "قسم", edit: "تعديل", save: "💾 حفظ", regen: "🔄 إعادة توليد", del: "🗑 حذف الشريحة", delB: "حذف", addB: "+ نقطة", title: "العنوان", notes: "ملاحظات المتحدث", img: "صورة", chart: "رسم بياني", regenHint: "توجيه للتوليد (اختياري): مثلا «ركز على الأرقام»", working: "يعيد التوليد…", removed: "حُذفت", saved: "حُفظ ✓" }
+    : { deck: "Presentation", slides: "slides", building: "Building slides…", done: "Ready — you can edit now", locked: "🔒 Editing unlocks when all slides are done", present: "Present", ppt: "PowerPoint", section: "Section", edit: "Edit", save: "💾 Save", regen: "🔄 Regenerate", del: "🗑 Delete slide", delB: "Delete", addB: "+ bullet", title: "Title", notes: "Speaker notes", img: "Image", chart: "Chart", regenHint: "Direction (optional): e.g. \"focus on numbers\"", working: "Regenerating…", removed: "Removed", saved: "Saved ✓" };
+  const th = themeFor({ theme: deck.theme });
+  const card = document.createElement("div");
+  card.className = "deck-card" + (building ? " is-building" : "");
+  card.setAttribute("dir", ar ? "rtl" : "ltr");
+  const persist = () => {
+    if (!msg) return;
+    msg.content = serializeDeck(deck);
+    const chat = activeChat();
+    if (chat) { chat.updatedAt = Date.now(); persistChat(chat); }
+  };
+  const rerender = () => { const fresh = buildDeckCard(deck, lang, msg); card.replaceWith(fresh); };
+  const head =
+    '<div class="deck-card__head">' +
+      '<span class="deck-card__ic" style="background:linear-gradient(140deg,#' + th.deep + ',#' + th.accent + ')">🎬</span>' +
+      '<span class="deck-card__meta"><strong>' + escapeHtml(deck.title || L.deck) + "</strong>" +
+      '<span class="deck-card__sub">' + deck.slides.filter((s) => s.t !== "section").length + " " + L.slides + " · " + (building ? '<span class="deck-card__live">' + L.building + "</span>" : L.done) + "</span></span>" +
+      (!building
+        ? '<span class="deck-card__acts"><button type="button" class="deck-card__btn deck-card__btn--go" data-deck="present">▶ ' + L.present + '</button>' +
+          '<button type="button" class="deck-card__btn" data-deck="ppt">⬇ ' + L.ppt + "</button></span>"
+        : "") +
+    "</div>";
+  const rows = deck.slides.map((s, i) => {
+    const badges = (s.chart ? " 📊" : "") + (s.image ? " 🖼" : "") + (s.notes ? " 🗒" : "");
+    if (s.t === "section") {
+      return '<div class="deck-card__row deck-card__row--sec"><span class="deck-card__n">' + (i + 1) + '</span><span class="deck-card__sec">' + L.section + "</span> " + escapeHtml(s.title) + "</div>";
+    }
+    if (building) return '<div class="deck-card__row"><span class="deck-card__n">' + (i + 1) + "</span>" + escapeHtml(s.title) + badges + "</div>";
+    return (
+      '<details class="deck-card__slide" data-i="' + i + '">' +
+        '<summary><span class="deck-card__n">' + (i + 1) + "</span><span class='deck-card__st'>" + escapeHtml(s.title) + badges + '</span><span class="deck-card__editTag">✏️ ' + L.edit + "</span></summary>" +
+        '<div class="deck-card__panel">' +
+          '<label class="deck-card__lbl">' + L.title + '</label><input class="deck-card__inp dk-title" value="' + escapeHtml(s.title) + '">' +
+          '<label class="deck-card__lbl">' + (ar ? "النقاط" : "Bullets") + '</label>' +
+          '<div class="dk-bullets">' + (s.bullets || []).map((b, k) => '<div class="dk-brow"><input class="deck-card__inp dk-bullet" value="' + escapeHtml(b) + '"><button type="button" class="dk-x" data-delb="' + k + '" title="' + L.delB + '">✕</button></div>').join("") + "</div>" +
+          '<button type="button" class="deck-card__mini" data-addb="1">' + L.addB + "</button>" +
+          (s.image ? '<div class="dk-asset">🖼 ' + L.img + ' <span class="dk-asset__u">' + escapeHtml(s.image.slice(0, 60)) + '…</span><button type="button" class="dk-x" data-delimg="1">✕</button></div>' : "") +
+          (s.chart ? '<div class="dk-asset">📊 ' + L.chart + " — " + escapeHtml((s.chart.title || s.chart.type)) + '<button type="button" class="dk-x" data-delch="1">✕</button></div>' : "") +
+          '<label class="deck-card__lbl">' + L.notes + '</label><textarea class="deck-card__inp dk-notes" rows="2">' + escapeHtml(s.notes || "") + "</textarea>" +
+          '<input class="deck-card__inp dk-instr" placeholder="' + L.regenHint + '">' +
+          '<div class="deck-card__panelacts">' +
+            '<button type="button" class="deck-card__btn deck-card__btn--go" data-save="1">' + L.save + "</button>" +
+            '<button type="button" class="deck-card__btn" data-regen="1">' + L.regen + "</button>" +
+            '<button type="button" class="deck-card__btn deck-card__btn--danger" data-delslide="1">' + L.del + "</button>" +
+          "</div>" +
+        "</div>" +
+      "</details>");
+  }).join("");
+  card.innerHTML = head + '<div class="deck-card__list">' + rows + "</div>" + (building ? '<div class="deck-card__lock">' + L.locked + "</div>" : "");
+  // ── interactions ──
+  card.addEventListener("click", async (e) => {
+    const actBtn = e.target.closest("[data-deck]");
+    if (actBtn) {
+      if (actBtn.getAttribute("data-deck") === "present") openDeckPresenter(msg);
+      else exportPpt(card.closest(".msg-ai"), deck.lang || lang, msg);
+      return;
+    }
+    const det = e.target.closest(".deck-card__slide");
+    if (!det) return;
+    const i = parseInt(det.getAttribute("data-i"), 10);
+    const s = deck.slides[i]; if (!s) return;
+    const readPanel = () => {
+      s.title = det.querySelector(".dk-title").value.trim() || s.title;
+      s.bullets = [...det.querySelectorAll(".dk-bullet")].map((x) => x.value.trim()).filter(Boolean).slice(0, 10);
+      s.notes = det.querySelector(".dk-notes").value.trim();
+    };
+    if (e.target.closest("[data-delb]")) {
+      // Delete by DOM position on the RAW input list (filtering empties first would shift indices
+      // and delete the wrong bullet when an earlier input was blanked).
+      const k = parseInt(e.target.closest("[data-delb]").getAttribute("data-delb"), 10);
+      const raw = [...det.querySelectorAll(".dk-bullet")].map((x) => x.value);
+      raw.splice(k, 1);
+      s.title = det.querySelector(".dk-title").value.trim() || s.title;
+      s.notes = det.querySelector(".dk-notes").value.trim();
+      s.bullets = raw.map((v) => v.trim()).filter(Boolean).slice(0, 10);
+      persist(); rerender();
+    }
+    else if (e.target.closest("[data-addb]")) { readPanel(); s.bullets.push(ar ? "نقطة جديدة" : "New point"); persist(); rerender(); }
+    else if (e.target.closest("[data-delimg]")) { readPanel(); s.image = ""; s.imageAlt = ""; persist(); rerender(); showToast(L.removed); }
+    else if (e.target.closest("[data-delch]")) { readPanel(); s.chart = null; persist(); rerender(); showToast(L.removed); }
+    else if (e.target.closest("[data-delslide]")) { deck.slides.splice(i, 1); persist(); rerender(); showToast(L.removed); }
+    else if (e.target.closest("[data-save]")) { readPanel(); persist(); rerender(); showToast(L.saved); }
+    else if (e.target.closest("[data-regen]")) {
+      const btn = e.target.closest("[data-regen]");
+      const instr = det.querySelector(".dk-instr").value.trim();
+      // Track the slide OBJECT (not the index): a delete during the multi-second regen shifts
+      // indices and would overwrite the WRONG slide. Lock the panel while in flight.
+      const target = deck.slides[i];
+      det.querySelectorAll("button,input,textarea").forEach((x) => { x.disabled = true; });
+      btn.textContent = L.working;
+      try {
+        const ns = await regenerateDeckSlide(deck, i, instr, null);
+        const cur = deck.slides.indexOf(target);
+        if (cur === -1) { showToast(L.removed); return; }          // slide deleted meanwhile
+        deck.slides[cur] = ns; persist();
+        if (card.isConnected) rerender();
+        else { const ch2 = activeChat(); if (ch2) renderThread(ch2); }   // card replaced meanwhile
+        showToast(L.saved);
+      } catch (_) {
+        det.querySelectorAll("button,input,textarea").forEach((x) => { x.disabled = false; });
+        btn.textContent = L.regen; showToast(ar ? "تعذّرت إعادة التوليد" : "Couldn't regenerate");
+      }
+    }
+  });
+  // keep the open panel open across live re-renders while typing? — edits are in-DOM until saved.
+  return card;
+}
+
+/** Fetch an image → data URL for embedding in a PPTX (pptxgenjs needs data/base64 to embed,
+    and a remote path can taint or 404). Routes remote URLs through our same-origin proxy.
+    Best-effort: returns "" on any failure so the deck still builds without the picture. */
+async function imageToDataUrl(url, timeoutMs) {
+  try {
+    if (!url) return "";
+    if (/^data:image\//i.test(url)) return url;
+    let u = url;
+    if (/^https?:\/\//i.test(url) && url.indexOf("/api/imgproxy") === -1) u = "/api/imgproxy?u=" + encodeURIComponent(url);
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), timeoutMs || 9000);
+    const res = await fetch(u, { credentials: "same-origin", signal: ctrl.signal });
+    clearTimeout(to);
+    if (!res.ok) return "";
+    const blob = await res.blob();
+    if (!/^image\//.test(blob.type) || blob.size < 64 || blob.size > 6 * 1024 * 1024) return "";
+    return await new Promise((resolve) => { const fr = new FileReader(); fr.onload = () => resolve(String(fr.result || "")); fr.onerror = () => resolve(""); fr.readAsDataURL(blob); });
+  } catch (_) { return ""; }
+}
+
+/* ── ⑥ IN-BROWSER DECK PRESENTER — present the deck right in the site: themed slides, keyboard/
+   swipe navigation (RTL-aware), fullscreen, progress bar, speaker-notes panel, and ANIMATIONS
+   (3 switchable slide transitions + staggered content entrances). No PowerPoint needed. ── */
+let _deckPresState = null;
+function closeDeckPresenter() {
+  if (!_deckPresState) return;
+  try { document.removeEventListener("keydown", _deckPresState.onKey, true); } catch (_) {}
+  try { if (document.fullscreenElement) document.exitFullscreen(); } catch (_) {}
+  try { _deckPresState.root.remove(); } catch (_) {}
+  try { document.body.style.overflow = _deckPresState.prevOverflow || ""; } catch (_) {}
+  _deckPresState = null;
+}
+function openDeckPresenter(msg) {
+  closeDeckPresenter();
+  const deckMeta = parseDeckMeta(msg && msg.content);   // editable deck card OR classic file message
+  const parsed = deckMeta ? { meta: { title: deckMeta.title, subtitle: deckMeta.subtitle, theme: deckMeta.theme }, body: "" } : parseFileMeta(msg && msg.content);
+  const meta = parsed.meta || {};
+  const body = parsed.body || "";
+  const lang = (deckMeta && deckMeta.lang) || (msg && msg.lang) || state.lang;
+  const rtl = lang === "ar";
+  const th = themeFor(meta);
+  const A = "#" + th.accent, D = "#" + th.deep, CA = "#" + th.coverAccent;
+  const L = rtl
+    ? { present: "عرض", notes: "الملاحظات", noNotes: "لا توجد ملاحظات لهذه الشريحة", full: "ملء الشاشة", close: "إغلاق", anim: { slide: "انزلاق", fade: "تلاشي", zoom: "تكبير" }, thanks: "شكرًا لكم", start: "اضغط ← أو المس للتقدم" }
+    : { present: "Present", notes: "Notes", noNotes: "No notes for this slide", full: "Fullscreen", close: "Close", anim: { slide: "Slide", fade: "Fade", zoom: "Zoom" }, thanks: "Thank you", start: "Press → or tap to advance" };
+  // Build the deck: cover → content/section slides → closing.
+  let slides = deckMeta
+    ? deckMeta.slides.map((s) => ({ title: s.title, bullets: s.bullets || [], notes: s.notes || "", image: s.image || "", imageAlt: s.imageAlt || "", chart: s.chart || null, section: s.t === "section" }))
+    : slidesFromMarkdown(body, meta.title || "");
+  const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (slides.length && !slides[0].bullets.length && !slides[0].image && !slides[0].chart && norm(slides[0].title) === norm(meta.title)) slides = slides.slice(1);
+  const deck = [{ type: "cover" }].concat(slides.map((s) => Object.assign({ type: s.section ? "section" : "slide" }, s))).concat([{ type: "end" }]);
+  const N = deck.length;
+  let idx = 0, anim = "slide", secNo = 0;
+  const secOf = []; deck.forEach((s, k) => { if (s.type === "section") secNo++; secOf[k] = secNo; });
+
+  const root = document.createElement("div");
+  root.className = "deck-pres";
+  root.setAttribute("dir", rtl ? "rtl" : "ltr");
+  root.innerHTML =
+    '<div class="deck-pres__bar">' +
+      '<span class="deck-pres__name">' + escapeHtml(String(meta.title || "Firas AI").slice(0, 60)) + "</span>" +
+      '<span class="deck-pres__ctrls">' +
+        '<select class="deck-pres__anim" title="Animation">' +
+          '<option value="slide">' + L.anim.slide + "</option>" +
+          '<option value="fade">' + L.anim.fade + "</option>" +
+          '<option value="zoom">' + L.anim.zoom + "</option>" +
+        "</select>" +
+        '<button type="button" class="deck-pres__btn" data-act="notes">🗒 ' + L.notes + "</button>" +
+        '<button type="button" class="deck-pres__btn" data-act="full">⛶ ' + L.full + "</button>" +
+        '<span class="deck-pres__count">1 / ' + N + "</span>" +
+        '<button type="button" class="deck-pres__btn deck-pres__btn--x" data-act="close" aria-label="' + L.close + '">✕</button>' +
+      "</span>" +
+    "</div>" +
+    '<div class="deck-pres__stage"><div class="deck-pres__slide"></div></div>' +
+    '<button type="button" class="deck-pres__nav deck-pres__nav--prev" aria-label="prev">' + (rtl ? "❯" : "❮") + "</button>" +
+    '<button type="button" class="deck-pres__nav deck-pres__nav--next" aria-label="next">' + (rtl ? "❮" : "❯") + "</button>" +
+    '<div class="deck-pres__notes" hidden></div>' +
+    '<div class="deck-pres__progress"><span></span></div>';
+  document.body.appendChild(root);
+  const stage = root.querySelector(".deck-pres__slide");
+  const counter = root.querySelector(".deck-pres__count");
+  const notesEl = root.querySelector(".deck-pres__notes");
+  const progEl = root.querySelector(".deck-pres__progress span");
+
+  const slideHtml = (s) => {
+    if (s.type === "cover") return (
+      '<div class="dp-cover" style="background:linear-gradient(155deg,' + D + ' 0%,' + D + ' 55%,' + A + '33 160%)">' +
+        '<div class="dp-cover__ring" style="border-color:' + CA + '44"></div>' +
+        '<div class="dp-cover__kicker" style="color:' + CA + '">FIRAS AI</div>' +
+        '<h1 class="dp-cover__title">' + escapeHtml(String(meta.title || "").slice(0, 120)) + "</h1>" +
+        (meta.subtitle ? '<div class="dp-cover__sub" style="color:' + CA + '">' + escapeHtml(String(meta.subtitle).slice(0, 140)) + "</div>" : "") +
+        '<div class="dp-cover__rule" style="background:' + CA + '"></div>' +
+        '<div class="dp-cover__hint">' + L.start + "</div>" +
+      "</div>");
+    if (s.type === "section") return (
+      '<div class="dp-section" style="background:linear-gradient(155deg,' + D + ',' + D + ')">' +
+        '<div class="dp-section__no" style="color:' + CA + '">' + String(secOf[idx]).padStart(2, "0") + "</div>" +
+        '<h2 class="dp-section__title">' + escapeHtml(s.title || "") + "</h2>" +
+        '<div class="dp-cover__rule" style="background:' + CA + '"></div>' +
+      "</div>");
+    if (s.type === "end") return (
+      '<div class="dp-section" style="background:linear-gradient(155deg,' + D + ',' + D + ')">' +
+        '<h2 class="dp-section__title" style="font-size:clamp(30px,6vw,64px)">' + L.thanks + "</h2>" +
+        '<div class="dp-cover__rule" style="background:' + CA + '"></div>' +
+        '<div class="dp-cover__kicker" style="color:' + CA + ';margin-top:14px">FIRAS AI</div>' +
+      "</div>");
+    const fig = s.chart
+      ? '<figure class="dp-slide__fig dp-slide__fig--chart">' + deckChartSvg(s.chart, th, true) + "</figure>"
+      : s.image ? '<figure class="dp-slide__fig"><img src="' + escapeHtml(s.image) + '" alt="' + escapeHtml(s.imageAlt || "") + '" onerror="this.closest(\'figure\').style.display=\'none\'">' + (s.imageAlt ? "<figcaption>" + escapeHtml(s.imageAlt) + "</figcaption>" : "") + "</figure>" : "";
+    return (
+      '<div class="dp-slide' + (fig ? " dp-slide--img" : "") + '">' +
+        '<div class="dp-slide__bar" style="background:' + A + '"></div>' +
+        '<div class="dp-slide__txt">' +
+          '<h2 class="dp-slide__title" style="color:' + D + '">' + escapeHtml(s.title || "") + '</h2>' +
+          '<div class="dp-slide__rule" style="background:' + A + '"></div>' +
+          "<ul>" + (s.bullets || []).map((b, k) => '<li style="--i:' + k + '">' + escapeHtml(b) + "</li>").join("") + "</ul>" +
+        "</div>" + fig +
+      "</div>");
+  };
+  const render = () => {
+    const s = deck[idx];
+    stage.className = "deck-pres__slide dp-anim-" + anim;
+    stage.innerHTML = slideHtml(s);
+    // restart the entrance animation (class re-add forces a reflow)
+    void stage.offsetWidth;
+    stage.classList.add("is-in");
+    counter.textContent = (idx + 1) + " / " + N;
+    progEl.style.width = ((idx) / (N - 1) * 100) + "%";
+    notesEl.textContent = s.notes ? s.notes : L.noNotes;
+    try { if (typeof typesetMath === "function") typesetMath(stage); } catch (_) {}
+  };
+  const go = (d) => { const n = Math.min(N - 1, Math.max(0, idx + d)); if (n !== idx) { idx = n; render(); } };
+  const onKey = (e) => {
+    if (!_deckPresState) return;
+    const fwd = rtl ? "ArrowLeft" : "ArrowRight", back = rtl ? "ArrowRight" : "ArrowLeft";
+    if (e.key === fwd || e.key === " " || e.key === "Enter" || e.key === "PageDown") { e.preventDefault(); go(1); }
+    else if (e.key === back || e.key === "PageUp") { e.preventDefault(); go(-1); }
+    else if (e.key === "Home") { e.preventDefault(); idx = 0; render(); }
+    else if (e.key === "End") { e.preventDefault(); idx = N - 1; render(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeDeckPresenter(); }
+    else if (e.key === "f" || e.key === "F") { e.preventDefault(); try { document.fullscreenElement ? document.exitFullscreen() : root.requestFullscreen(); } catch (_) {} }
+    else if (e.key === "n" || e.key === "N") { e.preventDefault(); notesEl.hidden = !notesEl.hidden; }
+  };
+  root.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-act]");
+    if (btn) {
+      const act = btn.getAttribute("data-act");
+      if (act === "close") closeDeckPresenter();
+      else if (act === "full") { try { document.fullscreenElement ? document.exitFullscreen() : root.requestFullscreen(); } catch (_) {} }
+      else if (act === "notes") notesEl.hidden = !notesEl.hidden;
+      return;
+    }
+    if (e.target.closest(".deck-pres__nav--next")) { go(1); return; }
+    if (e.target.closest(".deck-pres__nav--prev")) { go(-1); return; }
+    if (e.target.closest(".deck-pres__stage")) go(1);          // tap/click the stage → advance
+  });
+  root.querySelector(".deck-pres__anim").addEventListener("change", (e) => { anim = e.target.value; render(); });
+  let tx = null;
+  root.addEventListener("touchstart", (e) => { tx = e.touches && e.touches[0] ? e.touches[0].clientX : null; }, { passive: true });
+  root.addEventListener("touchend", (e) => {
+    if (tx == null) return;
+    const dx = (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : tx) - tx;
+    if (Math.abs(dx) > 42) go((dx < 0) !== rtl ? 1 : -1);
+    tx = null;
+  }, { passive: true });
+  document.addEventListener("keydown", onKey, true);
+  _deckPresState = { root, onKey, prevOverflow: document.body.style.overflow };
+  document.body.style.overflow = "hidden";
+  render();
 }
 
 async function exportPpt(turn, lang, msg) {
-  const parsed = parseFileMeta(msg && msg.content);
+  const deckMeta = parseDeckMeta(msg && msg.content);   // editable deck card → slides come straight from it
+  const parsed = deckMeta ? { meta: { title: deckMeta.title, subtitle: deckMeta.subtitle, theme: deckMeta.theme, filename: deckMeta.title }, body: "" } : parseFileMeta(msg && msg.content);
   const meta = parsed.meta;
-  const md = (parsed.body && parsed.body.trim()) || (mdNodeForTurn(turn) ? mdNodeForTurn(turn).textContent : "");
+  if (deckMeta) lang = deckMeta.lang || lang;
+  const md = deckMeta ? "deck" : ((parsed.body && parsed.body.trim()) || (mdNodeForTurn(turn) ? mdNodeForTurn(turn).textContent : ""));
   if (!md.trim()) { showToast(t().exportEmpty); return; }
   ensureFileTitle(meta, md);
   showToast(t().preparing);
@@ -4597,32 +5302,86 @@ async function exportPpt(turn, lang, msg) {
     if (subText) title.addText(subText, { x: 0.75, y: 3.5, w: W - 1.5, h: 0.6, fontSize: 17, color: cAcc, align: al, rtlMode: rtl });
 
     // ---- Content slides ----
-    let slides = slidesFromMarkdown(md, titleText);
+    let slides = deckMeta
+      ? deckMeta.slides.map((s) => ({ title: s.title, bullets: s.bullets || [], notes: s.notes || "", image: s.image || "", imageAlt: s.imageAlt || "", chart: s.chart || null, section: s.t === "section" }))
+      : slidesFromMarkdown(md, titleText);
     // Drop a leading "# Deck Title" slide (no bullets, title == the cover) so the
     // deck doesn't open with a near-empty duplicate of the cover.
     const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
-    if (slides.length && !slides[0].bullets.length && norm(slides[0].title) === norm(titleText)) {
+    if (slides.length && !slides[0].bullets.length && !slides[0].image && !slides[0].chart && norm(slides[0].title) === norm(titleText)) {
       slides = slides.slice(1);
     }
-    const list = slides.length ? slides : [{ title: titleText, bullets: md.split(/\n+/).slice(0, 12) }];
+    const list = slides.length ? slides : [{ title: titleText, bullets: md.split(/\n+/).slice(0, 10), notes: "", image: "", section: false }];
+    // Pre-fetch every slide image ONCE (parallel) → data URLs, so embedding is instant & CORS-safe.
+    const imgMap = {};
+    await Promise.all(list.filter((s) => s.image).map(async (s) => { const d = await imageToDataUrl(s.image, 9000); if (d) imgMap[s.image] = d; }));
+    const total = list.length;
+    let secNo = 0;
     list.forEach((s, idx) => {
+      const dataImg = s.image && imgMap[s.image];
+      if (s.section) {
+        // ── SECTION DIVIDER — full deep background, big centered title, kicker number ──
+        secNo++;
+        const sl = pptx.addSlide();
+        sl.background = { color: deep };
+        sl.addShape(pptx.ShapeType.rect, { x: (W - 1.4) / 2, y: 2.05, w: 1.4, h: 0.06, fill: { color: cAcc } });
+        sl.addText(String(secNo).padStart(2, "0"), { x: 0, y: 1.25, w: W, h: 0.5, fontSize: 15, bold: true, color: cAcc, align: "center", charSpacing: 3 });
+        sl.addText(s.title.slice(0, 90), { x: 0.8, y: 2.35, w: W - 1.6, h: 1.4, fontSize: 32, bold: true, color: "FFFFFF", align: "center", rtlMode: rtl, fontFace: titleFace });
+        if (s.notes) sl.addNotes(s.notes);
+        return;
+      }
       const sl = pptx.addSlide();
       sl.background = { color: "FFFFFF" };
       sl.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: W, h: 0.14, fill: { color: accent } }); // top accent bar
+      const hasChart = !!s.chart;
+      const hasImg = !hasChart && !!dataImg;
+      // Two-column when there's a visual: text on the reading side, chart/picture on the other.
+      const textW = (hasImg || hasChart) ? 5.15 : (W - 1.2);
+      const textX = rtl ? (hasImg ? W - 0.6 - textW : 0.6) : 0.6;
       if (s.title) {
-        sl.addText(s.title.slice(0, 110), { x: 0.55, y: 0.45, w: W - 1.1, h: 0.8, fontSize: 26, bold: true, color: deep, align: al, rtlMode: rtl, fontFace: titleFace });
-        sl.addShape(pptx.ShapeType.rect, { x: 0.55, y: 1.2, w: 1.6, h: 0.05, fill: { color: accent } });
+        sl.addText(s.title.slice(0, 110), { x: textX, y: 0.5, w: textW, h: 0.85, fontSize: 25, bold: true, color: deep, align: al, rtlMode: rtl, fontFace: titleFace });
+        sl.addShape(pptx.ShapeType.rect, { x: rtl ? textX + textW - 1.6 : textX, y: 1.28, w: 1.6, h: 0.05, fill: { color: accent } });
       }
       if (s.bullets.length) {
-        sl.addText(s.bullets.map((b) => ({ text: b, options: { bullet: { code: "2022", indent: 16 }, breakLine: true } })), {
-          x: 0.65, y: 1.5, w: W - 1.3, h: H - 2.1, fontSize: 16, color: "1A1A18", lineSpacingMultiple: 1.18,
+        sl.addText(s.bullets.map((b) => ({ text: b, options: { bullet: { code: "2022", indent: 16 }, breakLine: true, paraSpaceAfter: 6 } })), {
+          x: textX, y: 1.55, w: textW, h: H - 2.15, fontSize: s.bullets.length > 6 ? 14 : 16, color: "1A1A18", lineSpacingMultiple: 1.16,
           align: al, rtlMode: rtl, valign: "top",
         });
       }
-      // Footer: brand + page number.
+      if (hasChart) {
+        // NATIVE PowerPoint chart — remains a real, editable chart object inside PowerPoint.
+        try {
+          const ch = normalizeDeckChart(s.chart);
+          const cw = 4.15, chh = 3.6, cx2 = rtl ? 0.45 : W - 0.45 - cw, cy2 = 1.45;
+          const data = ch.series.map((se) => ({ name: se.name || ch.title || "Series", labels: ch.labels, values: se.data }));
+          const type = ch.type === "line" ? pptx.ChartType.line : ch.type === "doughnut" ? pptx.ChartType.doughnut : pptx.ChartType.bar;
+          const PALX = [accent, "E0A458", deep, "8FA98F", "C97B84", "6B8CAE"];
+          sl.addChart(type, data, {
+            x: cx2, y: cy2, w: cw, h: chh,
+            chartColors: ch.type === "doughnut" ? PALX.slice(0, ch.labels.length) : PALX.slice(0, ch.series.length),
+            showTitle: !!ch.title, title: ch.title || "", titleFontSize: 13, titleColor: deep,
+            showLegend: ch.type === "doughnut" || ch.series.length > 1, legendPos: "b", legendFontSize: 9,
+            catAxisLabelFontSize: 9, valAxisLabelFontSize: 9, dataLabelFontSize: 9,
+            showValue: ch.type !== "line", barDir: "col", barGapWidthPct: 40, lineSize: 2.5, lineDataSymbolSize: 5, holeSize: 55,
+          });
+        } catch (_) { /* chart is an enhancement — the slide still delivers */ }
+      } else if (hasImg) {
+        const iw = 3.7, ih = 3.55, ix = rtl ? 0.55 : W - 0.55 - iw, iy = 1.5;
+        sl.addShape(pptx.ShapeType.roundRect, { x: ix - 0.08, y: iy - 0.08, w: iw + 0.16, h: ih + 0.16, fill: { color: deep }, rectRadius: 0.09 }); // frame/shadow
+        try { sl.addImage({ data: dataImg, x: ix, y: iy, w: iw, h: ih, sizing: { type: "cover", w: iw, h: ih }, rounding: true }); } catch (_) {}
+        if (s.imageAlt) sl.addText(s.imageAlt.slice(0, 70), { x: ix, y: iy + ih + 0.06, w: iw, h: 0.3, fontSize: 9, italic: true, color: "A8A69E", align: "center", rtlMode: rtl });
+      }
+      // Footer: brand + n / total.
       sl.addText("Firas AI", { x: 0.55, y: H - 0.42, w: 3, h: 0.3, fontSize: 9, color: "A8A69E", align: al, rtlMode: rtl });
-      sl.addText(String(idx + 1), { x: W - 1.05, y: H - 0.42, w: 0.5, h: 0.3, fontSize: 9, color: "A8A69E", align: "right" });
+      sl.addText((idx + 1) + " / " + total, { x: W - 1.35, y: H - 0.42, w: 0.8, h: 0.3, fontSize: 9, color: "A8A69E", align: "right" });
+      if (s.notes) sl.addNotes(s.notes);
     });
+    // ---- Closing slide ----
+    const end = pptx.addSlide();
+    end.background = { color: deep };
+    end.addShape(pptx.ShapeType.rect, { x: (W - 1.4) / 2, y: 2.55, w: 1.4, h: 0.06, fill: { color: cAcc } });
+    end.addText(rtl ? "شكرًا لكم" : "Thank you", { x: 0.8, y: 1.75, w: W - 1.6, h: 1, fontSize: 40, bold: true, color: "FFFFFF", align: "center", rtlMode: rtl, fontFace: titleFace });
+    end.addText("Firas AI", { x: 0, y: 2.95, w: W, h: 0.4, fontSize: 13, color: cAcc, align: "center", charSpacing: 3 });
     const blob = await pptx.write({ outputType: "blob" });
     downloadBlob(blob, resolveFileName(meta, "pptx"));
   } catch (_) {
@@ -5323,10 +6082,15 @@ function fileGuidance(fmt) {
     "```firas-file\n" +
     '{"filename": "SHORT MEANINGFUL NAME in the user’s language, NO file extension", ' +
     '"title": "a SHORT clean human title (max ~8 words); if it needs a formula, write it ONCE as proper LaTeX inside $ … $ so it renders as pretty math — never paste raw code/backslashes, never repeat the formula", ' +
-    '"subtitle": "one short line or empty", "theme": "<one theme key>"}\n' +
+    '"subtitle": "one short line or empty", "theme": "<one theme key>", "accent": "", "template": ""}\n' +
     "```\n" +
     "YOU choose the filename — specific and professional, derived from the request " +
-    "(e.g. “20 معادلة تكامل”, not “document”). " + themes;
+    "(e.g. “20 معادلة تكامل”, not “document”). " + themes +
+    "ACCENT: when the user asked for a SPECIFIC color/style (e.g. 'وردي', 'أزرق سماوي', 'ذهبي فخم', 'بألوان جامعتي #1E90FF'), " +
+    "set \"accent\" to the best matching 6-digit hex (NO #) and the whole design (cover, headings, tables) adapts to it; otherwise leave \"accent\" empty. " +
+    "TEMPLATE (document LAYOUT identity): set \"template\" to exactly one of: 'ministry' for an exam/امتحان/وزاري paper (official double-ruled title, hard-bordered tables, انتهت الأسئلة mark); " +
+    "'academic' for a بحث/thesis/university report (numbered 1./1.1 headings, formal light cover); 'corporate' for a business/تقرير عمل report (KPI callout cards, executive lead); " +
+    "'magazine' for an article/مقال/editorial piece (drop cap, pull-quotes). Leave \"\" for everything else. ";
   const base =
     "You are creating a downloadable file; the app builds the REAL file from your reply. " +
     "THINK HARD and plan the structure first — it must look like a polished, professional file, NOT a draft. " +
@@ -5444,9 +6208,15 @@ function authorSys(fmt, lang) {
   if (fmt === "xlsx" || fmt === "csv") return "You are an expert data author. Following the plan, output the data as clean " +
     "GitHub-style Markdown tables, each preceded by a '## Table Name' heading; plain numbers in numeric cells. Only the " +
     "content — no metadata block, no preamble, no code." + agentBrand(lang);
-  if (fmt === "pptx") return "You are an expert presentation author. Following the plan, output slides: a single " +
-    "'# Deck Title' then each slide as '## Slide Title' + 3-6 short bullets. Only the content, no metadata block, no " +
-    "preamble." + mathRule + agentBrand(lang);
+  if (fmt === "pptx") return "You are an ELITE keynote presentation designer (think Apple/TED). Following the plan, output a " +
+    "COMPLETE deck as Markdown with THIS exact structure:\n" +
+    "• ONE '# Deck Title' at the very top.\n" +
+    "• Group slides under sections: a '## Section Name' line ALONE (no bullets under it) becomes a full-screen SECTION DIVIDER — use 2-4 of them to chapter the talk.\n" +
+    "• Each real slide = '### Slide Title' + 3-5 SHORT, punchy bullets (max ~10 words each — headlines, never paragraphs).\n" +
+    "• For any slide that benefits from a visual AND real image URLs were provided in the task, put ONE image on its own line as ![short alt](URL) right under the title — the layout auto-goes two-column. NEVER invent an image URL; only use provided ones.\n" +
+    "• When a slide presents NUMBERS/statistics/comparisons, add ONE line: Chart: {\"type\":\"bar|line|doughnut\",\"title\":\"…\",\"labels\":[\"…\"],\"data\":[numbers]} — it becomes a real chart. Use plausible real values; 1-3 chart slides per deck; a slide has a chart OR an image, never both.\n" +
+    "• Add presenter script to most slides as a line 'Notes: <what the speaker says — 1-2 sentences of real spoken delivery>' — this becomes the PowerPoint speaker notes, hidden from the audience.\n" +
+    "Aim for 8-16 content slides. Make the bullets genuinely insightful and specific, not filler. Only the content, no metadata block, no preamble." + mathRule + agentBrand(lang);
   return "You are an elite document author and editor producing a POLISHED, PROFESSIONAL document. Following the plan, " +
     "write the FULL, accurate, thorough CONTENT as clean Markdown: a strong '# Title', a brief engaging introduction, " +
     "logical ##/### sections with descriptive headings, clear well-written paragraphs (real prose, not terse fragments), " +
@@ -5455,7 +6225,10 @@ function authorSys(fmt, lang) {
     "conclusion/summary when appropriate. Be complete and correct: if N items were requested, produce exactly N, each " +
     "properly explained. ORGANIZATION — make it VERY tidy and easy to scan: a consistent heading hierarchy, related content " +
     "grouped together, uniform spacing (NO orphan lines, NO stray punctuation on its own line), and — for an exam/worksheet — " +
-    "clean question numbering with its parts (A/B/C…) and marks, each figure placed right beside the item it belongs to." + mathRule + tikzDocRule + " Output ONLY the document body — no metadata block, no preamble, no commentary." + agentBrand(lang);
+    "clean question numbering with its parts (A/B/C…) and marks, each figure placed right beside the item it belongs to. " +
+    "IMAGES: when the task provides REAL IMAGE URLS, embed EACH one at a contextually fitting spot as ![short description](URL) " +
+    "on its own line followed by a one-line *italic caption* in the user's language — spread them across sections, never two adjacent, " +
+    "and NEVER use any image URL that was not provided." + mathRule + tikzDocRule + " Output ONLY the document body — no metadata block, no preamble, no commentary." + agentBrand(lang);
 }
 function finisherSys(fmt, lang) {
   return "You are the finishing editor. You are given a metadata block and a draft. Output the FINAL " + fmt.toUpperCase() +
@@ -5473,9 +6246,10 @@ function finisherSys(fmt, lang) {
 }
 function metaBlockString(meta) {
   const m = (meta && typeof meta === "object") ? meta : {};
-  return "```firas-file\n" + JSON.stringify({
-    filename: m.filename || "", title: m.title || "", subtitle: m.subtitle || "", theme: m.theme || "teal",
-  }) + "\n```";
+  const o = { filename: m.filename || "", title: m.title || "", subtitle: m.subtitle || "", theme: m.theme || "teal" };
+  if (m.accent && /^#?[0-9a-fA-F]{6}$/.test(String(m.accent))) o.accent = String(m.accent).replace("#", "");
+  if (/^(academic|ministry|corporate|magazine)$/.test(String(m.template || "").toLowerCase())) o.template = String(m.template).toLowerCase();
+  return "```firas-file\n" + JSON.stringify(o) + "\n```";
 }
 function fileStageText(stage, lang) {
   const ar = lang === "ar";
@@ -5544,7 +6318,9 @@ function codeLooksComplete(code, lang) {
   const isHtml = lang === "html" || /<!doctype html|<html[\s>]/i.test(s);
   if (isHtml) return /<\/html>\s*$/i.test(s);
   const opens = (s.match(/\{/g) || []).length, closes = (s.match(/\}/g) || []).length;
-  return opens === closes && /[}\);\]>]\s*$/.test(s);
+  // balanced braces AND ends on a real terminator: a closing bracket/semicolon, OR a full-line
+  // comment, OR a block-comment close (a truncated file ends mid-identifier, which none of these are).
+  return opens === closes && /(?:[}\);\]>]|\/\/[^\n]*|\*\/)\s*$/.test(s);
 }
 /** Remove firas-code wrappers / stray meta objects the model sometimes leaks INTO a
     code body (they corrupt the file). */
@@ -5951,6 +6727,20 @@ async function runFileAgentPipeline(convo, fmt, lang, tierKey, signal, onStage) 
     const src = (typeof stripFileMetaBlock === "function" ? stripFileMetaBlock(prevAns.content) : prevAns.content);
     userText += "\n\n=== CONTENT TO TURN INTO THE FILE — this is the PREVIOUS answer the user wants as a " + String(fmt).toUpperCase() +
       " document. BUILD THE FILE FROM THIS EXACT CONTENT (keep its figures / graphs / ```plot / ```tikz / math intact, then organize and polish it into a professional document). Do NOT invent a different topic. ===\n" + src;
+  }
+  // REAL WEB IMAGES in the document: the user asked for صور/images → search the web (Openverse)
+  // for topic photos and hand the author their EXACT URLs to place with captions across sections.
+  const wantsImages = /بالصور|مع\s*صور|مصوّ?ر|أضف\s*صور|اضف\s*صور|ضع\s*صور|و?صور\s*(له|لها|معه)?|with\s*(images|pictures|photos)|illustrated/i.test(userText) && !/بدون\s*صور|بلا\s*صور|من\s*دون\s*صور|no\s*images/i.test(userText);
+  if (wantsImages && typeof agentGatherImages === "function") {
+    if (onStage) onStage("plan");
+    let docImgs = [];
+    try { docImgs = await agentGatherImages(userText.slice(0, 700), "", signal); } catch (_) { docImgs = []; }
+    // Route through OUR image proxy: same-origin images draw onto the PDF canvas with zero CORS
+    // taint (the source hosts don't send CORS headers).
+    docImgs = docImgs.map((u) => "/api/imgproxy?u=" + encodeURIComponent(u));
+    if (docImgs.length) {
+      userText += "\n\n[REAL IMAGE URLS — the document must include these real photos. Place EACH ONE at a contextually fitting spot using EXACTLY this markdown on its own line: ![وصف موجز](URL) followed on the next line by a short *caption in italics* in the user's language. SPREAD them across different sections (never bunch them together, never put two images adjacent), and NEVER invent any other image URL:\n" + docImgs.map((u, i) => (i + 1) + ". " + u).join("\n") + "]";
+    }
   }
   // BIG-COUNT branch: a request for many items ("1000 integrals/problems/questions…")
   // would truncate in a single author call → generate it in parallel BATCHES instead.
@@ -6963,7 +7753,7 @@ async function sendMessage() {
     tied to `chat` (not the active view) so navigating away won't stop it. */
 async function runAssistant(chat, tier, replyLang, convoOverride) {
   // Firas Agent chats run the AGENT pipeline (plan → execute → verify → deliver).
-  if (chat.agent) return runAgentAssistant(chat, tier, replyLang);
+  if (chat.agent) return runAgentAssistant(chat, "max", replyLang);   // the Agent ALWAYS runs on Max — no tier choice
   const aiMsg = { role: "assistant", content: "", reasoning: "", tier, lang: replyLang, mode: state.mode };
   chat.messages.push(aiMsg);
 
@@ -8416,9 +9206,12 @@ function buildZip(files) {
 }
 /* Extract the code from a step output: the LARGEST fenced block (or the raw text when unfenced). */
 function stripToCode(out) {
-  const blocks = [...String(out || "").matchAll(/```[\w-]*\n([\s\S]*?)```/g)].map((m) => m[1]);
+  // Concatenate ALL fenced blocks in order (a step may legitimately emit several — e.g. markup + a
+  // separate script); fall back to the raw text only when there are no fences.
+  const blocks = [...String(out || "").matchAll(/```[\w-]*\n([\s\S]*?)```/g)].map((m) => m[1].replace(/\s+$/, ""));
   if (!blocks.length) return String(out || "").trim();
-  return blocks.sort((a, b) => b.length - a.length)[0].trim();
+  if (blocks.length === 1) return blocks[0].trim();
+  return blocks.join("\n\n").trim();
 }
 /* ── Multi-file PROJECT deliverable (folder) — persisted as a ```firas-project block ── */
 function parseProjectMeta(content) {
@@ -8427,6 +9220,227 @@ function parseProjectMeta(content) {
   try { const o = JSON.parse(m[1]); return (o && Array.isArray(o.files) && o.files.length) ? o : null; } catch (_) { return null; }
 }
 function projFileLang(path) { const e = String(path).split(".").pop().toLowerCase(); return ({ js: "javascript", mjs: "javascript", ts: "typescript", html: "html", htm: "html", css: "css", json: "json", py: "python", md: "markdown", svg: "xml", txt: "" })[e] || e; }
+/* Self-contained preview of a project: index.html with its local css/js INLINED (relative
+   <link>/<script src> refs are swapped for the matching project files). */
+function projPreviewHtml(proj, entryPath) {
+  const norm = (p) => String(p || "").replace(/^\.\//, "").replace(/^\//, "");
+  const idx = (entryPath && proj.files.find((f) => norm(f.path) === norm(entryPath)))
+    || proj.files.find((f) => /(^|\/)index\.html?$/i.test(f.path)) || proj.files.find((f) => /\.html?$/i.test(f.path));
+  if (!idx) return null;
+  let html = idx.content || "";
+  const base = (p) => norm(p).split("/").pop().toLowerCase();
+  const findAsset = (ref, ext) => {
+    const r = norm(ref);
+    let f = proj.files.find((x) => norm(x.path) === r);                                  // exact
+    if (!f) f = proj.files.find((x) => norm(x.path).toLowerCase() === r.toLowerCase());  // case-insensitive
+    if (!f) f = proj.files.find((x) => base(x.path) === base(ref));                      // same filename, any dir
+    if (!f) { const cands = proj.files.filter((x) => x.path.toLowerCase().endsWith("." + ext)); if (cands.length === 1) f = cands[0]; } // only one of its kind
+    return f;
+  };
+  html = html.replace(/<link\b[^>]*href=["']?([^"'\s>]+\.css)["']?[^>]*\/?>(?:\s*<\/link>)?/gi, (m, href) => {
+    const f = findAsset(href, "css"); return f ? "<style>\n" + f.content + "\n</style>" : m;
+  });
+  html = html.replace(/<script\b[^>]*src=["']?([^"'\s>]+\.js)["']?[^>]*>\s*<\/script>/gi, (m, src) => {
+    const f = findAsset(src, "js"); return f ? "<script>\n" + f.content + "\n</script>" : m;
+  });
+  return html;
+}
+/* VISUAL AUDIT — the agent's EYES. Renders the app in the sandbox and MEASURES visual defects the
+   user would see: broken images, horizontal overflow, and text elements overlapping each other.
+   Deterministic DOM geometry, not guesswork; the findings feed a surgical visual-fix call. */
+function visualAuditInSandbox(html, timeoutMs, viewportW) {
+  return new Promise((resolve) => {
+    try {
+      const issues = [];
+      const audit = "<script>window.addEventListener('load',function(){setTimeout(function(){try{" +
+        "var out=[];" +
+        "var sel=function(el){var s=el.tagName.toLowerCase();if(el.id)s+='#'+el.id;else if(el.classList&&el.classList[0])s+='.'+el.classList[0];return s;};" +
+        // 1) broken images (failed to load)
+        "Array.prototype.slice.call(document.images,0,40).forEach(function(im){if(im.complete&&im.naturalWidth===0)out.push('BROKEN IMAGE: <img src=\"'+(im.getAttribute('src')||'').slice(0,120)+'\"> — replace with an inline SVG, a CSS gradient block, or https://picsum.photos/seed/<name>/W/H');});" +
+        // 2) horizontal overflow (causes a sideways scrollbar)
+        "var iw=window.innerWidth;if(document.documentElement.scrollWidth>iw+6){var offenders=[];Array.prototype.slice.call(document.querySelectorAll('body *'),0,600).forEach(function(el){var r=el.getBoundingClientRect();if(r.width&&(r.right>iw+8||r.left<-8)&&offenders.length<5&&!el.closest('[data-ok]'))offenders.push(sel(el));});out.push('HORIZONTAL OVERFLOW: page scrolls sideways ('+document.documentElement.scrollWidth+'px vs '+iw+'px viewport). Offending: '+offenders.join(', '));}" +
+        // 3) overlapping TEXT elements (unreadable collisions)
+        "var texts=Array.prototype.slice.call(document.querySelectorAll('h1,h2,h3,h4,p,a,button,li,span'),0,90).filter(function(e){var t=(e.innerText||'').trim();if(!t||t.length<3)return false;var r=e.getBoundingClientRect();return r.width>8&&r.height>8;});" +
+        "var pairs=0;for(var i=0;i<texts.length&&pairs<4;i++){for(var j=i+1;j<texts.length&&pairs<4;j++){var a=texts[i],b=texts[j];if(a.contains(b)||b.contains(a))continue;var ra=a.getBoundingClientRect(),rb=b.getBoundingClientRect();var ox=Math.min(ra.right,rb.right)-Math.max(ra.left,rb.left),oy=Math.min(ra.bottom,rb.bottom)-Math.max(ra.top,rb.top);if(ox>0&&oy>0){var area=ox*oy,small=Math.min(ra.width*ra.height,rb.width*rb.height);if(small>0&&area/small>0.35){out.push('TEXT OVERLAP: '+sel(a)+' (\"'+(a.innerText||'').slice(0,28)+'\") overlaps '+sel(b)+' (\"'+(b.innerText||'').slice(0,28)+'\") — fix spacing/positioning or add an overlay.');pairs++;}}}}" +
+        "parent.postMessage({__agentVis:1,issues:out.slice(0,8)},'*');}catch(e){parent.postMessage({__agentVis:1,issues:[]},'*');}},700);});<\/script>";
+      let doc = String(html || "");
+      doc = /<head[^>]*>/i.test(doc) ? doc.replace(/<head[^>]*>/i, (m) => m + audit) : audit + doc;
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", "allow-scripts");
+      const vw = viewportW || 1280;
+      iframe.style.cssText = "position:fixed;left:-9999px;top:0;width:" + vw + "px;height:900px;visibility:hidden";
+      const tag = vw <= 500 ? "[MOBILE " + vw + "px] " : "";
+      let done = false;
+      const finish = (list) => { if (done) return; done = true; window.removeEventListener("message", onMsg); try { iframe.remove(); } catch (_) {} resolve((list || []).map((s) => tag + s)); };
+      const onMsg = (e) => { if (e.data && e.data.__agentVis) finish(Array.isArray(e.data.issues) ? e.data.issues.map((s) => String(s).slice(0, 300)) : []); };
+      window.addEventListener("message", onMsg);
+      iframe.srcdoc = doc;
+      document.body.appendChild(iframe);
+      setTimeout(() => finish([]), timeoutMs || 4000);
+    } catch (_) { resolve([]); }
+  });
+}
+/* ── PYTHON RUNNER (Pyodide) — the agent actually RUNS the Python it wrote, in the browser, and
+   captures real tracebacks. Loads Pyodide once, lazily. stdin is stubbed; input() returns "".
+   Returns { ok, out, err } — err is the traceback (empty on success). ── */
+let _pyodide = null, _pyodideLoading = null;
+async function loadPyodide2() {
+  if (_pyodide) return _pyodide;
+  if (_pyodideLoading) return _pyodideLoading;
+  _pyodideLoading = (async () => {
+    if (typeof loadPyodide === "undefined") {
+      await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+    }
+    _pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/" });
+    return _pyodide;
+  })();
+  return _pyodideLoading;
+}
+async function runPythonInSandbox(code, timeoutMs) {
+  // Only attempt stdlib-only scripts — a third-party import (pandas/requests/…) isn't installed and
+  // would be a false failure. Those we leave to static review, not execution.
+  const thirdParty = /^\s*(?:import|from)\s+(?!(?:os|sys|re|math|random|json|datetime|time|collections|itertools|functools|typing|string|decimal|fractions|statistics|heapq|bisect|copy|abc|enum|dataclasses|pathlib|io|csv|hashlib|base64|textwrap|unicodedata|calendar|pprint|operator|struct|array|queue|threading|asyncio|contextlib|warnings|traceback|argparse|__future__)\b)/m;
+  if (thirdParty.test(String(code || ""))) return { ok: true, out: "", err: "", skipped: true };
+  let py;
+  try { py = await Promise.race([loadPyodide2(), new Promise((_, r) => setTimeout(() => r(new Error("pyodide load timeout")), 40000))]); }
+  catch (_) { return { ok: true, out: "", err: "", skipped: true }; }   // engine unavailable → don't block
+  try {
+    const runner = "import sys, io, traceback\n_o=io.StringIO()\n_e=''\n_so,_se=sys.stdout,sys.stderr\nsys.stdout=_o; sys.stderr=_o\ntry:\n    input=lambda *a: ''\n    exec(compile(__usercode__, '<agent>', 'exec'), {'__name__':'__main__','input':lambda *a: ''})\nexcept SystemExit:\n    pass\nexcept Exception:\n    _e=traceback.format_exc()\nfinally:\n    sys.stdout=_so; sys.stderr=_se\n";
+    py.globals.set("__usercode__", String(code || ""));
+    await Promise.race([py.runPythonAsync(runner), new Promise((_, r) => setTimeout(() => r(new Error("py timeout")), timeoutMs || 8000))]);
+    const err = String(py.globals.get("_e") || "");
+    const out = String(py.globals.get("_o").getvalue() || "");
+    return { ok: !err, out: out.slice(0, 4000), err: err.slice(0, 2000) };
+  } catch (e) { return { ok: false, out: "", err: String((e && e.message) || e).slice(0, 800) }; }
+}
+/* ── DETERMINISTIC CROSS-FILE LINTER — zero model calls, 100% precise. Catches the classic
+   generated-code failures: internal links to files that don't exist, JS targeting ids that no page
+   defines, files nobody references, dead href="#" anchors, missing viewport/alt. ── */
+function lintProject(files) {
+  const issues = [];
+  try {
+    const norm = (p) => String(p || "").replace(/^\.\//, "").replace(/^\//, "");
+    const paths = new Set(files.map((f) => norm(f.path)));
+    const bases = new Set(files.map((f) => norm(f.path).split("/").pop()));
+    const htmlFiles = files.filter((f) => /\.html?$/i.test(f.path));
+    const allContent = files.map((f) => f.content || "").join("\n");
+    const allIds = new Set();
+    htmlFiles.forEach((hf) => [...(hf.content || "").matchAll(/id=["']?([\w-]+)["']?/g)].forEach((m) => allIds.add(m[1])));
+    for (const hf of htmlFiles) {
+      const c = hf.content || "";
+      // internal page links → must exist in the project
+      [...c.matchAll(/href=["']?([^"'\s>#?]+\.html?)["'#?\s>]/gi)].forEach((m) => {
+        const t = norm(m[1]);
+        if (!/^https?:|^\/\//i.test(m[1]) && !paths.has(t) && !bases.has(t.split("/").pop())) {
+          issues.push("BROKEN LINK in " + hf.path + ': href="' + m[1] + '" — that page does not exist in the project. Either create it or point the link to an existing page/section.');
+        }
+      });
+      // css/js references → must exist
+      [...c.matchAll(/(?:href|src)=["']?([^"'\s>]+\.(?:css|js))["']?/gi)].forEach((m) => {
+        const t = norm(m[1]);
+        if (!/^https?:|^\/\//i.test(m[1]) && !paths.has(t) && !bases.has(t.split("/").pop())) {
+          issues.push("BROKEN REFERENCE in " + hf.path + ': "' + m[1] + '" — no such file in the project.');
+        }
+      });
+      // dead anchors
+      const dead = (c.match(/<a\b[^>]*href=["']?#["']?[^>]*>/gi) || []).length;
+      if (dead >= 3) issues.push("DEAD ANCHORS in " + hf.path + ": " + dead + ' links point to href="#" — wire each to its real section/page or give it a working handler.');
+      if (!/name=["']?viewport/i.test(c)) issues.push('MISSING <meta name="viewport"> in ' + hf.path + " — the page won't scale on phones.");
+      const noAlt = [...c.matchAll(/<img\b[^>]*>/gi)].filter((m) => !/alt=/.test(m[0])).length;
+      if (noAlt) issues.push(noAlt + " <img> tag(s) in " + hf.path + " have no alt attribute.");
+      // inline-script id targets
+      [...c.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].forEach((sm) => {
+        [...(sm[1] || "").matchAll(/getElementById\(\s*["']([\w-]+)["']\s*\)/g)].forEach((m) => {
+          if (!allIds.has(m[1]) && !allContent.includes('id="' + m[1] + '"') && !allContent.includes("id='" + m[1] + "'") && !new RegExp("id\\s*[:=]\\s*[\"'`]" + m[1]).test(allContent)) {
+            issues.push("JS TARGETS A MISSING ID: inline script in " + hf.path + ' calls getElementById("' + m[1] + '") but NO element anywhere has that id.');
+          }
+        });
+      });
+    }
+    // external JS files: id targets must exist somewhere (allow dynamically-created ids)
+    files.filter((f) => /\.m?js$/i.test(f.path)).forEach((jf) => {
+      const jc = jf.content || "";
+      const targets = new Set();
+      [...jc.matchAll(/getElementById\(\s*["']([\w-]+)["']\s*\)/g)].forEach((m) => targets.add(m[1]));
+      [...jc.matchAll(/querySelector(?:All)?\(\s*["']#([\w-]+)["']\s*\)/g)].forEach((m) => targets.add(m[1]));
+      targets.forEach((id) => {
+        if (!allIds.has(id) && !new RegExp("id\\s*[:=]\\s*[\"'`]" + id).test(allContent) && !allContent.includes('id="' + id + '"')) {
+          issues.push("JS TARGETS A MISSING ID: " + jf.path + ' looks up "#' + id + '" but NO element anywhere has that id — add the element or fix the selector.');
+        }
+      });
+      // built but never referenced
+      const used = htmlFiles.some((hf) => (hf.content || "").includes(norm(jf.path)) || (hf.content || "").includes(norm(jf.path).split("/").pop()));
+      if (htmlFiles.length && !used) issues.push("UNREFERENCED FILE: " + jf.path + " is never loaded by any HTML page — add its <script src> where it belongs.");
+    });
+    files.filter((f) => /\.css$/i.test(f.path)).forEach((cf) => {
+      const used = htmlFiles.some((hf) => (hf.content || "").includes(norm(cf.path)) || (hf.content || "").includes(norm(cf.path).split("/").pop()));
+      if (htmlFiles.length && !used) issues.push("UNREFERENCED FILE: " + cf.path + " is never linked by any HTML page — add its <link rel=stylesheet> where it belongs.");
+    });
+  } catch (_) {}
+  return issues.slice(0, 12);
+}
+/* ── INTERACTION TESTER — tests the app LIKE A REAL USER: clicks buttons/menus, types into inputs,
+   captures errors thrown DURING interaction, and detects DEAD BUTTONS (clicked → nothing changed). ── */
+function interactionTestInSandbox(html, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const issues = [];
+      const script = "<script>window.__err=[];window.onerror=function(m){window.__err.push(String(m).slice(0,160));return true;};window.addEventListener('unhandledrejection',function(e){window.__err.push('Rejection: '+String(e.reason).slice(0,120));});" +
+        "document.addEventListener('submit',function(e){e.preventDefault();},true);" +   // never navigate away
+        "window.addEventListener('load',function(){setTimeout(function(){try{" +
+        "var out=[];var sig=function(){return document.body.innerHTML.length+':'+document.querySelectorAll('*').length+':'+(document.body.className||'')};" +
+        "var label=function(el){var t=(el.innerText||el.value||el.getAttribute('aria-label')||'').trim().slice(0,26);return (el.tagName.toLowerCase()+(el.id?'#'+el.id:(el.classList[0]?'.'+el.classList[0]:''))+(t?' \"'+t+'\"':''));};" +
+        // type into a couple of inputs first (so submit/search handlers have data)
+        "Array.prototype.slice.call(document.querySelectorAll('input[type=text],input[type=search],input:not([type]),textarea'),0,3).forEach(function(inp){try{inp.value='تجربة';inp.dispatchEvent(new Event('input',{bubbles:true}));}catch(e){}});" +
+        "var clickables=Array.prototype.slice.call(document.querySelectorAll('button, [onclick], a[href=\"#\"], input[type=submit], [role=button]'),0,14);" +
+        "var i=0;var next=function(){if(i>=clickables.length){parent.postMessage({__agentIx:1,issues:out.slice(0,10)},'*');return;}" +
+        "var el=clickables[i++];var before=sig();var errBefore=window.__err.length;" +
+        "try{el.click();}catch(e){out.push('CLICK THREW on '+label(el)+': '+String(e).slice(0,100));}" +
+        "setTimeout(function(){var after=sig();var newErrs=window.__err.slice(errBefore);" +
+        "newErrs.forEach(function(er){out.push('INTERACTION ERROR when clicking '+label(el)+': '+er);});" +
+        "if(after===before&&!newErrs.length&&el.tagName!=='A'){out.push('DEAD BUTTON: '+label(el)+' — clicking it changes NOTHING (no DOM update, no handler effect). Wire it to its real behavior.');}" +
+        "next();},130);};" +
+        "next();}catch(e){parent.postMessage({__agentIx:1,issues:[]},'*');}},650);});<\/script>";
+      let doc = String(html || "");
+      doc = /<head[^>]*>/i.test(doc) ? doc.replace(/<head[^>]*>/i, (m) => m + script) : script + doc;
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", "allow-scripts");
+      iframe.style.cssText = "position:fixed;left:-9999px;top:0;width:1280px;height:900px;visibility:hidden";
+      let done = false;
+      const finish = (list) => { if (done) return; done = true; window.removeEventListener("message", onMsg); try { iframe.remove(); } catch (_) {} resolve(list || []); };
+      const onMsg = (e) => { if (e.data && e.data.__agentIx) finish(Array.isArray(e.data.issues) ? e.data.issues.map((s) => String(s).slice(0, 300)) : []); };
+      window.addEventListener("message", onMsg);
+      iframe.srcdoc = doc;
+      document.body.appendChild(iframe);
+      setTimeout(() => finish([]), timeoutMs || 6000);
+    } catch (_) { resolve([]); }
+  });
+}
+/* RUN the built web app in a hidden, sandboxed iframe and capture its RUNTIME ERRORS — the agent
+   actually TESTS what it built, then fixes the exact errors. sandbox="allow-scripts" (no same-origin)
+   keeps it fully isolated from the app. */
+function testHtmlInSandbox(html, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const errors = [];
+      const hook = "<script>window.onerror=function(m,s,l,c){parent.postMessage({__agentTest:1,err:String(m)+' @line '+(l||0)},'*');return true;};window.addEventListener('unhandledrejection',function(e){parent.postMessage({__agentTest:1,err:'Unhandled rejection: '+String(e.reason).slice(0,200)},'*')});<\/script>";
+      let doc = String(html || "");
+      doc = /<head[^>]*>/i.test(doc) ? doc.replace(/<head[^>]*>/i, (m) => m + hook) : hook + doc;
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", "allow-scripts");
+      iframe.style.cssText = "position:fixed;left:-9999px;top:0;width:800px;height:600px;visibility:hidden";
+      const onMsg = (e) => { if (e.data && e.data.__agentTest && e.data.err) errors.push(String(e.data.err).slice(0, 300)); };
+      window.addEventListener("message", onMsg);
+      iframe.srcdoc = doc;
+      document.body.appendChild(iframe);
+      setTimeout(() => {
+        window.removeEventListener("message", onMsg);
+        try { iframe.remove(); } catch (_) {}
+        resolve([...new Set(errors)].slice(0, 8));
+      }, timeoutMs || 2500);
+    } catch (_) { resolve([]); }
+  });
+}
 function buildProjectCard(proj, lang) {
   const ar = lang === "ar";
   const card = document.createElement("div");
@@ -8436,11 +9450,21 @@ function buildProjectCard(proj, lang) {
   head.className = "proj-card__head";
   head.innerHTML = '<span class="proj-card__ic">📁</span><div class="proj-card__meta"><div class="proj-card__name">' + escapeHtml(proj.name || "project") + "</div>" +
     '<div class="proj-card__sub">' + proj.files.length + (ar ? " ملفات · " : " files · ") + Math.max(1, Math.round(total / 1024)) + " KB</div></div>";
+  const pv = projPreviewHtml(proj);
+  if (pv && typeof openHtmlPreview === "function") {
+    const pvBtn = document.createElement("button");
+    pvBtn.type = "button"; pvBtn.className = "proj-card__zip proj-card__preview";
+    pvBtn.textContent = ar ? "▶ معاينة مباشرة" : "▶ Live preview";
+    pvBtn.addEventListener("click", () => openHtmlPreview(projPreviewHtml(proj)));
+    head.appendChild(pvBtn);
+  }
   const zipBtn = document.createElement("button");
   zipBtn.type = "button"; zipBtn.className = "proj-card__zip";
   zipBtn.textContent = ar ? "⬇ تنزيل الفولدر (ZIP)" : "⬇ Download folder (ZIP)";
   zipBtn.addEventListener("click", () => {
-    const folder = String(proj.name || "project").replace(/[^\w.-]+/g, "-");
+    // Keep Arabic letters in the folder/zip name — the old \w-only filter erased Arabic names to "-".
+    let folder = String(proj.name || "project").replace(/[^\w؀-ۿ .-]+/g, " ").replace(/\s+/g, "-").replace(/^-+|-+$/g, "");
+    if (!folder) folder = "project";
     const blob = buildZip(proj.files.map((f) => ({ path: folder + "/" + f.path, content: f.content })));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = folder + ".zip";
@@ -8477,38 +9501,77 @@ function buildProjectCard(proj, lang) {
 }
 
 function parseAgentMeta(content) {
-  const m = /^\s*```firas-agent\s*\n([\s\S]*?)\n```/.exec(String(content || ""));
-  if (!m) return null;
-  try { const o = JSON.parse(m[1]); return (o && Array.isArray(o.steps)) ? o : null; } catch (_) { return null; }
+  const s = String(content || "");
+  if (!/^\s*```firas-agent[ \t]*\r?\n/.test(s)) return null;
+  const body = s.replace(/^\s*```firas-agent[ \t]*\r?\n/, "").replace(/\r?\n```[ \t]*$/, "");
+  try { const o = JSON.parse(body); if (o && Array.isArray(o.steps)) return o; } catch (_) {}
+  // Recover from a TRUNCATED trailing fence (a big run can be cut at the server's content cap):
+  // brace-match the first complete top-level JSON object.
+  const start = body.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < body.length; i++) {
+    const c = body[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\") { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try { const o = JSON.parse(body.slice(start, i + 1)); return (o && Array.isArray(o.steps)) ? o : null; } catch (_) { return null; }
+    }
+  }
+  return null;
 }
 function serializeAgentRun(run) {
   const slim = {
-    task: String(run.task || "").slice(0, 4000),
+    task: String(run.task || "").slice(0, 3000),
     title: String(run.title || "").slice(0, 160),
     phase: run.phase, lang: run.lang, mode: run.mode || "answer",
     steps: run.steps.map((s) => ({ title: String(s.title || "").slice(0, 200), kind: s.kind, file: s.file || "", s: s.s, out: String(s.out || "").slice(0, 15000) })),
-    final: String(run.final || "").slice(0, 60000),
+    final: String(run.final || "").slice(0, 40000),
+    stats: run.stats || {},
   };
+  // HARD BUDGET so the persisted block stays under the server's ~200K content cap — a truncated
+  // block loses its closing fence and won't re-parse on reload. Trim step outputs adaptively (the
+  // full code lives in the SEPARATE deliverable message, so the card is only a summary anyway).
+  const BUDGET = 165000;
+  let cap = 15000;
+  while (JSON.stringify(slim).length > BUDGET && cap > 400) {
+    cap = Math.floor(cap * 0.7);
+    slim.steps.forEach((s) => { if (s.out.length > cap) s.out = s.out.slice(0, cap); });
+  }
+  if (JSON.stringify(slim).length > BUDGET) slim.final = slim.final.slice(0, 6000);
   return "```firas-agent\n" + JSON.stringify(slim) + "\n```";
 }
 const AGENT_PHASE_LABEL = {
+  read:    { ar: "يقرأ المرفقات…", en: "Reading attachments…" },
   plan:    { ar: "يخطّط…", en: "Planning…" },
   run:     { ar: "ينفّذ…", en: "Executing…" },
   verify:  { ar: "يراجع نفسه…", en: "Self-reviewing…" },
+  enhance: { ar: "يطوّر ويوسّع…", en: "Enhancing…" },
   assemble:{ ar: "يجمّع النتيجة…", en: "Assembling…" },
+  test:    { ar: "يختبر ويصلّح…", en: "Testing & fixing…" },
   done:    { ar: "اكتملت المهمة", en: "Task complete" },
   stopped: { ar: "أُوقفت", en: "Stopped" },
   fail:    { ar: "تعثّرت", en: "Failed" },
 };
 function buildAgentCard(run, lang) {
   const ar = (run.lang || lang) === "ar";
+  // A run persisted in a LIVE phase (run/plan/…) but with no active stream = the page was reloaded
+  // mid-mission. Render it as "stopped" so the ▶ Resume button appears instead of an eternal spinner.
+  const LIVE_PHASES = { read: 1, plan: 1, run: 1, verify: 1, enhance: 1, assemble: 1, test: 1 };
+  const chLive = activeChat();
+  if (LIVE_PHASES[run.phase] && !(chLive && activeStreams.has(chLive.id))) {
+    run = Object.assign({}, run, { phase: "stopped", steps: (run.steps || []).map((s) => s.s === "run" ? Object.assign({}, s, { s: "todo" }) : s) });
+  }
   const card = document.createElement("div");
   card.className = "agent-card" + (run.phase === "done" ? " is-done" : "");
   const phase = AGENT_PHASE_LABEL[run.phase] || AGENT_PHASE_LABEL.run;
   const head = document.createElement("div");
   head.className = "agent-card__head";
   head.innerHTML = '<span class="agent-card__bolt">⚡</span><span class="agent-card__brand">Firas Agent</span>' +
-    '<span class="agent-card__phase' + (run.phase === "run" || run.phase === "plan" || run.phase === "verify" ? " is-live" : "") + '">' + (ar ? phase.ar : phase.en) + "</span>";
+    '<span class="agent-card__phase' + (run.phase === "run" || run.phase === "plan" || run.phase === "verify" || run.phase === "read" ? " is-live" : "") + '">' + (ar ? phase.ar : phase.en) + "</span>";
   card.appendChild(head);
   if (run.title) { const h = document.createElement("div"); h.className = "agent-card__title"; h.textContent = run.title; card.appendChild(h); }
   // Progress bar: n/N done + animated fill.
@@ -8519,7 +9582,7 @@ function buildAgentCard(run, lang) {
   prog.innerHTML = '<div class="agent-card__prog-bar"><div class="agent-card__prog-fill" style="width:' + pct + '%"></div></div>' +
     '<span class="agent-card__prog-n">' + doneN + "/" + run.steps.length + "</span>";
   card.appendChild(prog);
-  const KIND_IC = { research: "🔎", write: "✍️", solve: "🧮", draw: "📈", code: "💻" };
+  const KIND_IC = { research: "🔎", write: "✍️", solve: "🧮", draw: "📈", code: "💻", design: "🎨" };
   const ol = document.createElement("ol");
   ol.className = "agent-card__steps";
   run.steps.forEach((st) => {
@@ -8546,6 +9609,35 @@ function buildAgentCard(run, lang) {
     ol.appendChild(li);
   });
   card.appendChild(ol);
+  // Task REPORT — what the agent actually did (shown when done). This is the "it's an agent, not a chat" moment.
+  if (run.phase === "done" && run.stats && (run.stats.files || run.stats.lines)) {
+    const st = run.stats;
+    const chips = [];
+    if (st.files) chips.push((ar ? "📄 " : "📄 ") + st.files + (ar ? " ملف" : " files"));
+    if (st.lines) chips.push("📝 " + st.lines.toLocaleString() + (ar ? " سطر" : " lines"));
+    if (st.searches) chips.push("🔎 " + st.searches + (ar ? " بحث ويب" : " searches"));
+    if (st.images) chips.push("🖼️ " + st.images + (ar ? " صورة" : " images"));
+    if (st.fixes) chips.push("🧪 " + st.fixes + (ar ? " إصلاح تشغيل" : " runtime fixes"));
+    if (st.visual) chips.push("👁️ " + st.visual + (ar ? " إصلاح بصري" : " visual fixes"));
+    if (st.checks) chips.push("∫ " + st.checks + (ar ? " تدقيق" : " checks"));
+    if (st.elapsed) chips.push("⏱️ " + (st.elapsed >= 60 ? Math.round(st.elapsed / 60) + (ar ? " د" : "m") : st.elapsed + (ar ? " ث" : "s")));
+    if (st.score) chips.push("🏅 " + (ar ? "الجودة " : "Quality ") + st.score + "/10");
+    if (chips.length) {
+      const rep = document.createElement("div");
+      rep.className = "agent-card__report";
+      rep.innerHTML = '<span class="agent-card__report-label">' + (ar ? "تقرير المهمة" : "Task report") + "</span>" +
+        chips.map((c) => '<span class="agent-report-chip">' + escapeHtml(c) + "</span>").join("");
+      card.appendChild(rep);
+    }
+  }
+  // RESUME — a stopped/failed mission with unfinished steps gets a one-click continue.
+  if ((run.phase === "stopped" || run.phase === "fail") && run.steps.some((s) => s.s !== "done")) {
+    const rb = document.createElement("button");
+    rb.type = "button"; rb.className = "agent-card__resume";
+    rb.textContent = ar ? "▶ استئناف المهمة" : "▶ Resume task";
+    rb.addEventListener("click", () => { rb.disabled = true; resumeAgentRun(activeChat(), run); });
+    card.appendChild(rb);
+  }
   if (run.final) {
     const fin = document.createElement("div");
     fin.className = "agent-card__final";
@@ -8559,14 +9651,26 @@ function buildAgentCard(run, lang) {
   }
   return card;
 }
-/* Robust model call for agent steps: 3 attempts with backoff — a step must not die on a hiccup. */
+/* Robust model call for agent steps: 3 attempts with backoff + a per-call watchdog so a stalled
+   stream (no bytes, no FIN) can NEVER hang the whole run — it aborts, retries, and after 3 tries the
+   phase's try/catch keeps the run moving. */
 async function agentCall(messages, tierKey, signal) {
   let lastErr = null;
   for (let a = 0; a < 3; a++) {
+    const ac = new AbortController();
+    const onAbort = () => { try { ac.abort(); } catch (_) {} };
+    if (signal) { signal.addEventListener("abort", onAbort, { once: true }); if (signal.aborted) onAbort(); }
+    const to = setTimeout(() => { try { ac.abort("agent-timeout"); } catch (_) {} }, 180000); // 3-min hard cap/call
     try {
-      const out = await callAgentText(messages, tierKey, signal);
+      const out = await callAgentText(messages, tierKey, ac.signal);
       if (out && out.trim()) return out.trim();
-    } catch (e) { lastErr = e; if (signal && signal.aborted) throw e; }
+    } catch (e) {
+      lastErr = e;
+      if (signal && signal.aborted) throw e;   // real user Stop → abort the run; watchdog abort → retry
+    } finally {
+      clearTimeout(to);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    }
     await new Promise((r) => setTimeout(r, 900 * (a + 1)));
   }
   throw (lastErr || new Error("agent call failed"));
@@ -8580,36 +9684,208 @@ async function agentWebSearch(q) {
     return res.map((x, i) => "[" + (i + 1) + "] " + (x.title || "") + "\n" + (x.snippet || "") + "\n" + (x.url || "")).join("\n\n");
   } catch (_) { return ""; }
 }
+/* Keyless REAL image URLs (Openverse via our proxy) for a topic — so generated sites use real,
+   relevant photos instead of placeholders. */
+async function agentImageSearch(query) {
+  try {
+    const r = await fetch("/api/images?q=" + encodeURIComponent(String(query).slice(0, 120)), { credentials: "same-origin" });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (Array.isArray(d.results) ? d.results : []).map((x) => x.url).filter(Boolean).slice(0, 8);
+  } catch (_) { return []; }
+}
+/* Gather a small pool of REAL topic photos for a web build: derive a few English image queries,
+   search each, dedupe. Best-effort — empty on any failure (build falls back to gradients/picsum). */
+async function agentGatherImages(task, design, signal) {
+  try {
+    const kwRaw = await agentCall([
+      { role: "system", content: "Give 4 short ENGLISH image-search queries (2-3 words each) for the photos THIS website needs (hero + main sections/topics). Concrete nouns, no punctuation. Return ONLY a JSON array of strings." },
+      { role: "user", content: "SITE:\n" + String(task).slice(0, 900) + (design ? "\n\nDESIGN:\n" + String(design).slice(0, 700) : "") },
+    ], "max", signal);
+    let arr = [];
+    try { arr = JSON.parse((kwRaw.match(/\[[\s\S]*\]/) || ["[]"])[0]); } catch (_) {}
+    if (!Array.isArray(arr) || !arr.length) arr = [String(task).slice(0, 40)];
+    const pool = [];
+    for (const kw of arr.slice(0, 4)) {
+      if (signal && signal.aborted) break;
+      const imgs = await agentImageSearch(String(kw));
+      imgs.slice(0, 2).forEach((u) => pool.push(u));
+    }
+    return [...new Set(pool)].slice(0, 8);
+  } catch (_) { return []; }
+}
+/* ⑤ AGENT VISION — read the user's ATTACHED image(s). Adapts to intent: a design/screenshot the
+   agent should REBUILD → a precise UI blueprint (layout, colors, components, copy) for replication in
+   real code; anything else → a full transcription/description used as source material. Best-effort. */
+async function agentVisionRead(images, userText, replyLang, wantsBuild, signal) {
+  if (!Array.isArray(images) || !images.length) return "";
+  const ar = replyLang === "ar";
+  const sys = wantsBuild
+    ? "You are a senior UI engineer reverse-engineering a design REFERENCE. Describe the attached screenshot/mockup so precisely that another engineer could REBUILD it in HTML/CSS without seeing it: overall layout & structure (header, hero, sections, grid, footer), the EXACT color palette (hex approximations for background, text, accents), typography (serif/sans, weights, relative sizes), every UI component (nav, buttons, cards, forms, images/icons, badges), spacing/rhythm, and ALL visible text copy verbatim. Be concrete and exhaustive. Output a clear structured blueprint only."
+    : "You are a precise vision engine. Describe and transcribe EVERYTHING in the attached image(s) completely — all visible text verbatim, structure, data in any tables, diagrams, and what it depicts — in order. Do not summarize or omit. Output only the transcription/description.";
+  const usr = (ar ? "اقرأ الصورة/الصور المرفقة (هذه مرجع لطلب المستخدم: " : "Read the attached image(s) (reference for the user's request: ") + String(userText || "").slice(0, 300) + ").";
+  try {
+    const out = await callAgentText([{ role: "system", content: sys }, { role: "user", content: usr, images }], "pro", signal);
+    return (out && out.trim()) ? out.trim() : "";
+  } catch (_) { return ""; }
+}
+/* The user's durable memory (preferences learned across chats) — so the agent starts already
+   knowing them. Returns an array of short fact strings. */
+async function agentUserMemory() {
+  try { const d = await apiJson("/api/memory"); const facts = (d && d.memory) || []; return facts.filter((f) => typeof f === "string").slice(0, 20); } catch (_) { return []; }
+}
+/* Read a URL the user pasted (via our SSRF-guarded proxy) → its readable text as source material. */
+async function agentFetchUrl(url) {
+  try {
+    const r = await fetch("/api/fetch?url=" + encodeURIComponent(String(url).slice(0, 500)), { credentials: "same-origin" });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d && d.text ? d : null;
+  } catch (_) { return null; }
+}
+/* Should the agent ASK clarifying questions before executing? Only for a fresh, SHORT/vague
+   build-or-big task — a detailed brief needs no questions. */
+function agentClarifyNeeded(task) {
+  const t = String(task || "");
+  if (t.trim().length > 550) return false;   // already detailed enough
+  const isBuild = /موقع|متجر|تطبيق|لعب[ةه]|منصة|واجه|داشبورد|لوحة\s*تحكم|website|web\s*app|\bapp\b|\bgame\b|\bstore\b|dashboard|platform|landing/i.test(t) || (typeof detectCodeRequest === "function" && !!detectCodeRequest(t));
+  const isBig = /كورس|دورة|منهج|منهاج|كتاب|كتيب|ملزمة|بحث|course|book|research|curriculum|booklet|thesis|report/i.test(t);
+  return isBuild || isBig;
+}
+/* Ask the model for the 2-3 most impactful clarifying questions as a firas-ask spec (the same
+   interactive-choice format the app already renders). Returns null when nothing needs asking. */
+async function buildClarifyingQuestions(task, lang, signal) {
+  try {
+    const raw = await agentCall([
+      { role: "system", content: "You are Firas Agent, about to execute a big task, but a FEW key decisions are ambiguous and would CHANGE what you build. Ask the 2-3 MOST impactful clarifying questions (audience/purpose, scope/size, style/tone, language, the key features or topics to include). Skip anything you can reasonably assume — do NOT ask filler. Each question has 2-4 SPECIFIC options (not generic), and mark the single best default as recommended:true. Return ONLY valid JSON in the user's language: {\"questions\":[{\"question\":\"…\",\"options\":[{\"label\":\"…\",\"desc\":\"short\",\"recommended\":true},{\"label\":\"…\",\"desc\":\"…\"}]}]}. If the task is already fully specific, return {\"questions\":[]}." },
+      { role: "user", content: String(task).slice(0, 2000) },
+    ], "max", signal);
+    const jm = raw.match(/\{[\s\S]*\}/);
+    if (!jm) return null;
+    const spec = JSON.parse(jm[0]);
+    if (!spec || !Array.isArray(spec.questions) || !spec.questions.length) return null;
+    // keep ≤3 questions, each with ≥2 options
+    spec.questions = spec.questions.slice(0, 3).filter((q) => q && q.question && Array.isArray(q.options) && q.options.length >= 2);
+    return spec.questions.length ? spec : null;
+  } catch (_) { return null; }
+}
 const AGENT_QUALITY =
-  " QUALITY BAR: expert-level, complete, ZERO errors. ALL math in valid, BALANCED KaTeX LaTeX ($…$ inline, $$…$$ display" +
-  " for standalone equations only). Function graphs as a fenced ```plot block (lines `y = <expr>` with explicit operators" +
-  " + optional `domain: a..b`). Geometric/physics figures as a SIMPLE fenced ```tikz block (explicit coordinates, basic" +
-  " \\draw/\\node only). Code in fenced blocks with the language tag. NEVER lazy placeholders, NEVER meta commentary.";
-async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
+  " You are a world-class domain expert for THIS task — a tenured professor for math/physics/chemistry/science, a published author for Arabic/English writing, a principal engineer for code. Work at that level, always." +
+  " DEPTH: every step's output is a COMPLETE specialist section — full coverage of its subtopic, correct terminology, concrete worked examples, precise reasoning, clean structure with clear headings. Never an outline, a summary of what you 'would' write, or a stub." +
+  " CORRECTNESS: solve everything end-to-end and VERIFY before stating a result — differentiate an antiderivative back to the integrand, substitute values into an identity/equation, check every endpoint, singularity, unit and edge case, and re-derive any number you are unsure of. Never assert an unverified result. Give EXACT closed forms (fractions, radicals, π, e, symbolic) unless a decimal is requested." +
+  " SELF-CONSISTENCY: honour every definition, symbol, notation and claim established in earlier steps; contradict nothing already written." +
+  " REAL CONTENT ONLY (absolute): never output 'TODO', 'lorem', '...', '(details omitted)', '(similar to above)', 'left as an exercise', placeholder names, or any promise of content instead of the content itself. If a part is long, write all of it." +
+  " FORMATTING: ALL math in valid, BALANCED KaTeX ($…$ inline, $$…$$ for standalone equations only), units and words inside \\text{} with thin spaces (e.g. $9.8\\,\\text{m/s}^2$). Function graphs as a fenced ```plot block (lines `y = <expr>` with explicit operators + optional `domain: a..b`). Geometric/physics figures as a SIMPLE fenced ```tikz block (explicit coordinates, basic \\draw/\\node only). Code in fenced blocks with the language tag." +
+  " Deliver the work itself — polished and final, no meta commentary or apologies.";
+/* Per-domain execution guidance so each answer-mode step is done like a specialist. */
+const DOMAIN_GUIDE = {
+  math: " MATH MODE: state given/goal, then a rigorous step-by-step derivation where EVERY line follows from the previous with the rule named (no skipped algebra). Define notation, note domain/edge cases, verify the result (substitute back or sanity-check units/limits). Include at least one fully worked example and, where useful, a second method as a cross-check. Give the final answer boxed as $\\boxed{...}$.",
+  science: " PHYSICS/CHEM/SCIENCE MODE: name the governing law/principle first, then derive symbolically BEFORE plugging numbers. Carry UNITS through every step and check dimensional consistency; give the answer to correct significant figures with units. State assumptions and regimes of validity. Chemistry: balanced equations, correct states/charges, mechanisms with electron-flow described. Draw the setup/free-body/energy diagram as a SIMPLE ```tikz block. Add a short 'why this makes physical sense' check.",
+  writing: " WRITING MODE (essays/literature/language, EN or AR): open with a clear thesis, develop it across well-structured paragraphs each with a topic sentence + evidence + analysis, and close with a synthesis (not a restatement). Use precise, varied, register-appropriate vocabulary and real examples/quotations. Arabic: فصحى سليمة مع ضبط ما يلزم وترابط منطقي. Aim for genuine depth, never a thin outline.",
+  exam: " EXAM MODE: produce a real question SET spanning easy→medium→hard (label each with difficulty and marks). Mix formats (MCQ, short-answer, problem, proof/essay) as fits the subject, keep questions unambiguous and non-repetitive, then give a COMPLETE separate ANSWER KEY with full worked solutions/rationale — not just final letters.",
+  knowledge: " KNOWLEDGE MODE: lead with the direct, correct answer, then explain the why with concrete facts, mechanisms, dates/figures, and a short example or analogy. Distinguish established fact from interpretation; if a claim is uncertain, say so. Structure with clear headings/lists so it is scannable."
+};
+const DEPTH_MANDATE = " DEPTH MANDATE: this step must be genuinely thorough and self-contained — full coverage of its topic with derivations/examples/evidence, not a summary. Never abbreviate with 'and so on' or 'similar for the rest'; write every part out in full.";
+/* Hard visual rules for generated web UIs — these directly prevent the classic failures: broken
+   local images, text drowning in busy photos, sideways scroll, and colliding absolute elements. */
+const VISUAL_POLICY =
+  " VISUAL POLICY (hard rules): IMAGES — the generated folder has NO image assets, so NEVER reference local files (assets/…, img/…, ./photo.jpg). Allowed only: (1) inline SVG you draw yourself, (2) CSS gradients/patterns, (3) https://picsum.photos/seed/<word>/<w>/<h> for photos, (4) Font Awesome icons via its CDN. Every <img> gets width+height (or aspect-ratio), object-fit:cover, background-color fallback, and onerror=\"this.style.display='none'\". CONTRAST — text NEVER sits directly on a photo: put it on a solid/gradient panel or add a dark overlay layer (rgba(0,0,0,.55)+) under white text. LAYOUT — avoid absolute positioning for content flow (flex/grid only; absolute only for tiny decorations with pointer-events:none), nothing may overflow the viewport horizontally (max-width:100%, overflow-x controlled), test mentally at 1280px AND 380px widths, and in RTL. SPACING — generous consistent padding; separate sections clearly; never let two text blocks touch or overlap.";
+const SIZE_MANDATE_WEB = " NO SKELETONS: deliver a LARGE, COMPLETE, launch-ready implementation — err on the side of MORE (many hundreds to thousands of lines when the feature set warrants it; long files are welcome, never truncate). Every section fully realized with REAL content (never lorem/placeholder), full responsive design, refined spacing/typography, hover/focus states, smooth animations and micro-interactions, and real working logic with edge cases and errors handled. Do not stop early to 'keep it short'. The file MUST be syntactically valid and run correctly as-is — mentally execute it before finishing — and output complete, start to end, never truncated.";
+const SIZE_MANDATE_CODE = " NO SKELETONS and NO STUBS: every function fully implemented — never `pass`, `TODO`, `...`, `throw new Error('not implemented')`, or '// rest of logic here'. Deliver a LARGE, COMPLETE, runnable file (many hundreds to thousands of lines when the task warrants — long files are welcome, never truncate). Handle edge cases and errors, include realistic sample/seed data where needed, and make it run end-to-end as-is. Output complete, start to end, never truncated.";
+/* Coding brain: real working logic + smart library use — appended to every code builder. */
+const TECH_BRAIN =
+  " REAL LOGIC (hard rule): every interactive feature must actually WORK end-to-end — every button/menu/form is wired to a real handler that visibly does its job; search/filter/sort really filter; a cart/favorites/todo really adds, updates totals, and PERSISTS via localStorage; forms validate and give feedback. A control that does nothing is a defect." +
+  " LIBRARIES: when the task names or clearly benefits from a library/framework (React, Vue, Tailwind, Bootstrap, Chart.js, Three.js, Leaflet, anime.js…), load it correctly from its official CDN (browser/UMD build, pinned version, correct init for no-build usage) — otherwise clean vanilla JS. Never import npm-style in browser files." +
+  " NON-WEB STACKS (Python/Node/bots/APIs): produce a proper runnable project — correct entry point, clean module structure, requirements.txt / package.json with real versions, and a README.md with exact run commands.";
+const domainOf = (t) => {
+  const s = (t || "").toLowerCase();
+  if (/امتحان|اختبار|أسئلة|اسئلة|بنك أسئلة|quiz|exam|test|worksheet|mcq|questions?/.test(s)) return "exam";
+  if (/فيزياء|كيمياء|أحياء|physics|chem|biolog|reaction|force|voltage|mole|circuit|thermo/.test(s)) return "science";
+  if (/رياضيات|جبر|تفاضل|تكامل|هندسة|معادلة|math|algebra|calculus|integral|derivative|equation|geometry|proof|theorem/.test(s)) return "math";
+  if (/مقال|قصيدة|تعبير|essay|paragraph|literature|poem|write about|story|letter|رسالة|شعر/.test(s)) return "writing";
+  return "knowledge";
+};
+async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx, resume) {
+  ctx = ctx || {};
+  // Everything the model sees carries the conversation context, so multi-request missions stay ONE mission.
+  const convoCtx = (ctx.memory && ctx.memory.length ? "\n\nWHAT YOU ALREADY KNOW ABOUT THIS USER (apply their preferences unless this task overrides them):\n" + ctx.memory.map((f) => "• " + f).join("\n") : "")
+    + (ctx.history ? "\n\nCONVERSATION SO FAR (this request CONTINUES it — stay consistent with everything already agreed/built):\n" + ctx.history : "")
+    + (ctx.prevRunTitle ? "\n\nPREVIOUS COMPLETED TASK: " + ctx.prevRunTitle : "");
+  let taskCtx = task + convoCtx;
   const ar = replyLang === "ar";
   const langRule = ar ? " Respond entirely in Arabic (الفصحى الواضحة)." : " Respond in English.";
-  const run = { task, title: "", phase: "plan", lang: replyLang, steps: [], final: "", mode: "answer" };
+  const run = { task, title: "", phase: "plan", lang: replyLang, steps: [], final: "", mode: "answer", stats: { startedAt: Date.now(), files: 0, lines: 0, fixes: 0, visual: 0, searches: 0, images: 0, checks: 0 } };
   // DELIVERABLE MODE: doc (PDF/Word…) · codefile (ONE complete code file — user asked "بكود واحد")
   // · project (a real multi-file FOLDER, downloadable as ZIP — the default for sites/apps) · answer.
   const wantsDoc = typeof detectFileRequest === "function" ? detectFileRequest(task) : null;
   const codeSpec = !wantsDoc && typeof detectCodeRequest === "function" ? detectCodeRequest(task) : null;
   const oneFile = /كود\s*واحد|بكود\s*واحد|ملف\s*واحد|بملف\s*واحد|one\s*file|single\s*file/i.test(task);
-  run.mode = wantsDoc ? "doc" : (codeSpec ? (oneFile ? "codefile" : "project") : "answer");
+  // Follow-ups EVOLVE the previous deliverable ("أضف وضع ليلي", "عدّل السلة"…) instead of restarting.
+  const followUp = typeof CODE_FOLLOWUP !== "undefined" && CODE_FOLLOWUP.test(task);
+  // Course / booklet / exam / worksheet intent → a structured, answer-key-bearing document deliverable.
+  const COURSE_EXAM = /\b(course|syllabus|curriculum|booklet|workbook|worksheet|exam|quiz|test|revision|study\s*guide|lesson\s*plan|problem\s*set)\b|كورس|منهج|منهاج|دورة|كتيب|ملزمة|مذكرة|ورقة\s*عمل|امتحان|اختبار|كويز|بنك\s*أسئلة|مراجعة|تمارين/i.test(task);
+  run._courseExam = COURSE_EXAM;
+  // MEGA-BOOK intent → far more chapters, each written LONG (the chunked PDF engine can render it).
+  run._mega = /موسوعة|كتاب\s*(ضخم|كامل|شامل)|مرجع\s*شامل|\b\d{3,4}\s*صفح|مئات\s*الصفح|encyclopedia|mega\s*book|comprehensive\s*(book|reference)|\b\d{3,4}\s*pages/i.test(task);
+  // ④ PRESENTATION intent → a slide DECK: the author writes slide-structured markdown (sections +
+  // bullets + speaker notes + web images) that the PPTX engine turns into a polished keynote.
+  run._deck = (wantsDoc === "pptx") || /عرض\s*تقديمي|بوربوينت|باوربوينت|شرائح|سلايدات?|\bpresentation\b|powerpoint|\bslides?\b|\bdeck\b|keynote/i.test(task);
+  // WEBSITE/APP INTENT — deliberately BROAD: "إنشاء موقع تعليمي", "اريد متجر", "صمم لعبة"… must all
+  // BUILD real code, never fall to a consulting-style "answer" plan (activities instead of files).
+  const buildsSite =
+    /موقع|متجر|تطبيق|لعب[ةه]|منصة|واجه[ةه]|داشبورد|لوحة\s*تحكم|صفحة\s*هبوط|بوابة|نظام\s*إدار|website|web\s*site|webapp|web\s*app|landing\s*page|dashboard|storefront|\bstore\b|\bgame\b|\bsite\b|\bapp\b|portfolio|blog/i.test(task) &&
+    /سو|اصنع|إصنع|ابن|إبن|أنش|انش|إنشاء|انشاء|اعمل|أعمل|عمل|صمم|تصميم|طور|تطوير|بناء|ابي|أبي|اريد|أريد|بغيت|build|creat|make|design|develop|generat/i.test(task);
+  // An EXPLICIT document format (PDF/Word/Excel…) always wins; a generic "ملف" does NOT hijack a
+  // website request ("سوي لي ملف موقع تعليمي" = the user wants the SITE, not a PDF about it).
+  const explicitDocFmt = /pdf|بي\s*دي\s*اف|بدف|وورد|\bword\b|docx?|بوربوينت|powerpoint|pptx?|excel|اكسل|xlsx|csv/i.test(task);
+  run.mode = resume ? (resume.mode || "answer")
+    : (wantsDoc && (explicitDocFmt || !buildsSite)) ? "doc"
+    : (ctx.prevProj && (codeSpec || buildsSite || followUp) && !oneFile) ? "project"
+    : (ctx.prevCode && (codeSpec || buildsSite || followUp)) ? "codefile"
+    : (codeSpec || buildsSite) ? (oneFile ? "codefile" : "project")
+    : COURSE_EXAM ? "doc"
+    : "answer";
+  // A presentation is always a document deliverable (never a code build).
+  if (run._deck && run.mode !== "project" && run.mode !== "codefile") run.mode = "doc";
   const sync = (persist) => { aiMsg.content = serializeAgentRun(run); onUpdate(run, persist); };
   sync(false);
-  // 1) PLAN — mode-specific decomposition
+  // ④ READ LINKS — if the task contains URLs, pull their readable text as source material FIRST.
+  const urls = resume ? [] : (task.match(/https?:\/\/[^\s)"'<>]+/gi) || []).slice(0, 3);
+  if (urls.length && !signal.aborted) {
+    run.phase = "run"; sync(false);
+    let urlCtx = "";
+    for (const url of urls) {
+      if (signal.aborted) break;
+      try { const d = await agentFetchUrl(url); if (d && d.text) { urlCtx += "\n\n=== CONTENT OF " + (d.title ? d.title + " — " : "") + url + " ===\n" + d.text.slice(0, 12000); run.stats.searches++; } } catch (_) {}
+    }
+    if (urlCtx) taskCtx += "\n\nSOURCE FROM THE LINK(S) THE USER PROVIDED (use this as primary material):" + urlCtx;
+  }
+  // 1) PLAN — mode-specific decomposition (SKIPPED on resume — reuse the persisted plan/progress).
+  if (resume) {
+    run.title = resume.title || "";
+    run.steps = (resume.steps || []).map((s) => ({ title: s.title, kind: s.kind, file: s.file || "", s: s.s === "done" ? "done" : "todo", out: s.s === "done" ? (s.out || "") : "", dom: s.dom }));
+    if (!run.steps.length) { run.phase = "fail"; sync(true); return run; }
+    const dz = run.steps.find((s) => s.kind === "design" && s.s === "done"); if (dz) run._design = dz.out;
+    const webBuild = run.mode === "project" ? run.steps.some((s) => /\.html?$/i.test(s.file || "")) : /html|css|react|vue|svelte/i.test((codeSpec && codeSpec.lang) || "html");
+    if (webBuild && !signal.aborted) { run._images = await agentGatherImages(task, run._design, signal); run.stats.images = run._images.length; }
+    run.phase = "run"; sync(true);
+  } else {
   const plannerSysTxt =
     run.mode === "project"
-      ? "You are Firas Agent's ARCHITECT planning a MULTI-FILE PROJECT (a real folder the user downloads). Design a clean professional file structure of 3-6 files (e.g. index.html, css/styles.css, js/app.js, README.md — adapt to the task/stack). EACH step builds exactly ONE file and MUST carry a \"file\" field with its path. Order foundations first. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short project name\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\",\"file\":\"path\"}]}"
+      ? (ctx.prevProj
+        ? "You are Firas Agent's ARCHITECT EVOLVING an EXISTING multi-file project (its files are listed in the user message). Plan ONLY the files that must be UPDATED or newly ADDED to satisfy the new request (1-6 steps) — never re-plan files that don't change. EACH step = ONE file with a \"file\" field. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short task title\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\",\"file\":\"path\"}]}"
+        : "You are Firas Agent's ARCHITECT planning a MULTI-FILE PROJECT (a real folder the user downloads). Design a clean professional file structure of 3-14 files (e.g. index.html, css/styles.css, js/app.js, README.md — adapt to the task/stack; a big app warrants more files split by concern). MULTI-PAGE sites are welcome when they fit the task (about.html, products.html…). For a NON-WEB stack (Python tool/bot/API, Node server…) plan a proper runnable project instead: entry module, clean helper modules, requirements.txt or package.json, and README.md with run instructions. EACH step builds exactly ONE file and MUST carry a \"file\" field with its path. Order foundations first. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short project name\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\",\"file\":\"path\"}]}")
       : run.mode === "codefile"
-      ? "You are Firas Agent's ARCHITECT planning ONE COMPLETE single-file build, produced in SECTIONS so the final file is far larger and richer than a one-shot answer. Split into 3-7 steps (foundation & layout → each major section/feature → styling polish → JavaScript interactivity). Return ONLY valid JSON, titles in the user's language: {\"title\":\"…\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\"}]}"
-      : "You are Firas Agent's PLANNER. Decompose the user's task into 3-8 CONCRETE, executable steps that together produce the COMPLETE deliverable (each step = one chunk of real content, e.g. one chapter/section/part — not vague activities). If a step genuinely needs fresh web facts, set its kind to \"research\". Kinds: research | write | solve | draw | code. Return ONLY valid JSON, in the user's language: {\"title\":\"short task title\",\"steps\":[{\"title\":\"…\",\"kind\":\"…\"}]}";
+      ? "You are Firas Agent's ARCHITECT planning ONE COMPLETE single-file build, produced in SECTIONS that MERGE into a final file far larger and richer than any one-shot answer. SCALE the section count to the ambition: a small widget = 3-4 sections; a normal single-page app = 5-8 sections; a large, feature-rich single file = 9-12 sections. Order them: foundation & document skeleton → shared design tokens/base styles → EACH major section or feature as its own step → full styling/responsive polish → ALL JavaScript interactivity & state (split JS into 2-3 steps when the app is large). Never collapse a rich app into a few sections. Return ONLY valid JSON, titles in the user's language: {\"title\":\"…\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\"}]}"
+      : run._deck
+      ? "You are Firas Agent's KEYNOTE DIRECTOR planning a PRESENTATION (a slide deck the user downloads as PowerPoint). Structure the talk as 3-6 STEPS, each a coherent SECTION of the presentation (e.g. 'المقدمة والسياق', 'المفهوم الأساسي', 'التطبيقات', 'الخلاصة والتوصيات') that will each produce several slides. Order it as a compelling narrative: hook/agenda → build-up sections → takeaways/close. Every step kind is 'write'. Return ONLY valid JSON, titles in the user's language: {\"title\":\"deck title\",\"steps\":[{\"title\":\"…\",\"kind\":\"write\"}]}"
+      : "You are Firas Agent's MASTER PLANNER for a rich non-code deliverable (course, booklet, chapter set, research report, exam/worksheet, essay, study guide, or answer to a hard question). First silently identify the SUBJECT (math | physics/chem/science | writing EN/AR | exam/quiz | general knowledge). SIZE the task: a small ask = 3-4 steps; a normal deliverable = 5-9 steps; a LARGE one (a full course/booklet/multi-topic report, or an exam with many questions) = 10-16 steps — scale to the real scope, NEVER cram a big syllabus into a few steps. Design a COHERENT ARCHITECTURE before content: a course/booklet is ordered pedagogically (concept & theory → fully worked examples → practice problems → a dedicated ANSWER KEY / solutions step); an exam/worksheet makes question groups their own steps PLUS a separate detailed model-answer step; research is ordered (scope & key questions → evidence-gathering research steps → analysis → synthesis with citations). Every step = ONE substantial chunk of REAL content (a specific chapter, a named set of worked examples, questions 1-10) — never a vague activity like 'introduction' or 'explain the topic'. Choose each step's kind to match the work: research (needs fresh web facts) | solve (math/quantitative derivation) | draw (a figure/graph/diagram) | write (prose/answers/explanation) | code. Prefer 'solve' for anything with equations and 'draw' for anything that benefits from a figure. If this is an exam/worksheet/quiz, the FINAL step MUST be a complete ANSWER KEY with worked solutions. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short task title\",\"steps\":[{\"title\":\"…\",\"kind\":\"…\"}]}";
   let plan = null;
   try {
     const raw = await agentCall([
       { role: "system", content: plannerSysTxt },
-      { role: "user", content: task.slice(0, 4000) },
-    ], "pro", signal);
+      { role: "user", content: taskCtx.slice(0, 5500) + (ctx.prevProj ? "\n\nEXISTING PROJECT FILES:\n" + ctx.prevProj.files.map((f) => "- " + f.path + " (" + (f.content || "").length + " chars)").join("\n") : "") },
+    ], "max", signal);
     const jm = raw.match(/\{[\s\S]*\}/);
     plan = jm ? JSON.parse(jm[0]) : null;
   } catch (_) { plan = null; }
@@ -8617,38 +9893,78 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
     plan = { title: task.slice(0, 60), steps: [{ title: ar ? "تنفيذ المهمة كاملة" : "Execute the full task", kind: run.mode === "project" || run.mode === "codefile" ? "code" : "write", file: run.mode === "project" ? "index.html" : "" }] };
   }
   run.title = String(plan.title || "").slice(0, 120);
-  run.steps = plan.steps.slice(0, 8).map((s) => ({
+  const MAX_STEPS = run.mode === "project" ? 14 : run.mode === "codefile" ? 12 : (run._mega ? 24 : 16);
+  run.steps = plan.steps.slice(0, MAX_STEPS).map((s) => ({
     title: String(s.title || "").slice(0, 160),
-    kind: /^(research|solve|draw|code)$/.test(s.kind) ? s.kind : (run.mode === "project" || run.mode === "codefile" ? "code" : "write"),
+    kind: /^(research|solve|draw|write|code)$/.test(s.kind) ? s.kind : (run.mode === "project" || run.mode === "codefile" ? "code" : "write"),
     file: run.mode === "project" ? String(s.file || "").replace(/[^\w./-]+/g, "-").replace(/^[/.]+/, "").slice(0, 80) : "",
     s: "todo", out: "",
   }));
-  if (run.mode === "project") run.steps = run.steps.filter((s) => s.file).slice(0, 6);
+  if (run.mode === "project") run.steps = run.steps.filter((s) => s.file).slice(0, 14);
   if (!run.steps.length) run.steps = [{ title: ar ? "تنفيذ المهمة" : "Execute the task", kind: "code", file: "index.html", s: "todo", out: "" }];
+  // DESIGN-FIRST: builds get a design-system step BEFORE any file — palette, typography,
+  // components, sections, data model — so every file follows ONE professional design.
+  if ((run.mode === "project" && !ctx.prevProj) || (run.mode === "codefile" && !ctx.prevCode)) {
+    run.steps.unshift({ title: ar ? "تصميم النظام والهوية البصرية" : "Design system & visual identity", kind: "design", file: "", s: "todo", out: "" });
+  }
   run.phase = "run";
   sync(true);
+  }
+  // A DECK gets real web photos up front (doc mode has no design step) → slides can embed them.
+  if (run._deck && !run._images && !signal.aborted) {
+    try { run._images = await agentGatherImages(task, "", signal); run.stats.images = (run._images || []).length; } catch (_) {}
+  }
   // 2) EXECUTE — step by step, each sees the plan + summaries of what's done
   const planList = run.steps.map((s, i) => (i + 1) + ". " + s.title).join("\n");
-  const stepTier = (k) => (k === "code" ? "ultra" : "pro");
+  const stepTier = () => "max";   // the Agent runs EVERYTHING on Max — its permanent engine
   const prevOutline = () => run.steps.filter((s) => s.s === "done").map((s, i) => "— " + s.title + ":\n" + s.out.slice(0, 1400)).join("\n\n").slice(0, 11000);
-  for (let i = 0; i < run.steps.length; i++) {
-    if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+  // Build ONE step (prompts → model → store). Shared by the sequential and PARALLEL schedulers.
+  const buildStep = async (i) => {
     const st = run.steps[i];
+    if (st.s === "done") { if (st.kind === "design" && st.out) run._design = st.out; return; }   // resume: keep completed work
+    if (signal.aborted) return;
     st.s = "run"; sync(false);
     let searchCtx = "";
-    if (st.kind === "research") searchCtx = await agentWebSearch(st.title + " " + task.slice(0, 120));
+    if (st.kind === "research") { searchCtx = await agentWebSearch(st.title + " " + task.slice(0, 120)); if (searchCtx) run.stats.searches++; }
     let sysTxt, usrTxt;
-    if (run.mode === "project") {
+    const isWebFile = run.mode === "project" ? /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(st.file || "") : /html|css|react|vue|svelte/i.test((codeSpec && codeSpec.lang) || "html");
+    const SIZE_MANDATE = isWebFile ? SIZE_MANDATE_WEB : SIZE_MANDATE_CODE;
+    const designSpec = run._design ? "\n\nDESIGN SYSTEM (follow it EXACTLY in every file):\n" + run._design.slice(0, 5000) : "";
+    const imgSpec = (run._images && run._images.length) ? "\n\nREAL PHOTO URLS — use these EXACT https URLs for the hero and section/card photos where the design calls for imagery (they are real, relevant, reliable). Give each <img> width+height+object-fit:cover and an onerror hide; do NOT invent other image paths:\n" + run._images.map((u, i) => (i + 1) + ". " + u).join("\n") : "";
+    if (st.kind === "design") {
+      sysTxt = "You are Firas Agent's ART DIRECTOR + PRODUCT DESIGNER. Produce a COMPACT but complete DESIGN & PRODUCT SPEC the build will follow exactly: 1) visual identity (palette with hex values, typography pairing, spacing scale, border-radius/shadow style, animation personality), 2) full list of pages/sections with what each contains, 3) reusable components (buttons, cards, nav, forms…) with their look, 4) data model / interactive behaviors, 5) the image/asset strategy PER SECTION obeying the VISUAL POLICY. Make it DISTINCTIVE and premium — not a generic bootstrap look. Concise bullet spec, no code, no preamble." + VISUAL_POLICY + langRule;
+      usrTxt = "THE TASK:\n" + task.slice(0, 3000) + "\n\nPLANNED FILES:\n" + run.steps.filter((s) => s.file).map((s) => "- " + s.file + " — " + s.title).join("\n");
+    } else if (run.mode === "project") {
       const built = run.steps.filter((s) => s.s === "done" && s.file).map((s) => "===== " + s.file + " (already built) =====\n" + stripToCode(s.out).slice(0, 1800)).join("\n\n").slice(0, 10000);
-      sysTxt = "You are Firas Agent building ONE FILE of a professional multi-file project. Output ONLY the COMPLETE, FINAL content of the file `" + st.file + "` in ONE fenced code block — no commentary, no omissions, never stop mid-file. PRODUCTION-GRADE and thorough; stay perfectly CONSISTENT with the other files (ids, classes, imports, paths). User-facing text in the interface must be in the user's language.";
-      usrTxt = "THE TASK:\n" + task.slice(0, 3000) + "\n\nPROJECT FILES (plan):\n" + run.steps.map((s) => "- " + s.file + " — " + s.title).join("\n") + (built ? "\n\nFILES ALREADY BUILT:\n" + built : "") + "\n\nBUILD THIS FILE NOW, COMPLETE: " + st.file;
+      sysTxt = "You are Firas Agent building ONE FILE of a professional multi-file project. Output ONLY the COMPLETE, FINAL content of the file `" + st.file + "` in ONE fenced code block — no commentary, no omissions, never stop mid-file. PRODUCTION-GRADE; stay perfectly CONSISTENT with the design system and the other files (ids, classes, imports, paths)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "") + " User-facing text in the interface must be in the user's language.";
+      const prevFile = ctx.prevProj ? (ctx.prevProj.files.find((x) => x.path === st.file) || null) : null;
+      const siblings = run.steps.filter((s) => s.s === "done" && s.file && s.file !== st.file && s.kind !== "design").map((s) => { const c = stripToCode(s.out); const ids = [...c.matchAll(/id=["']([\w-]+)["']/g)].map((m) => m[1]); const cls = [...c.matchAll(/class=["']([^"']+)["']/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean); const fns = [...c.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]); return "• " + s.file + " → ids[" + [...new Set(ids)].slice(0, 40).join(",") + "] classes[" + [...new Set(cls)].slice(0, 60).join(",") + "] symbols[" + [...new Set(fns)].slice(0, 40).join(",") + "]"; }).join("\n").slice(0, 4000);
+      usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + designSpec + (/\.html?$/i.test(st.file || "") ? imgSpec : "") + "\n\nPROJECT FILES (plan):\n" + run.steps.filter((s) => s.file).map((s) => "- " + s.file + " — " + s.title).join("\n") + (built ? "\n\nFILES ALREADY BUILT:\n" + built : "") + (siblings ? "\n\nCROSS-FILE CONTRACT — this file MUST reference these EXACT ids/classes/symbols the sibling files already expose; use them precisely, and only ADD new ones, never rename an existing shared one:\n" + siblings : "") + (prevFile ? "\n\nCURRENT VERSION OF `" + st.file + "` (EVOLVE it — apply the new request, keep everything that should stay):\n" + String(prevFile.content || "").slice(0, 22000) : "") + "\n\nBUILD THIS FILE NOW, COMPLETE: " + st.file;
     } else if (run.mode === "codefile") {
       const built = prevOutline();
-      sysTxt = "You are Firas Agent building ONE SECTION of a single-file deliverable (all sections get merged into ONE complete file at the end). Output ONLY this section's code in ONE fenced code block — thorough, production-grade, consistent with the sections already built (same ids/classes/design system). No commentary.";
-      usrTxt = "THE TASK:\n" + task.slice(0, 3000) + "\n\nFULL PLAN:\n" + planList + (built ? "\n\nSECTIONS ALREADY BUILT (stay consistent — do not repeat):\n" + built : "") + "\n\nBUILD SECTION " + (i + 1) + " NOW: " + st.title;
+      sysTxt = "You are Firas Agent building ONE SECTION of a single-file deliverable (all sections get merged into ONE complete file at the end). Output ONLY this section's code in ONE fenced code block — consistent with the design system and the sections already built (same ids/classes)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "");
+      usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + designSpec + imgSpec + (ctx.prevCode ? "\n\nTHE CURRENT FILE BEING EVOLVED (head):\n" + ctx.prevCode.slice(0, 8000) : "") + "\n\nFULL PLAN:\n" + planList + (built ? "\n\nSECTIONS ALREADY BUILT (stay consistent — do not repeat):\n" + built : "") + "\n\nBUILD SECTION " + (i + 1) + " NOW: " + st.title;
+    } else if (run._deck) {
+      // ④ DECK author — this step writes the SLIDES for one section, in the exact markdown the PPTX
+      // engine parses: a '## Section' divider, then '### Slide' + 3-5 short bullets, optional one
+      // ![alt](url) image from the provided photos, and a 'Notes:' presenter line per slide.
+      const imgList = (run._images && run._images.length) ? "\n\nREAL PHOTO URLS you MAY place on slides (one per slide max, only where it fits; never invent others):\n" + run._images.map((u, k) => (k + 1) + ". " + u).join("\n") : "";
+      sysTxt = "You are an ELITE keynote presentation designer (Apple/TED level) writing ONE SECTION of a larger deck. Output ONLY Markdown slides in EXACTLY this format:\n" +
+        "• Start with '## " + (st.title || "Section") + "' ALONE on its line — it becomes a full-screen SECTION DIVIDER.\n" +
+        "• Then 2-4 slides, each '### Slide Title' + 3-5 SHORT punchy bullets (≤10 words each — headlines, not paragraphs).\n" +
+        "• On slides that benefit from a visual AND a photo URL is provided, put ONE image on its own line right under the title: ![short alt](URL). Never invent a URL.\n" +
+        "• When a slide presents NUMBERS/statistics/comparisons/trends, add ONE line: Chart: {\"type\":\"bar|line|doughnut\",\"title\":\"…\",\"labels\":[\"…\"],\"data\":[numbers]} — it renders as an ANIMATED professional chart (and a real chart in PowerPoint). Use REAL plausible values; 1-3 chart slides per deck. A slide has a chart OR an image, never both.\n" +
+        "• Add a 'Notes: <1-2 sentences the speaker says>' line to most slides — becomes hidden PowerPoint speaker notes.\n" +
+        "Make the bullets specific and insightful, never filler. No preamble, no metadata, ONLY the slides." + AGENT_QUALITY.replace(/ FORMATTING:[\s\S]*$/, "") + langRule;
+      usrTxt = "PRESENTATION TOPIC:\n" + taskCtx.slice(0, 3500) + "\n\nFULL DECK OUTLINE:\n" + planList + imgList + (prevOutline() ? "\n\nSECTIONS ALREADY WRITTEN (do not repeat their slides):\n" + prevOutline() : "") + "\n\nWRITE THE SLIDES FOR THIS SECTION NOW: " + st.title;
     } else {
-      sysTxt = "You are Firas Agent EXECUTING ONE STEP of a bigger plan. Produce the COMPLETE, final content for THIS step only — it will be assembled with the other steps into the deliverable." + AGENT_QUALITY + langRule;
-      usrTxt = "THE TASK:\n" + task.slice(0, 3000) + "\n\nFULL PLAN:\n" + planList + (prevOutline() ? "\n\nALREADY COMPLETED (context — do not repeat):\n" + prevOutline() : "") + (searchCtx ? "\n\nFRESH WEB RESULTS (cite [1][2] where used):\n" + searchCtx : "") + "\n\nEXECUTE STEP " + (i + 1) + " NOW: " + st.title;
+      let dom = domainOf(st.title + " " + task);
+      if (dom === "knowledge" && st.kind === "solve") dom = "math";
+      else if (dom === "knowledge" && st.kind === "draw") dom = "science";
+      st.dom = dom;
+      const MEGA_MANDATE = run._mega ? " MEGA-BOOK CHAPTER: this is one chapter of a very large reference book — write it EXTREMELY long and complete (aim for 3500-5000+ words of real content: full explanations, many worked examples, tables, subsections). Never compress; length is a requirement." : "";
+      sysTxt = "You are Firas Agent EXECUTING ONE STEP of a bigger plan. Produce the COMPLETE, final content for THIS step only — it will be assembled with the other steps into the deliverable." + AGENT_QUALITY + DEPTH_MANDATE + MEGA_MANDATE + (DOMAIN_GUIDE[dom] || "") + langRule;
+      usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + "\n\nFULL PLAN:\n" + planList + (prevOutline() ? "\n\nALREADY COMPLETED (context — do not repeat):\n" + prevOutline() : "") + (searchCtx ? "\n\nFRESH WEB RESULTS (cite [1][2] where used):\n" + searchCtx : "") + "\n\nEXECUTE STEP " + (i + 1) + " NOW: " + st.title;
     }
     try {
       st.out = await agentCall([
@@ -8656,20 +9972,55 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
         { role: "user", content: usrTxt },
       ], stepTier(st.kind), signal);
       st.s = "done";
+      if (st.kind === "design") {
+        run._design = st.out;   // every later file follows this spec
+        // Right after design (before any file), gather REAL topic photos for a WEB build.
+        const webBuild = run.mode === "project" ? run.steps.some((s) => /\.html?$/i.test(s.file || "")) : /html|css|react|vue|svelte/i.test((codeSpec && codeSpec.lang) || "html");
+        if (webBuild && !run._images && !signal.aborted) {
+          run._images = await agentGatherImages(task, run._design, signal);
+          run.stats.images = run._images.length;
+        }
+      }
     } catch (e) {
-      if (signal.aborted) { st.s = "todo"; run.phase = "stopped"; sync(true); return run; }
+      if (signal.aborted) { st.s = "todo"; return; }
       st.s = "fail"; st.out = "";
     }
     sync(true);
+  };
+  // 2b) SCHEDULER — a PROJECT builds its files IN PARALLEL (foundation .html first to fix the shared
+  // ids/classes contract, then the rest 3-at-a-time) → ~2-3× faster. Other modes stay sequential
+  // (their steps genuinely depend on each other in order).
+  const fileSteps = run.steps.map((s, i) => ({ s, i })).filter((x) => x.s.file && x.s.kind !== "design");
+  if (run.mode === "project" && fileSteps.length >= 3) {
+    const foundationI = (fileSteps.find((x) => /\.html?$/i.test(x.s.file)) || fileSteps[0]).i;
+    // prerequisites first: design + research + the foundation file (sequential)
+    for (let i = 0; i < run.steps.length; i++) {
+      const st = run.steps[i];
+      if (st.kind === "design" || st.kind === "research" || i === foundationI) {
+        await buildStep(i);
+        if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+      }
+    }
+    // the remaining files — concurrently (each sees the design + the foundation file)
+    const rest = fileSteps.map((x) => x.i).filter((i) => i !== foundationI && run.steps[i].s !== "done");
+    let p = 0; const CONC = 3;
+    const worker = async () => { while (p < rest.length && !signal.aborted) { await buildStep(rest[p++]); } };
+    await Promise.all(Array.from({ length: Math.min(CONC, rest.length) }, () => worker()));
+    if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+  } else {
+    for (let i = 0; i < run.steps.length; i++) {
+      if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+      await buildStep(i);
+    }
   }
   // 3) SELF-REVIEW — catch broken LaTeX / lazy or missing content, re-run flagged steps once
   if (!signal.aborted && run.steps.some((s) => s.s === "done")) {
     run.phase = "verify"; sync(false);
     try {
       const rev = await agentCall([
-        { role: "system", content: "You are Firas Agent's strict REVIEWER. Inspect the step outputs against the task: flag any step that is INCOMPLETE, lazy, off-task, or contains INVALID/unbalanced LaTeX or a broken ```plot/```tikz block. Return ONLY JSON: {\"ok\":true} or {\"redo\":[stepNumbers],\"notes\":\"precise fixes\"}." },
+        { role: "system", content: "You are Firas Agent's strict REVIEWER. Judge the step outputs against the task on TWO axes. (1) CORRECTNESS: spot-check the key derivation steps and the final result — is the math right? Are units, significant figures and dimensional analysis correct? Do chemical equations balance and physical laws apply correctly? For an exam/quiz, is every question answerable and is a COMPLETE answer key present? (2) COMPLETENESS & VALIDITY: flag any step that is incomplete, lazy, stubbed, off-task, or has unbalanced/invalid KaTeX or a broken ```plot/```tikz block. Return ONLY JSON: {\"ok\":true} or {\"redo\":[stepNumbers],\"notes\":\"precise, specific fixes incl. any wrong values\"}." },
         { role: "user", content: "TASK:\n" + task.slice(0, 1500) + "\n\n" + run.steps.map((s, i) => "STEP " + (i + 1) + " (" + s.title + "):\n" + s.out.slice(0, 2500)).join("\n\n---\n\n") },
-      ], "pro", signal);
+      ], "max", signal);
       const jm = rev.match(/\{[\s\S]*\}/);
       const verdict = jm ? JSON.parse(jm[0]) : { ok: true };
       const redo = (!verdict.ok && Array.isArray(verdict.redo)) ? verdict.redo.slice(0, 3) : [];
@@ -8677,11 +10028,14 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
         const st = run.steps[n - 1];
         if (!st || signal.aborted) continue;
         st.s = "run"; sync(false);
+        const prev = st.out;
         try {
-          st.out = await agentCall([
-            { role: "system", content: "You are Firas Agent REDOING one step after review." + AGENT_QUALITY + langRule },
-            { role: "user", content: "THE TASK:\n" + task.slice(0, 3000) + "\n\nREVIEWER'S FIXES TO APPLY:\n" + String(verdict.notes || "").slice(0, 1500) + "\n\nREDO STEP " + n + " COMPLETELY: " + st.title + "\n\nPREVIOUS (flawed) OUTPUT:\n" + st.out.slice(0, 5000) },
+          const redone = await agentCall([
+            { role: "system", content: "You are Firas Agent REDOING one step after review." + AGENT_QUALITY + (DOMAIN_GUIDE[st.dom] || "") + langRule },
+            { role: "user", content: "THE TASK:\n" + task.slice(0, 3000) + "\n\nREVIEWER'S FIXES TO APPLY:\n" + String(verdict.notes || "").slice(0, 1500) + "\n\nREDO STEP " + n + " COMPLETELY: " + st.title + "\n\nPREVIOUS (flawed) OUTPUT:\n" + prev.slice(0, 5000) },
           ], stepTier(st.kind), signal);
+          // take the redo only if it isn't a regression (≥60% of prior length, or prior was a stub)
+          if (redone && (redone.length >= prev.length * 0.6 || prev.length < 400)) st.out = redone;
           st.s = "done";
         } catch (_) { st.s = st.out ? "done" : "fail"; }
         sync(true);
@@ -8695,33 +10049,322 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
     st.s = "run"; sync(false);
     try {
       st.out = await agentCall([
-        { role: "system", content: "You are Firas Agent." + AGENT_QUALITY + langRule },
+        { role: "system", content: "You are Firas Agent." + AGENT_QUALITY + (DOMAIN_GUIDE[st.dom] || "") + langRule },
         { role: "user", content: "TASK:\n" + task.slice(0, 3000) + "\n\nEXECUTE THIS PART COMPLETELY: " + st.title },
-      ], "pro", signal);
+      ], "max", signal);
       st.s = "done";
     } catch (_) { st.s = "fail"; }
     sync(true);
   }
-  // 4) ASSEMBLE — merge sections into ONE polished file / collect the project's files
-  if (run.mode === "codefile" && !signal.aborted && run.steps.some((s) => s.s === "done")) {
+  // 3b) INDEPENDENT MATH CHECK — for solve/math/science steps, a SECOND independent derivation
+  // compares results and replaces the step when it catches a real error (adversarial verification).
+  if ((run.mode === "answer" || run.mode === "doc") && !signal.aborted) {
+    const toCheck = run.steps.filter((s) => s.s === "done" && s.out && (s.kind === "solve" || s.dom === "math" || s.dom === "science")).slice(0, 4);
+    if (toCheck.length) {
+      run.phase = "verify"; sync(false);
+      for (const st of toCheck) {
+        if (signal.aborted) break;
+        try {
+          const check = await agentCall([
+            { role: "system", content: "You are Firas Agent's independent MATH/SCIENCE CHECKER. FIRST re-derive the final result(s) of the given solution yourself, from scratch. THEN compare with the solution. If its final results and key steps are correct, reply with exactly: OK. If ANYTHING is wrong (a value, a sign, units, a skipped condition), reply with the FULL corrected solution — complete, same structure and language, valid KaTeX — and nothing else." },
+            { role: "user", content: "TASK CONTEXT:\n" + task.slice(0, 1200) + "\n\nSTEP: " + st.title + "\n\nSOLUTION TO CHECK:\n" + st.out.slice(0, 9000) },
+          ], "max", signal);
+          run.stats.checks++;
+          const v = (check || "").trim();
+          if (v && v.toUpperCase() !== "OK" && v.length >= st.out.length * 0.5) { st.out = v; sync(true); }
+        } catch (_) { /* checker is best-effort */ }
+      }
+    }
+  }
+  // 3c) ENRICH thin non-code steps — the same superpower the code path has: any step that came back
+  // thin gets rewritten substantially deeper (courses/booklets/reports gain real mass here).
+  if ((run.mode === "answer" || run.mode === "doc") && !signal.aborted) {
+    const thin = run.steps.filter((s) => s.s === "done" && s.out && s.out.length < 2500).slice(0, 4);
+    if (thin.length) {
+      run.phase = "enhance"; sync(false);
+      for (const st of thin) {
+        if (signal.aborted) break;
+        st.s = "run"; sync(false);
+        try {
+          const richer = await agentCall([
+            { role: "system", content: "You are Firas Agent EXPANDING a step whose output is too thin for the quality bar. Rewrite it substantially DEEPER and more complete — a full specialist section (more worked detail, more examples, more precision), keeping everything that was correct." + AGENT_QUALITY + DEPTH_MANDATE + (DOMAIN_GUIDE[st.dom] || "") + langRule },
+            { role: "user", content: "THE TASK:\n" + task.slice(0, 1500) + "\n\nSTEP: " + st.title + "\n\nCURRENT (too thin) OUTPUT:\n" + st.out + "\n\nREWRITE IT NOW, substantially deeper." },
+          ], "max", signal);
+          if (richer && richer.length > st.out.length) st.out = richer;
+        } catch (_) { /* keep the original */ }
+        st.s = "done"; sync(true);
+      }
+    }
+  }
+  // 4) ENHANCE — the agent's superpower over a one-shot chat: reopen EVERY built file and make
+  // it dramatically richer and more polished (ultra tier), keeping full consistency.
+  const ENHANCE_SYS = "You are Firas Agent's PRINCIPAL ENGINEER doing the final polish pass on a file that already works. Your job is to make it dramatically richer and more premium WITHOUT breaking or shrinking it. Rules: (1) OUTPUT A SUPERSET — the new file must contain everything the current one does, improved; never delete a feature, function, section, or piece of real content, and never truncate or stop mid-file. (2) PRESERVE EVERY PUBLIC CONTRACT — keep every id, class name, function name, exported symbol, route, and API shape byte-identical so sibling files keep working; follow the design system exactly. (3) ADD REAL DEPTH — expand thin sections with genuine content, refine spacing/typography, add tasteful animations and micro-interactions, handle edge cases and errors, and improve accessibility (labels, roles, focus, contrast). No lorem, no TODO, no placeholders. (4) VERIFY — before finishing, mentally trace the file end-to-end and confirm it is syntactically valid and behaves correctly. Output ONLY the complete, final file in ONE fenced code block, nothing else." + VISUAL_POLICY;
+  if (run.mode === "project" && !signal.aborted) {
+    run.phase = "enhance"; sync(false);
+    for (const st of run.steps) {
+      if (signal.aborted) break;
+      if (st.s !== "done" || !st.file || st.kind === "design" || /\.(md|txt|json)$/i.test(st.file)) continue;
+      const cur = stripToCode(st.out);
+      const lang = (st.file.split(".").pop() || "").toLowerCase();
+      const langN = lang === "htm" ? "html" : lang;
+      const looksComplete = codeLooksComplete(cur, langN);
+      const thin = cur.length < 1200 || /\bTODO\b|\bFIXME\b|placeholder(?!\s*[:=])|lorem ipsum|\/\* *\.\.\. *\*\//i.test(cur);
+      if (looksComplete && !thin) continue;   // already good → don't waste a call / don't risk regressing a working file
+      st.s = "run"; sync(false);
+      try {
+        const siblings = run.steps.filter((s) => s.s === "done" && s.file && s.file !== st.file && s.kind !== "design").map((s) => { const c = stripToCode(s.out); const ids = [...c.matchAll(/id=["']([\w-]+)["']/g)].map((m) => m[1]); const cls = [...c.matchAll(/class=["']([^"']+)["']/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean); const fns = [...c.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]); return "• " + s.file + " → ids[" + [...new Set(ids)].slice(0, 40).join(",") + "] classes[" + [...new Set(cls)].slice(0, 60).join(",") + "] symbols[" + [...new Set(fns)].slice(0, 40).join(",") + "]"; }).join("\n").slice(0, 4000);
+        const sys = (!looksComplete)
+          ? "You are Firas Agent COMPLETING a file that was cut off. Output the ENTIRE finished file in ONE fenced code block, keeping all existing ids/classes/APIs, adding only what is missing to make it whole. Never stop mid-file."
+          : ENHANCE_SYS;
+        const enhanced = await agentCall([
+          { role: "system", content: sys },
+          { role: "user", content: "THE TASK:\n" + task.slice(0, 1500) + (run._design ? "\n\nDESIGN SYSTEM:\n" + run._design.slice(0, 4000) : "") + (siblings ? "\n\nCROSS-FILE CONTRACT — the OTHER files depend on these EXACT ids/classes/symbols; preserve every id/class/selector/function this file already shares with them, only ADD, never rename:\n" + siblings : "") + "\n\nFILE `" + st.file + "` — CURRENT VERSION:\n" + cur.slice(0, 30000) + "\n\nFINISH/ENRICH IT NOW (complete file)." },
+        ], "max", signal);
+        const code = stripToCode(enhanced);
+        // accept only if it plausibly contains the whole file AND is itself complete (guards lazy/truncated rewrites)
+        if (code.length >= cur.length * 0.7 && codeLooksComplete(code, langN)) st.out = "```\n" + code + "\n```";
+      } catch (_) { /* keep the original */ }
+      st.s = "done"; sync(true);
+    }
+  }
+  // 5) ASSEMBLE — merge sections into ONE polished file / collect the project's files
+  if (run.mode === "codefile" && !signal.aborted && run.steps.some((s) => s.s === "done" && s.kind !== "design")) {
     run.phase = "assemble"; sync(false);
     try {
       const merged = await agentCall([
-        { role: "system", content: "You are Firas Agent's INTEGRATOR. Merge the section outputs into ONE complete, coherent, production-quality file. Include EVERYTHING from every section (deduplicate overlapping boilerplate, unify the design system), fix any inconsistency, and output ONLY the final file in ONE fenced code block — no commentary, never stop mid-file." },
-        { role: "user", content: "THE TASK:\n" + task.slice(0, 2000) + "\n\nSECTIONS TO MERGE:\n" + run.steps.filter((s) => s.s === "done").map((s, i) => "===== SECTION " + (i + 1) + ": " + s.title + " =====\n" + stripToCode(s.out)).join("\n\n").slice(0, 90000) },
-      ], "ultra", signal);
+        { role: "system", content: "You are Firas Agent's INTEGRATOR. Merge the section outputs into ONE complete, coherent, production-quality file. Include EVERYTHING from every section (deduplicate overlapping boilerplate, unify the design system), fix any inconsistency, and output ONLY the final file in ONE fenced code block — no commentary, never stop mid-file." + VISUAL_POLICY },
+        { role: "user", content: "THE TASK:\n" + taskCtx.slice(0, 3000) + (run._design ? "\n\nDESIGN SYSTEM (the file must follow it):\n" + run._design.slice(0, 4000) : "") + (ctx.prevCode ? "\n\nCURRENT FILE (the BASE — merge the sections/changes INTO it, keep everything that should stay):\n" + ctx.prevCode.slice(0, 40000) : "") + "\n\nSECTIONS TO MERGE:\n" + run.steps.filter((s) => s.s === "done" && s.kind !== "design").map((s, i) => "===== SECTION " + (i + 1) + ": " + s.title + " =====\n" + stripToCode(s.out)).join("\n\n").slice(0, 120000) },
+      ], "max", signal);
+      // Code lang of the deliverable (html unless the task named another language) — so the
+      // completeness check below applies the RIGHT close-rule (</html> vs balanced braces).
+      const codeLang = (codeSpec && codeSpec.lang) || "html";
+      const codeReq = codeSpec || { lang: "html", ext: "html", label: "HTML", filename: "index" };
       run._code = stripToCode(merged);
+      // The integrator input can exceed what the model can echo back (up to ~100KB in, output
+      // capped) — so the merge may STREAM large yet stop mid-file. Length alone can't catch that:
+      // require actual completeness, and if it's cut off, first try the proven continuation
+      // machinery, then fall back to the complete naive concat of the sections.
+      if (run._code.length < 400 || !codeLooksComplete(run._code, codeLang)) {
+        if (run._code.length >= 400 && !signal.aborted) {
+          try {
+            const finished = await autoCompleteCode(run._code, codeReq, [], run.lang, signal, null);
+            if (finished && finished.length >= run._code.length) run._code = finished;
+          } catch (_) { /* fall through to naive concat */ }
+        }
+        if (!codeLooksComplete(run._code, codeLang)) {
+          const naive = run.steps.filter((s) => s.s === "done" && s.kind !== "design").map((s) => stripToCode(s.out)).join("\n\n");
+          if (naive.length > run._code.length) run._code = naive;
+        }
+      }
       if (run._code.length < 400) throw new Error("merge too small");
+      // polish pass on the merged single file too — keep the rewrite ONLY if it's ~as large AND
+      // actually complete, so a truncated "richer" rewrite can never replace a whole file.
+      if (!signal.aborted) {
+        run.phase = "enhance"; sync(false);
+        try {
+          const enhanced = await agentCall([
+            { role: "system", content: ENHANCE_SYS },
+            { role: "user", content: "THE TASK:\n" + task.slice(0, 1500) + "\n\nTHE FILE — CURRENT VERSION:\n" + run._code.slice(0, 120000) + "\n\nREWRITE IT RICHER NOW (complete file)." },
+          ], "max", signal);
+          const code = stripToCode(enhanced);
+          if (code.length >= run._code.length * 0.8 && codeLooksComplete(code, codeLang)) run._code = code;
+        } catch (_) { /* keep merged */ }
+      }
     } catch (_) {
       // integrator failed → naive but complete merge so the user still gets the whole build
-      run._code = run.steps.filter((s) => s.s === "done").map((s) => stripToCode(s.out)).join("\n\n");
+      run._code = run.steps.filter((s) => s.s === "done" && s.kind !== "design").map((s) => stripToCode(s.out)).join("\n\n");
     }
   }
   if (run.mode === "project") {
     run._files = run.steps.filter((s) => s.s === "done" && s.file && s.out).map((s) => ({ path: s.file, content: stripToCode(s.out) }));
   }
-  // 5) DELIVER
+  // 4b) SELF-TEST & FIX LOOP — the agent's QA lab. Each round it: RUNS the app (runtime errors on
+  // EVERY page), CLICKS through it like a real user (interaction errors + dead buttons), LOOKS at it
+  // (visual defects), and LINTS it deterministically (broken links/ids/references). Then it fixes the
+  // exact findings and RE-TESTS — up to 3 rounds, delivering only when clean (or rounds exhausted).
+  if (!signal.aborted && typeof testHtmlInSandbox === "function") {
+    try {
+      const isWebDeliverable = (run.mode === "codefile" && run._code && /<\s*(!doctype|html|body|script)/i.test(run._code)) ||
+        (run.mode === "project" && run._files && run._files.length && run._files.some((f) => /\.html?$/i.test(f.path)));
+      if (isWebDeliverable) {
+        run.phase = "test"; sync(false);
+        const applyFix = (tf, fixed, statKey) => {
+          const fx = stripToCode(fixed);
+          const vLang = tf ? (tf.path.split(".").pop() || "").toLowerCase() : "html";
+          if (tf) {
+            if (fx.length >= tf.content.length * 0.8 && codeLooksComplete(fx, vLang === "htm" ? "html" : vLang)) {
+              tf.content = fx; run.stats[statKey]++;
+              const stX = run.steps.find((s) => s.file === tf.path);
+              if (stX) stX.out = "```\n" + fx + "\n```";
+              return true;
+            }
+          } else if (fx.length >= run._code.length * 0.8 && codeLooksComplete(fx, "html")) { run._code = fx; run.stats[statKey]++; return true; }
+          return false;
+        };
+        for (let round = 0; round < 3 && !signal.aborted; round++) {
+          // ── GATHER every kind of issue this round ──
+          let runtime = [], interact = [], visual = [], lint = [];
+          if (run.mode === "codefile") {
+            runtime = await testHtmlInSandbox(run._code, 2500);
+            if (!signal.aborted) interact = await interactionTestInSandbox(run._code, 6000);
+            if (!signal.aborted) visual = await visualAuditInSandbox(run._code, 4000);
+            if (!signal.aborted) visual = visual.concat(await visualAuditInSandbox(run._code, 3600, 380));   // mobile pass
+            lint = lintProject([{ path: "index.html", content: run._code }]).filter((x) => !/UNREFERENCED/.test(x));
+          } else {
+            const pages = run._files.filter((f) => /\.html?$/i.test(f.path)).slice(0, 4);
+            for (const pg of pages) {
+              if (signal.aborted) break;
+              const doc = projPreviewHtml({ name: "t", files: run._files }, pg.path);
+              if (!doc) continue;
+              const errs = await testHtmlInSandbox(doc, 2200);
+              errs.forEach((e) => runtime.push("[" + pg.path + "] " + e));
+              const vis = await visualAuditInSandbox(doc, 3600);
+              vis.forEach((v) => visual.push("[" + pg.path + "] " + v));
+              // MOBILE pass — most Arabic users browse on phones; catch 380px overflow/overlap too.
+              if (!signal.aborted) {
+                const visM = await visualAuditInSandbox(doc, 3200, 380);
+                visM.forEach((v) => visual.push("[" + pg.path + "] " + v));
+              }
+            }
+            if (!signal.aborted) {
+              const idxDoc = projPreviewHtml({ name: "t", files: run._files });
+              if (idxDoc) interact = await interactionTestInSandbox(idxDoc, 6000);
+            }
+            lint = lintProject(run._files);
+          }
+          const all = [...runtime, ...interact, ...lint, ...visual];
+          if (!all.length || signal.aborted) break;   // CLEAN → deliver
+          run.stats.checks += all.length;
+          // ── FIX: route the findings to the files that own them ──
+          const FIXER_SYS = (p) => "You are Firas Agent's QA FIXER. The app was RUN, CLICKED THROUGH like a real user, MEASURED visually, and LINTED — the exact findings are listed. Fix EVERY finding this file can fix" + (p ? " (`" + p + "`)" : "") + ": wire dead buttons to REAL working behavior, resolve interaction/runtime errors, repair broken links/ids/references, and correct the visual defects. Surgical changes only — delete no content, keep every id/class/function name so sibling files keep working." + VISUAL_POLICY + " Output the COMPLETE fixed file in ONE fenced code block, never stop mid-file.";
+          const findingsTxt = "QA FINDINGS (round " + (round + 1) + "):\n" + all.slice(0, 18).map((e, i) => (i + 1) + ". " + e).join("\n");
+          if (run.mode === "codefile") {
+            const fixed = await agentCall([
+              { role: "system", content: FIXER_SYS("") },
+              { role: "user", content: findingsTxt + "\n\nTHE FILE:\n" + run._code.slice(0, 120000) },
+            ], "max", signal);
+            if (!applyFix(null, fixed, "fixes")) break;   // fix rejected → avoid a futile loop
+          } else {
+            const htmlF = run._files.find((f) => /(^|\/)index\.html?$/i.test(f.path)) || run._files.find((f) => /\.html?$/i.test(f.path));
+            const cssF = run._files.filter((f) => /\.css$/i.test(f.path)).sort((a, b) => b.content.length - a.content.length)[0];
+            const jsF = run._files.filter((f) => /\.m?js$/i.test(f.path)).sort((a, b) => b.content.length - a.content.length)[0];
+            const targets = [];
+            if ([...runtime, ...interact].length && jsF) targets.push(jsF);
+            // ANY specific HTML page that owns a finding → fix that exact page (multi-page apps).
+            run._files.filter((f) => /\.html?$/i.test(f.path)).forEach((pf) => {
+              if (all.some((v) => v.includes("[" + pf.path + "]") || v.includes(" in " + pf.path)) && !targets.includes(pf)) targets.push(pf);
+            });
+            if ([...lint, ...visual, ...interact].some((v) => /BROKEN IMAGE|BROKEN LINK|MISSING|DEAD ANCHORS|alt attribute|DEAD BUTTON/i.test(v)) && htmlF && !targets.includes(htmlF)) targets.push(htmlF);
+            if (visual.some((v) => /OVERFLOW|OVERLAP/i.test(v))) { const t = cssF || htmlF; if (t && !targets.includes(t)) targets.push(t); }
+            if (!targets.length && htmlF) targets.push(htmlF);
+            let anyApplied = false;
+            for (const tf of targets.slice(0, 3)) {
+              if (signal.aborted) break;
+              const fixed = await agentCall([
+                { role: "system", content: FIXER_SYS(tf.path) },
+                { role: "user", content: findingsTxt + "\n\nPROJECT FILES: " + run._files.map((f) => f.path).join(", ") + (run._design ? "\n\nDESIGN SYSTEM:\n" + run._design.slice(0, 2000) : "") + "\n\nTHE FILE `" + tf.path + "`:\n" + tf.content.slice(0, 60000) },
+              ], "max", signal);
+              if (applyFix(tf, fixed, /OVERFLOW|OVERLAP|BROKEN IMAGE/.test(findingsTxt) && tf === cssF ? "visual" : "fixes")) anyApplied = true;
+            }
+            if (!anyApplied) break;   // nothing landed → avoid a futile loop
+          }
+          sync(true);
+        }
+      }
+    } catch (_) { /* self-test is best-effort — never blocks delivery */ }
+  }
+  // 4b-py) RUN PYTHON — the agent actually EXECUTES the Python it wrote (Pyodide, stdlib-only) and
+  // fixes real tracebacks. Loop ≤2 rounds. Applies to a single .py codefile or the entry .py of a project.
+  if (!signal.aborted && typeof runPythonInSandbox === "function") {
+    try {
+      const isPyCodefile = run.mode === "codefile" && run._code && (/python/i.test((codeSpec && codeSpec.lang) || "") || /\.py$/i.test((codeSpec && ("x." + codeSpec.ext)) || "") || (/^\s*(?:import |from |def |print\(|class )/m.test(run._code) && !/<html|<!doctype/i.test(run._code)));
+      const pyFile = run.mode === "project" && run._files ? (run._files.find((f) => /(^|\/)(main|app|run|__main__)\.py$/i.test(f.path)) || run._files.find((f) => /\.py$/i.test(f.path))) : null;
+      const getPy = () => isPyCodefile ? run._code : (pyFile ? pyFile.content : null);
+      const setPy = (v) => { if (isPyCodefile) run._code = v; else if (pyFile) { pyFile.content = v; const s = run.steps.find((s) => s.file === pyFile.path); if (s) s.out = "```\n" + v + "\n```"; } };
+      if (getPy()) {
+        run.phase = "test"; sync(false);
+        for (let r = 0; r < 2 && !signal.aborted; r++) {
+          const res = await runPythonInSandbox(getPy(), 8000);
+          if (res.skipped || res.ok || !res.err || signal.aborted) break;
+          run.stats.checks++;
+          const fixed = await agentCall([
+            { role: "system", content: "You are Firas Agent's PYTHON DEBUGGER. Your script was RUN and raised the traceback below. Fix EXACTLY that error with minimal surgical changes — keep all working logic, change nothing else. Output the COMPLETE fixed script in ONE fenced code block, never stop mid-file." },
+            { role: "user", content: "TRACEBACK:\n" + res.err + "\n\nTHE SCRIPT:\n" + getPy().slice(0, 60000) },
+          ], "max", signal);
+          const fx = stripToCode(fixed);
+          if (fx.length >= getPy().length * 0.6 && /[)\]:"'\w]\s*$/.test(fx)) { setPy(fx); run.stats.fixes++; } else break;
+          sync(true);
+        }
+      }
+    } catch (_) { /* python run is best-effort */ }
+  }
+  // 4c) FINAL QUALITY GATE — an independent examiner grades the deliverable /10; below 8 the agent
+  // does ONE targeted improvement pass on the weakest part, then re-grades. The badge goes on the report.
+  if (!signal.aborted) {
+    try {
+      const summarize = () => run.mode === "project"
+        ? run._files.map((f) => "===== " + f.path + " =====\n" + String(f.content).slice(0, 1400)).join("\n\n").slice(0, 22000)
+        : run.mode === "codefile"
+        ? String(run._code || "").slice(0, 22000)
+        : run.steps.filter((s) => s.s === "done").map((s, i) => "STEP " + (i + 1) + " (" + s.title + "):\n" + s.out.slice(0, 1600)).join("\n\n").slice(0, 22000);
+      const GRADER_SYS = "You are a HARSH independent EXAMINER grading a finished deliverable against the user's task. Score 1-10 overall (completeness, correctness, depth, polish; for apps: does everything plausibly WORK?). 9-10 = truly exceptional; 8 = solid professional; below 8 = has real weaknesses. Identify the SINGLE weakest part. Return ONLY JSON: {\"score\": n, \"weakest\": \"<file path OR step number>\", \"notes\": \"the specific weaknesses to fix\"}.";
+      const gradeOnce = async () => {
+        const g = await agentCall([
+          { role: "system", content: GRADER_SYS },
+          { role: "user", content: "THE TASK:\n" + task.slice(0, 1500) + "\n\nTHE DELIVERABLE:\n" + summarize() },
+        ], "max", signal);
+        const jm = g.match(/\{[\s\S]*\}/); const o = jm ? JSON.parse(jm[0]) : null;
+        return (o && o.score >= 1 && o.score <= 10) ? o : null;
+      };
+      let verdict = await gradeOnce();
+      if (verdict && verdict.score < 8 && !signal.aborted) {
+        run.phase = "enhance"; sync(false);
+        const notes = String(verdict.notes || "").slice(0, 1200);
+        if (run.mode === "project" && run._files && run._files.length) {
+          const tf = run._files.find((f) => f.path === String(verdict.weakest || "")) || run._files.slice().sort((a, b) => a.content.length - b.content.length)[0];
+          const better = await agentCall([
+            { role: "system", content: "You are Firas Agent RAISING a file to excellence after an examiner flagged weaknesses. Fix every noted weakness while keeping ALL existing content, ids, classes and function names (superset only)." + VISUAL_POLICY + " Output the COMPLETE improved `" + tf.path + "` in ONE fenced code block, never stop mid-file." },
+            { role: "user", content: "THE TASK:\n" + task.slice(0, 1200) + "\n\nEXAMINER'S WEAKNESSES:\n" + notes + "\n\nTHE FILE `" + tf.path + "`:\n" + tf.content.slice(0, 60000) },
+          ], "max", signal);
+          const fx = stripToCode(better);
+          const gl = (tf.path.split(".").pop() || "").toLowerCase();
+          if (fx.length >= tf.content.length * 0.8 && codeLooksComplete(fx, gl === "htm" ? "html" : gl)) {
+            tf.content = fx;
+            const stG = run.steps.find((s) => s.file === tf.path); if (stG) stG.out = "```\n" + fx + "\n```";
+          }
+        } else if (run.mode === "codefile" && run._code) {
+          const better = await agentCall([
+            { role: "system", content: "You are Firas Agent RAISING a file to excellence after an examiner flagged weaknesses. Fix every noted weakness while keeping ALL existing content and public names (superset only). Output the COMPLETE improved file in ONE fenced code block, never stop mid-file." },
+            { role: "user", content: "THE TASK:\n" + task.slice(0, 1200) + "\n\nEXAMINER'S WEAKNESSES:\n" + notes + "\n\nTHE FILE:\n" + run._code.slice(0, 100000) },
+          ], "max", signal);
+          const fx = stripToCode(better);
+          if (fx.length >= run._code.length * 0.8 && codeLooksComplete(fx, "html")) run._code = fx;
+        } else {
+          const n = parseInt(verdict.weakest, 10);
+          const st = (n >= 1 && run.steps[n - 1] && run.steps[n - 1].s === "done") ? run.steps[n - 1]
+            : run.steps.filter((s) => s.s === "done" && s.out).sort((a, b) => a.out.length - b.out.length)[0];
+          if (st) {
+            const better = await agentCall([
+              { role: "system", content: "You are Firas Agent RAISING one section to excellence after an examiner flagged weaknesses. Rewrite it fixing every noted weakness — deeper, more precise, more complete — keeping everything that was correct." + AGENT_QUALITY + (DOMAIN_GUIDE[st.dom] || "") + langRule },
+              { role: "user", content: "THE TASK:\n" + task.slice(0, 1200) + "\n\nEXAMINER'S WEAKNESSES:\n" + notes + "\n\nSTEP: " + st.title + "\n\nCURRENT OUTPUT:\n" + st.out.slice(0, 12000) },
+            ], "max", signal);
+            if (better && better.length >= st.out.length * 0.7) st.out = better;
+          }
+        }
+        const second = await gradeOnce();
+        if (second) verdict = second.score > verdict.score ? second : verdict;
+      }
+      if (verdict) run.stats.score = Math.round(verdict.score);
+    } catch (_) { /* grading is best-effort */ }
+  }
+  // 5) DELIVER — finalize the run report (files / lines / self-fixes / images / time).
   run.phase = "done";
+  const codeBlob = run.mode === "codefile" ? (run._code || "") : run.mode === "project" ? (run._files || []).map((f) => f.content).join("\n") : "";
+  if (run.mode === "project") run.stats.files = (run._files || []).length;
+  else if (run.mode === "codefile") run.stats.files = 1;
+  else run.stats.files = run.steps.filter((s) => s.s === "done" && s.kind !== "design").length;
+  run.stats.lines = codeBlob ? codeBlob.split("\n").length : run.steps.reduce((n, s) => n + (s.out ? s.out.split("\n").length : 0), 0);
+  run.stats.elapsed = Math.max(1, Math.round((Date.now() - (run.stats.startedAt || Date.now())) / 1000));
   run.final =
     run.mode === "codefile" ? (ar ? "اكتمل البناء ✓ — الكود الكامل تحت 👇" : "Build complete ✓ — the full code is below 👇")
     : run.mode === "project" ? (ar ? "اكتمل المشروع ✓ — الفولدر الجاهز تحت 👇" : "Project complete ✓ — your folder is below 👇")
@@ -8730,10 +10373,39 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate) {
   sync(true);
   return run;
 }
+/** Resume a stopped/failed mission from its persisted run — continues the remaining steps only. */
+function resumeAgentRun(chat, resumeRun) {
+  if (!chat || !resumeRun || !Array.isArray(resumeRun.steps) || activeStreams.has(chat.id)) return;
+  runAgentAssistant(chat, "max", resumeRun.lang || chat.lang || state.lang, resumeRun);
+}
 /** Agent-mode assistant turn: plan → execute → verify → deliver, streamed into a live plan card. */
-async function runAgentAssistant(chat, tier, replyLang) {
+async function runAgentAssistant(chat, tier, replyLang, resumeRun) {
   const lastUser = [...chat.messages].reverse().find((m) => m.role === "user");
-  const task = lastUser ? String(lastUser.content || "") : "";
+  let task = resumeRun ? String(resumeRun.task || "") : (lastUser ? String(lastUser.content || "") : "");
+  // If we JUST asked clarifying questions, THIS message is the user's answers — fold them into the
+  // ORIGINAL request so planning + mode detection use the full intent.
+  const luIdx = chat.messages.lastIndexOf(lastUser);
+  const prevAsk = !resumeRun && luIdx > 0 && chat.messages[luIdx - 1].role === "assistant" && /```\s*firas-ask/.test(chat.messages[luIdx - 1].content || "");
+  if (prevAsk) {
+    let orig = "";
+    for (let i = luIdx - 2; i >= 0; i--) { if (chat.messages[i].role === "user") { orig = String(chat.messages[i].content || ""); break; } }
+    if (orig) task = orig + "\n\n[إجابات المستخدم على أسئلة التوضيح — راعِها بدقة]:\n" + task;
+  }
+  const alreadyAsked = chat.messages.some((m) => m.role === "assistant" && /```\s*firas-ask/.test(m.content || ""));
+  // CONTINUITY: a follow-up request CONTINUES the mission — the agent sees every prior request,
+  // the previous run's plan, and the previously delivered project/code, and EVOLVES them.
+  const ctx = { history: "", prevProj: null, prevCode: "", prevCodeMeta: null, prevRunTitle: "", memory: [] };
+  try { ctx.memory = await agentUserMemory(); } catch (_) {}   // start knowing the user
+  const priorUsers = chat.messages.filter((m) => m.role === "user").slice(0, -1);
+  if (priorUsers.length) ctx.history = priorUsers.map((m) => "• " + String(m.content || "").slice(0, 350)).join("\n").slice(0, 2500);
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const m = chat.messages[i];
+    if (m.role !== "assistant") continue;
+    if (!ctx.prevProj) { const p = parseProjectMeta(m.content); if (p) ctx.prevProj = p; }
+    if (!ctx.prevCode && /^```firas-code /.test(m.content || "")) { ctx.prevCode = stripToCode(m.content).slice(0, 45000); const _cm = parseCodeMeta(m.content); if (_cm) ctx.prevCodeMeta = { filename: _cm.filename, lang: _cm.lang, ext: _cm.ext, label: _cm.label }; }
+    if (!ctx.prevRunTitle) { const r = parseAgentMeta(m.content); if (r && r.title) ctx.prevRunTitle = r.title; }
+    if (ctx.prevProj && ctx.prevCode && ctx.prevRunTitle) break;
+  }
   const aiMsg = { role: "assistant", content: "", reasoning: "", tier, lang: replyLang, mode: state.mode };
   chat.messages.push(aiMsg);
   autoScroll = true;
@@ -8741,10 +10413,66 @@ async function runAgentAssistant(chat, tier, replyLang) {
   const controller = new AbortController();
   activeStreams.set(chat.id, { controller, aiMsg });
   beginStreaming(chat.id);
+  // ⑤ ATTACHMENTS — the Agent now READS what the user attached (screenshots/designs, PDFs, text files)
+  // and folds their content into the task, so both planning and building actually USE them. Screenshot
+  // + a build request ("مثل هذا الموقع" / "rebuild this") → a UI blueprint the agent replicates in code.
+  if (!resumeRun && lastUser && !prevAsk) {
+    const att = Array.isArray(lastUser.images) ? lastUser.images : null;
+    const fileTxt = lastUser.fileText ? String(lastUser.fileText) : "";
+    if ((att && att.length) || fileTxt) {
+      aiMsg.content = serializeAgentRun({ task, title: "", phase: "read", lang: replyLang, steps: [], final: "", mode: "answer" });
+      if (activeChat() === chat) renderThread(chat);
+      if (fileTxt) task += "\n\n=== محتوى ملف مرفق (مصدر — ابنِ المطلوب منه) / ATTACHED FILE CONTENT (source — build from it) ===\n" + fileTxt.slice(0, 60000);
+      if (att && att.length && !controller.signal.aborted) {
+        const wantsBuild = /موقع|صفحة|واجهة|تطبيق|مثل\s*(هذا|هذه|الصورة)|نفس\s*(التصميم|الشكل)|أعِد\s*بناء|اعد\s*بناء|صمّ?م|clone|like\s*(this|the\s*image)|rebuild|recreate|website|landing|\bpage\b|\bapp\b|\bui\b|design|screenshot/i.test(task);
+        let vis = "";
+        try { vis = await agentVisionRead(att, task, replyLang, wantsBuild, controller.signal); } catch (_) {}
+        if (vis && wantsBuild) task += "\n\n=== مرجع بصري مرفق — المستخدم أرفق تصميمًا/لقطة شاشة؛ أعِد بناءه في كود حقيقي بأقصى تطابق (نفس التخطيط والألوان والمكوّنات والنصوص) / ATTACHED VISUAL REFERENCE — REBUILD it in real code as closely as possible (same layout, colors, components, copy): ===\n" + vis.slice(0, 12000);
+        else if (vis) task += "\n\n=== محتوى الصورة/الصور المرفقة (مصدر) / ATTACHED IMAGE CONTENT (source) ===\n" + vis.slice(0, 30000);
+      }
+    }
+  }
+  // ── LIVE DECK — during a presentation build every finished section's slides stream into ONE
+  // deck card in the chat (phase "building": visible, editing locked). At completion the same
+  // card flips to "done" and unlocks editing. This IS the deliverable message.
+  let deckMsg = null;
+  const deckFromRun = (run) => {
+    const slides = [];
+    run.steps.forEach((st) => {
+      if (st.s === "done" && st.out && st.kind !== "design") {
+        slidesFromMarkdown(st.out, st.title).forEach((sl) => slides.push({ t: sl.section ? "section" : "slide", title: sl.title, bullets: sl.bullets, image: sl.image, imageAlt: sl.imageAlt, notes: sl.notes, chart: sl.chart }));
+      }
+    });
+    // stopped/fail also UNLOCK the deck — what was built stays editable, never locked forever.
+    return { v: 1, title: run.title || task.slice(0, 60), subtitle: "", theme: "navy", lang: replyLang, phase: (run.phase === "done" || run.phase === "stopped" || run.phase === "fail") ? "done" : "building", slides };
+  };
+  const updateLiveDeck = (run, persist) => {
+    const deck = deckFromRun(run);
+    if (!deck.slides.length) return;
+    // RESUME: reuse the deck card the interrupted run already created (never a duplicate).
+    if (!deckMsg && resumeRun) deckMsg = [...chat.messages].reverse().find((m) => m.role === "assistant" && /^\s*```firas-deck/.test(m.content || "")) || null;
+    if (!deckMsg) {
+      deckMsg = { role: "assistant", content: serializeDeck(deck), reasoning: "", tier, lang: replyLang, mode: state.mode };
+      chat.messages.push(deckMsg);
+      if (activeChat() === chat) renderThread(chat, true);
+    } else {
+      deckMsg.content = serializeDeck(deck);
+      if (activeChat() === chat) {
+        const dIdx = chat.messages.indexOf(deckMsg);
+        const dBody = els.thread.querySelector(`.msg-ai[data-index="${dIdx}"] .msg-ai__body`);
+        const dNode = dBody && dBody.querySelector(".md");
+        if (dNode) { dNode.innerHTML = ""; dNode.appendChild(buildDeckCard(parseDeckMeta(deckMsg.content), replyLang, deckMsg)); }
+        else renderThread(chat, true);
+      }
+    }
+    if (persist) { chat.updatedAt = Date.now(); persistChat(chat); }
+  };
   const rerenderCard = (run, persist) => {
+    if (run && run._deck && run.mode === "doc") { try { updateLiveDeck(run, persist); } catch (_) {} }
     if (activeChat() === chat) {
       const idx = chat.messages.indexOf(aiMsg);
-      const node = els.thread.querySelector(`.msg-ai[data-index="${idx}"] .msg-ai__body .md`);
+      const bodyEl = els.thread.querySelector(`.msg-ai[data-index="${idx}"] .msg-ai__body`);
+      const node = bodyEl && bodyEl.querySelector(".md");
       if (node) {
         // Preserve open/closed state of step disclosures across live re-renders.
         const openSet = new Set([...node.querySelectorAll(".agent-step__det[open]")].map((d) => d.querySelector(".agent-step__t") && d.querySelector(".agent-step__t").textContent));
@@ -8752,30 +10480,114 @@ async function runAgentAssistant(chat, tier, replyLang) {
         const card = buildAgentCard(run, replyLang);
         card.querySelectorAll(".agent-step__det").forEach((d) => { const t = d.querySelector(".agent-step__t"); if (t && openSet.has(t.textContent)) d.open = true; });
         node.appendChild(card);
+        // ③ LIVE PREVIEW — a project build renders INTO a persistent sandboxed iframe (sibling of .md,
+        // so the card re-render never reloads it) that updates as each file lands. Flicker-free: the
+        // srcdoc is only reset when the content actually changed.
+        if (run.mode === "project" && run.phase !== "done") {
+          const files = run.steps.filter((s) => s.s === "done" && s.file && s.out && /\.(html?|css|js)$/i.test(s.file)).map((s) => ({ path: s.file, content: stripToCode(s.out) }));
+          if (files.some((f) => /(^|\/)index\.html?$/i.test(f.path)) && typeof projPreviewHtml === "function") {
+            let pv = bodyEl.querySelector(".agent-live-preview");
+            if (!pv) {
+              pv = document.createElement("div"); pv.className = "agent-live-preview";
+              pv.innerHTML = '<div class="agent-live-preview__bar"><span class="agent-live-preview__dot"></span>' + (replyLang === "ar" ? "معاينة حية — تتحدّث أثناء البناء" : "Live preview — updates as it builds") + "</div><iframe sandbox=\"allow-scripts\" title=\"live preview\" loading=\"lazy\"></iframe>";
+              bodyEl.appendChild(pv);
+            }
+            const doc = projPreviewHtml({ name: "t", files });
+            const ifr = pv.querySelector("iframe");
+            if (doc && ifr.getAttribute("data-len") !== String(doc.length)) { ifr.setAttribute("data-len", String(doc.length)); ifr.srcdoc = doc; }
+          }
+        } else if (run.phase === "done") {
+          const pv = bodyEl.querySelector(".agent-live-preview"); if (pv) pv.remove();
+        }
         if (autoScroll) scrollToBottom();
       }
     }
     if (persist) { chat.updatedAt = Date.now(); persistChat(chat); }
   };
+  // ① CLARIFY FIRST — a fresh, ambiguous build/big task → ask 2-3 smart questions before executing.
+  const isFollowUp = !!(ctx.prevProj || ctx.prevCode || ctx.prevRunTitle);
+  if (!resumeRun && !isFollowUp && !alreadyAsked && agentClarifyNeeded(task)) {
+    aiMsg.content = serializeAgentRun({ task, title: "", phase: "plan", lang: replyLang, steps: [], final: "", mode: "answer" });
+    if (activeChat() === chat) renderThread(chat);
+    let askSpec = null;
+    try { askSpec = await buildClarifyingQuestions(task, replyLang, controller.signal); } catch (_) {}
+    if (askSpec && !controller.signal.aborted) {
+      aiMsg.content = "```firas-ask\n" + JSON.stringify(askSpec) + "\n```";
+      activeStreams.delete(chat.id); endStreaming(chat.id);
+      chat.updatedAt = Date.now(); persistChat(chat);
+      if (activeChat() === chat) renderThread(chat);
+      renderHistory();
+      return;
+    }
+  }
   try {
-    const run = await runAgentTask(chat, aiMsg, task, replyLang, controller.signal, rerenderCard);
+    const run = await runAgentTask(chat, aiMsg, task, replyLang, controller.signal, rerenderCard, ctx, resumeRun);
     if (run.phase === "done") {
       if (run.mode === "codefile" && run._code) {
         // ONE complete code file → the real code card (copy / download / live preview).
-        const spec = (typeof detectCodeRequest === "function" ? detectCodeRequest(task) : null) || { filename: "index", lang: "html", ext: "html", label: "HTML" };
+        const spec = (typeof detectCodeRequest === "function" ? detectCodeRequest(task) : null) || ctx.prevCodeMeta || { filename: "index", lang: "html", ext: "html", label: "HTML" };
         const meta = { filename: spec.filename || "index", lang: spec.lang || "html", ext: spec.ext || "html", label: spec.label || (spec.lang || "code").toUpperCase() };
         chat.messages.push({ role: "assistant", content: "```firas-code " + JSON.stringify(meta) + "\n" + run._code + "\n```", reasoning: "", tier, lang: replyLang, mode: state.mode });
       } else if (run.mode === "project" && run._files && run._files.length) {
         // Multi-file FOLDER → project card with per-file viewer + ZIP download.
-        const name = (run.title || task.slice(0, 30)).replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "project";
-        const files = run._files.slice(0, 6).map((f) => ({ path: f.path, content: String(f.content).slice(0, 28000) }));
+        // EVOLUTION: rebuilt/added files replace their old versions; untouched files carry over —
+        // the delivered folder is always the COMPLETE up-to-date project.
+        let outFiles = run._files;
+        if (ctx.prevProj && Array.isArray(ctx.prevProj.files)) {
+          const map = new Map(ctx.prevProj.files.map((f) => [f.path, f]));
+          run._files.forEach((f) => map.set(f.path, f));
+          outFiles = [...map.values()];
+        }
+        const name = ((ctx.prevProj && ctx.prevProj.name) || run.title || task.slice(0, 30)).replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "project";
+        const files = outFiles.slice(0, 14).map((f) => ({ path: f.path, content: String(f.content).slice(0, 60000) }));
+        // Total budget: the persisted message is capped server-side (~200K) — trim the LARGEST
+        // file until the JSON fits, so a reload never gets a truncated (unparseable) project.
+        for (let guard = 0; guard < 40 && JSON.stringify({ name, files }).length > 180000; guard++) {
+          const big = files.reduce((a, b) => (b.content.length > a.content.length ? b : a), files[0]);
+          big.content = big.content.slice(0, Math.floor(big.content.length * 0.8));
+        }
         chat.messages.push({ role: "assistant", content: "```firas-project\n" + JSON.stringify({ name, files }) + "\n```", reasoning: "", tier, lang: replyLang, mode: state.mode });
+      } else if (run.mode === "doc" && run._deck && run.steps.some((s) => s.s === "done" && s.out)) {
+        // PRESENTATION → finalize the live deck card (all slides in ONE editable card: edit text,
+        // delete elements, regenerate any slide, Present fullscreen, download PowerPoint).
+        try { updateLiveDeck(run, true); } catch (_) {}
       } else if (run.mode === "doc" && run.steps.some((s) => s.s === "done" && s.out)) {
-        // Document → the real downloadable file card (PDF/Word…).
+        // Document → the real downloadable file card (PDF/Word…), with the math/latex cleanup and a
+        // fitting professional TEMPLATE (exam→ministry, thesis→academic…).
         const docBody = run.steps.filter((s) => s.s === "done" && s.out).map((s) => s.out).join("\n\n");
-        const meta = { filename: (run.title || task.slice(0, 40)).replace(/[\\/:*?"<>|]/g, " ").trim(), title: run.title || task.slice(0, 60), subtitle: "", theme: "teal" };
-        const finalDoc = metaBlockString(meta) + "\n\n" + sanitizeBareLatex(fixMathBlanks(tightenInlineMath(docBody)));
-        chat.messages.push({ role: "assistant", content: finalDoc, reasoning: "", tier, lang: replyLang, mode: state.mode });
+        const tpl = docTemplateFor(task);
+        const baseName = (run.title || task.slice(0, 40)).replace(/[\\/:*?"<>|]/g, " ").trim();
+        const meta = { filename: baseName, title: run.title || task.slice(0, 60), subtitle: "", theme: (tpl === "corporate" || tpl === "ministry" ? "navy" : "teal") };
+        if (tpl) meta.template = tpl;
+        const body = sanitizeBareLatex(fixMathBlanks(tightenInlineMath(docBody)));
+        // ① MULTI-VOLUME — a mega book whose full body exceeds the ~180K message cap is delivered as
+        // several NUMBERED volume cards (split on chapter boundaries), so the promise of a huge
+        // reference actually lands — each volume is its own downloadable file.
+        const VOL_MAX = 150000;
+        const docAr = replyLang === "ar";
+        if (run._mega && !run._deck && body.length > VOL_MAX) {
+          const vols = splitIntoVolumes(body, VOL_MAX).slice(0, 10);
+          const N = vols.length;
+          run.stats.files = N;
+          vols.forEach((vb, vi) => {
+            const label = (docAr ? "المجلد " : "Volume ") + (vi + 1) + (docAr ? " من " : " of ") + N;
+            const vmeta = Object.assign({}, meta, { filename: baseName + " - " + (docAr ? "مجلد" : "Vol") + (vi + 1), title: (run.title || baseName) + " — " + label, subtitle: label });
+            chat.messages.push({ role: "assistant", content: metaBlockString(vmeta) + "\n\n" + vb, reasoning: "", tier, lang: replyLang, mode: state.mode });
+          });
+        } else {
+          const finalDoc = metaBlockString(meta) + "\n\n" + body;
+          chat.messages.push({ role: "assistant", content: finalDoc, reasoning: "", tier, lang: replyLang, mode: state.mode });
+        }
+      }
+      // ⑤ LEARN — a completed mission teaches durable preferences (topic, language, style) for
+      // next time. Fire-and-forget; the backend extracts only lasting facts.
+      if (run.phase === "done" && !controller.signal.aborted) {
+        try {
+          fetch("/api/memory/learn", {
+            method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+            body: JSON.stringify({ user: task.slice(0, 1500), assistant: ("Firas Agent completed: " + (run.title || "") + " — a " + run.mode + " deliverable" + (run._files ? " (" + run._files.length + " files)" : "") + ".").slice(0, 800) }),
+          }).catch(() => {});
+        } catch (_) {}
       }
     }
   } catch (e) {
@@ -8808,8 +10620,8 @@ function updateProductUi() {
   document.querySelectorAll(".wordmark .ai").forEach((el) => { el.textContent = agent ? "Agent" : "AI"; });
   if (agent && els && els.input) {
     els.input.setAttribute("placeholder", state.lang === "ar"
-      ? "كلّف فِراس بمهمة كبيرة… (كورس كامل، بحث، كتاب، مشروع)"
-      : "Give Firas a big task… (a full course, a paper, a book, a project)");
+      ? "كلّف فِراس بمهمة صعبة"
+      : "Give Firas a hard task");
   }
 }
 function setProduct(p) {
@@ -8929,9 +10741,22 @@ async function checkShareLink() {
         row.appendChild(b); col.appendChild(row);
       } else {
         const md = document.createElement("div"); md.className = "md share-page__ai";
-        md.dir = (m.lang === "ar" || /[؀-ۿ]/.test(m.content || "")) ? "rtl" : "ltr";
-        md.innerHTML = renderMarkdown(m.content || "");
-        decorateMarkdown(md); typesetMath(md);
+        const lg = (m.lang === "ar" || /[؀-ۿ]/.test(m.content || "")) ? "ar" : "en";
+        md.dir = lg === "ar" ? "rtl" : "ltr";
+        // Card messages must render as CARDS here too — raw firas-agent/deck/project JSON is
+        // meaningless to a share visitor.
+        const shImg = parseImageMeta(m.content), shAgent = !shImg && parseAgentMeta(m.content),
+          shDeck = !shImg && !shAgent && parseDeckMeta(m.content),
+          shProj = !shImg && !shAgent && !shDeck && parseProjectMeta(m.content),
+          shCode = !shImg && !shAgent && !shDeck && !shProj && parseCodeMeta(m.content);
+        try {
+          if (shAgent) md.appendChild(buildAgentCard(shAgent, lg));
+          else if (shDeck) md.appendChild(buildDeckCard(shDeck, lg, m));
+          else if (shProj) md.appendChild(buildProjectCard(shProj, lg));
+          else if (shImg) md.appendChild(buildImageCard(shImg, lg));
+          else if (shCode) md.appendChild(buildCodeCard(shCode, lg));
+          else { md.innerHTML = renderMarkdown(m.content || ""); decorateMarkdown(md); typesetMath(md); }
+        } catch (_) { md.innerHTML = renderMarkdown(m.content || ""); decorateMarkdown(md); typesetMath(md); }
         col.appendChild(md);
       }
     });

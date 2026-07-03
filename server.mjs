@@ -1178,8 +1178,8 @@ function userChats(userId) {
 
 // Validate/cap messages stored in the DB so a client can't bloat db.json or
 // inject odd shapes. Keeps only known fields, bounds counts and lengths.
-const MAX_MESSAGES = 1000;
-const MAX_CONTENT = 100_000;
+const MAX_MESSAGES = 2000;     // match the edge cap (a heavy Agent chat can exceed 1000 messages)
+const MAX_CONTENT = 200_000;   // match the edge cap so Agent projects/runs aren't truncated on the local server
 const MAX_CHATS_PER_USER = 1000;
 function sanitizeMessages(arr) {
   if (!Array.isArray(arr)) return [];
@@ -1190,6 +1190,7 @@ function sanitizeMessages(arr) {
     };
     if (m && typeof m.tier === "string") o.tier = m.tier.slice(0, 20);
     if (m && typeof m.lang === "string") o.lang = m.lang.slice(0, 5);
+    if (m && typeof m.mode === "string") o.mode = m.mode.slice(0, 20);   // plan-mode UI depends on it after reload (edge keeps it too)
     if (m && typeof m.reasoning === "string") o.reasoning = m.reasoning.slice(0, MAX_CONTENT);
     // Keep small image thumbnails so attached images still show after reload
     // (bounded: up to 6 thumbs, each capped — full images are never persisted).
@@ -1923,6 +1924,109 @@ async function handleWebSearch(req, res) {
   } catch (_) { /* return empty on failure — the AI answers without search */ }
   res.writeHead(200);
   res.end(JSON.stringify({ q, results }));
+}
+
+/** Keyless REAL image search (Openverse — CC-licensed photos, no API key). Returns reliable
+    Openverse-hosted thumbnail URLs so generated sites get real, relevant photos. */
+async function handleImageSearch(req, res) {
+  res.setHeader("Content-Type", "application/json");
+  const user = currentUser(req);
+  if (!user) { res.writeHead(401); return res.end(JSON.stringify({ results: [], error: "auth" })); }
+  if (rateLimited("images:" + user.id, 40, 60_000)) { res.writeHead(429); return res.end(JSON.stringify({ results: [], error: "rate" })); }
+  const u = new URL(req.url, "http://localhost");
+  const q = (u.searchParams.get("q") || "").trim().slice(0, 120);
+  if (!q) { res.writeHead(400); return res.end(JSON.stringify({ results: [] })); }
+  let results = [];
+  try {
+    const r = await fetch("https://api.openverse.org/v1/images/?format=json&mature=false&page_size=10&q=" + encodeURIComponent(q), {
+      headers: { "User-Agent": SEARCH_UA, "Accept": "application/json" },
+    });
+    if (r.ok) {
+      const d = await r.json();
+      results = (Array.isArray(d.results) ? d.results : [])
+        .map((x) => ({ url: x.thumbnail || x.url, title: String(x.title || "").slice(0, 100) }))
+        .filter((x) => x.url && /^https:\/\//.test(x.url)).slice(0, 8);
+    }
+  } catch (_) { /* return empty — build falls back to gradients/picsum */ }
+  res.writeHead(200);
+  res.end(JSON.stringify({ q, results }));
+}
+
+/* SSRF guard shared by the proxies: hostname must not be private/loopback/link-local. */
+function proxyHostBlocked(host) {
+  return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|::1|\[)/.test(host) || /\.local$/.test(host) || host === "metadata.google.internal";
+}
+/* Fetch with MANUAL redirect handling: every hop's hostname is re-validated, so a public host
+   can't 302 the proxy into localhost / the cloud metadata service (classic SSRF bypass). */
+async function safeProxyFetch(target, headers, maxHops) {
+  let cur = target;
+  for (let hop = 0; hop <= (maxHops || 3); hop++) {
+    const host = new URL(cur).hostname.toLowerCase();
+    if (proxyHostBlocked(host)) throw new Error("blocked host");
+    const r = await fetch(cur, { headers, redirect: "manual" });
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get("location");
+      if (!loc) return r;
+      cur = new URL(loc, cur).href;
+      if (!/^https?:\/\//i.test(cur)) throw new Error("bad redirect");
+      continue;
+    }
+    return r;
+  }
+  throw new Error("too many redirects");
+}
+
+/** Stream an external image through OUR origin so documents can draw it onto the PDF canvas
+    without CORS taint. SSRF-guarded, images only, 4MB cap, cached. */
+async function handleImgProxy(req, res) {
+  const user = currentUser(req);
+  if (!user) { res.writeHead(401, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ error: "auth" })); }
+  if (rateLimited("imgproxy:" + user.id, 80, 60_000)) { res.writeHead(429); return res.end(); }
+  const u = new URL(req.url, "http://localhost");
+  const target = (u.searchParams.get("u") || "").trim();
+  let host = "";
+  try { host = new URL(target).hostname.toLowerCase(); } catch { res.writeHead(400); return res.end(); }
+  if (!/^https:\/\//i.test(target) || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|::1|\[)/.test(host) || /\.local$/.test(host)) { res.writeHead(400); return res.end(); }
+  try {
+    const r = await safeProxyFetch(target, { "User-Agent": SEARCH_UA, "Accept": "image/*" }, 3);
+    const ct = r.headers.get("content-type") || "";
+    if (!r.ok || !/^image\//i.test(ct)) { res.writeHead(415); return res.end(); }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > 4_000_000) { res.writeHead(413); return res.end(); }
+    res.writeHead(200, { "Content-Type": ct, "Cache-Control": "public, max-age=86400", "Content-Length": buf.length });
+    return res.end(buf);
+  } catch (_) { res.writeHead(502); return res.end(); }
+}
+
+/** Read a URL the user pasted → return its readable text (HTML stripped). SSRF-guarded (no
+    localhost/private hosts), auth + rate limited. Lets the agent work FROM a link. */
+async function handleUrlFetch(req, res) {
+  res.setHeader("Content-Type", "application/json");
+  const user = currentUser(req);
+  if (!user) { res.writeHead(401); return res.end(JSON.stringify({ text: "", error: "auth" })); }
+  if (rateLimited("fetch:" + user.id, 20, 60_000)) { res.writeHead(429); return res.end(JSON.stringify({ text: "", error: "rate" })); }
+  const u = new URL(req.url, "http://localhost");
+  let target = (u.searchParams.get("url") || "").trim();
+  if (!/^https?:\/\//i.test(target)) target = "https://" + target;
+  let host = "";
+  try { host = new URL(target).hostname.toLowerCase(); } catch { res.writeHead(400); return res.end(JSON.stringify({ text: "", error: "bad url" })); }
+  if (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.|::1|\[)/.test(host) || /\.local$/.test(host) || host === "metadata.google.internal") {
+    res.writeHead(400); return res.end(JSON.stringify({ text: "", error: "blocked" }));
+  }
+  let text = "", title = "";
+  try {
+    const r = await safeProxyFetch(target, { "User-Agent": SEARCH_UA, "Accept": "text/html,application/xhtml+xml,text/plain" }, 3);
+    if (r.ok) {
+      const ct = r.headers.get("content-type") || "";
+      const raw = (await r.text()).slice(0, 800000);
+      if (/html/i.test(ct)) {
+        const tm = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i); title = tm ? tm[1].replace(/\s+/g, " ").trim().slice(0, 200) : "";
+        text = raw.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim().slice(0, 40000);
+      } else if (/text|json|xml|markdown/i.test(ct)) { text = raw.slice(0, 40000); }
+    }
+  } catch (_) { /* empty on failure */ }
+  res.writeHead(200);
+  res.end(JSON.stringify({ url: target, title, text }));
 }
 
 /** Build version = newest mtime of the core static files. An open tab polls this
@@ -2753,6 +2857,9 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Web search (keyless, server-proxied DuckDuckGo) ----
     if (route === "/api/search" && method === "GET") return await handleWebSearch(req, res);
+    if (route === "/api/images" && method === "GET") return await handleImageSearch(req, res);
+    if (route === "/api/fetch" && method === "GET") return await handleUrlFetch(req, res);
+    if (route === "/api/imgproxy" && method === "GET") return await handleImgProxy(req, res);
 
     // ---- Image generation (keyless, server-proxied pollinations) ----
     if (route === "/api/image/quota" && method === "POST") return await handleImageQuota(req, res);
