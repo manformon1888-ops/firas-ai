@@ -1209,7 +1209,7 @@ async function handleListChats(req, res) {
   const list = userChats(user.id)
     .slice()
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, pinned: !!c.pinned, agent: !!c.agent }));
+    .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt, pinned: !!c.pinned, agent: !!c.agent, codeProj: !!c.codeProj }));
   return sendJson(res, 200, list);
 }
 
@@ -1238,7 +1238,8 @@ async function handleCreateChat(req, res) {
     title: String(body.title ?? "New chat").slice(0, 200) || "New chat",
     messages: sanitizeMessages(body.messages),
     pinned: !!body.pinned,
-    agent: !!body.agent,   // Firas Agent chats live in their OWN sidebar list
+    agent: !!body.agent,       // Firas Agent chats live in their OWN sidebar list
+    codeProj: !!body.codeProj, // Firas Code workspace projects — their own list too
     createdAt: now,
     updatedAt: now,
   };

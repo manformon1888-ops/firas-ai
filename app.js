@@ -802,6 +802,10 @@ function requestedFormatForAssistant(chat, index) {
     i.e. not a plan-mode clarifying/plan turn (those come before approval). */
 function isFileStreamReply(msg, chat) {
   if (!msg || msg.offline) return null;
+  // STRUCTURED blocks (firas-ask / firas-agent / firas-deck / firas-project / firas-code / firas-image)
+  // are NEVER file-maskable — they have their own renderers. Without this, an agent's clarifying
+  // questions after a "…pdf" request were masked as a downloadable file of raw JSON.
+  if (/^\s*```firas-(?!file)/.test(msg.content || "")) return null;
   const c = chat || activeChat();
   if (!c || !Array.isArray(c.messages)) return null;
   const index = c.messages.indexOf(msg);
@@ -937,7 +941,7 @@ async function persistChat(chat) {
   // otherwise a concurrent finalize would fire a SECOND POST and duplicate the
   // conversation in history (the create is the only place serverId gets set).
   if (!chat.serverId && chat._creating) { try { await chat._creating; } catch (_) {} }
-  const payload = { title: chat.title, messages: serializeMessages(chat.messages), pinned: !!chat.pinned, agent: !!chat.agent };
+  const payload = { title: chat.title, messages: serializeMessages(chat.messages), pinned: !!chat.pinned, agent: !!chat.agent, codeProj: !!chat.codeProj };
   try {
     if (chat.serverId) {
       await apiJson("/api/chats/" + encodeURIComponent(chat.serverId), {
@@ -2955,8 +2959,12 @@ function renderHistory() {
   const list = els.historyList;
   list.innerHTML = "";
   const q = state.search.trim().toLowerCase();
-  // Each PRODUCT owns its chats: Firas Agent tasks never mix with Firas AI conversations.
-  let chats = state.chats.filter((c) => !!c.agent === (state.product === "agent")).sort((a, b) => b.updatedAt - a.updatedAt);
+  // Each PRODUCT owns its chats: AI conversations, Agent missions and Code projects never mix.
+  let chats = state.chats.filter((c) =>
+    state.product === "code" ? !!c.codeProj
+    : state.product === "agent" ? (!!c.agent && !c.codeProj)
+    : (!c.agent && !c.codeProj)
+  ).sort((a, b) => b.updatedAt - a.updatedAt);
   if (q) chats = chats.filter((c) => (c.title || "").toLowerCase().includes(q));
 
   if (!chats.length) {
@@ -3093,6 +3101,7 @@ function renameChatOnServer(chat, title) {
 ---------------------------------------------------------------------------- */
 function renderAll() {
   renderHistory();
+  if (state.product === "code") { renderCodeWorkspace(); return; }   // Firas Code = the IDE view
   const chat = activeChat();
   if (!chat || !chat.messages || !chat.messages.length) {
     renderWelcome();
@@ -3365,8 +3374,9 @@ function aiTurnEl(msg, index) {
 
   // File card — when this reply answered a file request (re-derived on render so
   // it survives a reload) and is a real reply (not the offline fallback). Never under an
-  // agent/deck card — those carry their own actions (a stray file card would export the card JSON).
-  if (msg.content && msg.content.trim() && !msg.offline && !imgMeta && !codeMeta && !deckMeta && !agentMeta) {
+  // agent/deck card or a clarifying-questions turn — those carry their own UI (a stray file
+  // card would export the block JSON as a "document").
+  if (msg.content && msg.content.trim() && !msg.offline && !imgMeta && !codeMeta && !deckMeta && !agentMeta && !/^\s*```firas-(?!file)/.test(msg.content)) {
     const fmt = requestedFormatForAssistant(activeChat(), index);
     if (fmt) {
       const card = fileCardEl(msg, fmt);
@@ -9503,6 +9513,14 @@ function buildProjectCard(proj, lang) {
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   });
   head.appendChild(zipBtn);
+  // Agent → Code bridge: keep developing this delivered folder inside the Firas Code IDE.
+  if (typeof openProjectInFirasCode === "function") {
+    const cwBtn = document.createElement("button");
+    cwBtn.type = "button"; cwBtn.className = "proj-card__zip proj-card__opencode";
+    cwBtn.textContent = ar ? "⚡ افتح بفراس كود" : "⚡ Open in Firas Code";
+    cwBtn.addEventListener("click", () => openProjectInFirasCode(proj));
+    head.appendChild(cwBtn);
+  }
   card.appendChild(head);
   const list = document.createElement("div");
   list.className = "proj-card__files";
@@ -9779,8 +9797,14 @@ async function agentFetchUrl(url) {
 function agentClarifyNeeded(task) {
   const t = String(task || "");
   if (t.trim().length > 550) return false;   // already detailed enough
+  // An explicit FILE request with a real brief (≥25 words) is specific enough — asking first
+  // only slows the user down. Execute directly.
+  const explicitDoc = typeof detectFileRequest === "function" ? detectFileRequest(t) : null;
+  if (explicitDoc && t.trim().split(/\s+/).length >= 25) return false;
   const isBuild = /موقع|متجر|تطبيق|لعب[ةه]|منصة|واجه|داشبورد|لوحة\s*تحكم|website|web\s*app|\bapp\b|\bgame\b|\bstore\b|dashboard|platform|landing/i.test(t) || (typeof detectCodeRequest === "function" && !!detectCodeRequest(t));
-  const isBig = /كورس|دورة|منهج|منهاج|كتاب|كتيب|ملزمة|بحث|course|book|research|curriculum|booklet|thesis|report/i.test(t);
+  // "big deliverable" nouns count only in a CREATION context — an incidental mention
+  // ("questions that never exist in books") must NOT trigger the wizard.
+  const isBig = /(?:اكتب|اصنع|سوّ?ي|اعمل|أنشئ|انشئ|حضّ?ر|جهّ?ز|أريد|اريد|ابي|بغيت|write|make|create|build|prepare|generate|i\s*want)[^.؟?!]{0,60}(?:كورس|دورة|منهج|منهاج|كتاب|كتيب|ملزمة|بحث|course|book|research\s*(?:paper|report)?|curriculum|booklet|thesis|report)|^(?:كورس|كتاب|بحث|منهج|course|book|research)/i.test(t);
   return isBuild || isBig;
 }
 /* Ask the model for the 2-3 most impactful clarifying questions as a firas-ask spec (the same
@@ -9813,7 +9837,7 @@ const DOMAIN_GUIDE = {
   math: " MATH MODE: state given/goal, then a rigorous step-by-step derivation where EVERY line follows from the previous with the rule named (no skipped algebra). Define notation, note domain/edge cases, verify the result (substitute back or sanity-check units/limits). Include at least one fully worked example and, where useful, a second method as a cross-check. Give the final answer boxed as $\\boxed{...}$.",
   science: " PHYSICS/CHEM/SCIENCE MODE: name the governing law/principle first, then derive symbolically BEFORE plugging numbers. Carry UNITS through every step and check dimensional consistency; give the answer to correct significant figures with units. State assumptions and regimes of validity. Chemistry: balanced equations, correct states/charges, mechanisms with electron-flow described. Draw the setup/free-body/energy diagram as a SIMPLE ```tikz block. Add a short 'why this makes physical sense' check.",
   writing: " WRITING MODE (essays/literature/language, EN or AR): open with a clear thesis, develop it across well-structured paragraphs each with a topic sentence + evidence + analysis, and close with a synthesis (not a restatement). Use precise, varied, register-appropriate vocabulary and real examples/quotations. Arabic: فصحى سليمة مع ضبط ما يلزم وترابط منطقي. Aim for genuine depth, never a thin outline.",
-  exam: " EXAM MODE: produce a real question SET spanning easy→medium→hard (label each with difficulty and marks). Mix formats (MCQ, short-answer, problem, proof/essay) as fits the subject, keep questions unambiguous and non-repetitive, then give a COMPLETE separate ANSWER KEY with full worked solutions/rationale — not just final letters.",
+  exam: " EXAM MODE: produce a real question SET spanning easy→medium→hard (label each with difficulty and marks). Mix formats (MCQ, short-answer, problem, proof/essay) as fits the subject, keep questions unambiguous and non-repetitive, then give a COMPLETE separate ANSWER KEY with full worked solutions/rationale — not just final letters. NOVELTY: when the user asks for NEW/novel/original problems, CONSTRUCT each one yourself (fresh functions, numbers, structures and scenarios — never textbook classics or famous competition problems restated), and make each problem combine 2-3 distinct ideas/techniques so it cannot be pattern-matched. DIFFICULTY CALIBRATION: honour the requested level exactly (olympiad/JEE-advanced means genuinely hard multi-step problems, not routine drills) while staying SOLVABLE with the allowed tools — verify each problem end-to-end yourself before including it, and respect every exclusion the user states (no complex analysis, no non-elementary integrals…).",
   knowledge: " KNOWLEDGE MODE: lead with the direct, correct answer, then explain the why with concrete facts, mechanisms, dates/figures, and a short example or analogy. Distinguish established fact from interpretation; if a claim is uncertain, say so. Structure with clear headings/lists so it is scannable."
 };
 const DEPTH_MANDATE = " DEPTH MANDATE: this step must be genuinely thorough and self-contained — full coverage of its topic with derivations/examples/evidence, not a summary. Never abbreviate with 'and so on' or 'similar for the rest'; write every part out in full.";
@@ -10038,6 +10062,30 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     const worker = async () => { while (p < rest.length && !signal.aborted) { await buildStep(rest[p++]); } };
     await Promise.all(Array.from({ length: Math.min(CONC, rest.length) }, () => worker()));
     if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+  } else if ((run.mode === "doc" || run.mode === "answer") && run.steps.length >= 3) {
+    // DOCS/ANSWERS run their content steps IN PARALLEL too (~3× faster) — each chapter/question-set
+    // is independent. Only two orderings matter: RESEARCH feeds everyone (runs first), and a final
+    // ANSWER KEY / solutions / conclusion needs the questions (runs last).
+    const DEPENDENT = /answer\s*key|model\s*answers?|solutions?|مفتاح|الحلول|حلول\s|إجابات|الأجوبة|أجوبة|الخلاصة|خاتمة|conclusion|synthesis/i;
+    for (let i = 0; i < run.steps.length; i++) {
+      if (run.steps[i].kind === "research") {
+        await buildStep(i);
+        if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+      }
+    }
+    const mains = [], finals = [];
+    run.steps.forEach((s, i) => {
+      if (s.kind === "research" || s.s === "done") return;
+      (DEPENDENT.test(s.title || "") || i === run.steps.length - 1 && run._courseExam ? finals : mains).push(i);
+    });
+    let dp = 0; const DCONC = 3;
+    const dworker = async () => { while (dp < mains.length && !signal.aborted) { await buildStep(mains[dp++]); } };
+    await Promise.all(Array.from({ length: Math.min(DCONC, Math.max(1, mains.length)) }, () => dworker()));
+    if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+    for (const i of finals) {
+      if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
+      await buildStep(i);
+    }
   } else {
     for (let i = 0; i < run.steps.length; i++) {
       if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
@@ -10640,15 +10688,19 @@ async function runAgentAssistant(chat, tier, replyLang, resumeRun) {
 const PRODUCTS = {
   ai:    { name: "Firas AI",    tag: { ar: "المحادثة الذكية", en: "Smart chat" } },
   agent: { name: "Firas Agent", tag: { ar: "وكيل ينفّذ المهام الكبيرة", en: "Executes big tasks" } },
+  // Firas Code is fully BUILT (IDE workspace below) but gated behind "coming soon" until launch —
+  // flip locked:false (remove the flag) to open it.
   code:  { name: "Firas Code",  tag: { ar: "تحت التطوير 🚧", en: "In development 🚧" }, locked: true },
 };
 function updateProductUi() {
   const agent = state.product === "agent";
+  const code = state.product === "code";
   document.body.classList.toggle("product-agent", agent);
+  document.body.classList.toggle("product-code", code);
   const nameEl = document.getElementById("productSwitchName");
   if (nameEl) nameEl.textContent = PRODUCTS[state.product].name;
-  // Shell wordmarks flip: "Firas AI" ↔ "Firas Agent" (sidebar + topbar + mobile center)
-  document.querySelectorAll(".wordmark .ai").forEach((el) => { el.textContent = agent ? "Agent" : "AI"; });
+  // Shell wordmarks flip: "Firas AI" ↔ "Firas Agent" ↔ "Firas Code"
+  document.querySelectorAll(".wordmark .ai").forEach((el) => { el.textContent = agent ? "Agent" : code ? "Code" : "AI"; });
   if (agent && els && els.input) {
     els.input.setAttribute("placeholder", state.lang === "ar"
       ? "كلّف فِراس بمهمة صعبة"
@@ -10699,6 +10751,482 @@ function openProductMenu() {
     document.addEventListener("pointerdown", onDown, true);
   }, 0);
 }
+/* ════════════════════════════════════════════════════════════════════════════
+   FIRAS CODE — the browser IDE workspace (product #3).
+   A project = a chat with codeProj:true whose FIRST message holds a firas-project
+   block — so persistence, sync and history all reuse the existing machinery.
+   Layout: file tree │ CodeMirror editor │ live preview + console, with an AI
+   command bar that proposes changes as ACCEPT/REJECT diffs.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const cwState = { file: 0, cm: null, cmFallback: null, tab: "preview", renderedChat: "", saveTimer: 0, prevTimer: 0, busy: false };
+const CW_TEMPLATES = {
+  blank: { ar: "فارغ", en: "Blank", files: [{ path: "index.html", content: "<!DOCTYPE html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>مشروعي</title>\n</head>\n<body>\n  <h1>مرحبًا 👋</h1>\n</body>\n</html>\n" }] },
+  site: { ar: "موقع (HTML+CSS+JS)", en: "Site (HTML+CSS+JS)", files: [
+    { path: "index.html", content: "<!DOCTYPE html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>موقعي</title>\n  <link rel=\"stylesheet\" href=\"css/styles.css\">\n</head>\n<body>\n  <header class=\"hero\"><h1>موقعي الجديد</h1><p>ابنِ شيئًا جميلًا</p><button id=\"cta\">ابدأ</button></header>\n  <script src=\"js/app.js\"></script>\n</body>\n</html>\n" },
+    { path: "css/styles.css", content: "*{margin:0;box-sizing:border-box}\nbody{font-family:system-ui,sans-serif;background:#faf9f5;color:#1a1a18}\n.hero{min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}\n.hero h1{font-size:clamp(28px,6vw,52px)}\n#cta{padding:12px 34px;border:none;border-radius:999px;background:#237a68;color:#fff;font-size:16px;cursor:pointer}\n#cta:hover{background:#1c6355}\n" },
+    { path: "js/app.js", content: "document.getElementById(\"cta\").addEventListener(\"click\", () => {\n  alert(\"يعمل! 🎉\");\n});\nconsole.log(\"جاهز\");\n" },
+  ] },
+};
+function cwT() {
+  const ar = state.lang === "ar";
+  return ar ? {
+    home: "الرئيسية", newProj: "مشروع جديد", name: "اسم المشروع", create: "إنشاء", tpl: "القالب",
+    heroT: "Firas Code", heroSub: "بيئة تطوير كاملة بالمتصفح — اكتب بيدك، والذكاء يعدّل معك جراحيًا",
+    recent: "مشاريعك بالقائمة الجانبية", run: "▶ تحديث", zip: "⬇ ZIP", addFile: "+ ملف",
+    preview: "معاينة", console: "كونسول", clearCon: "مسح", aiPh: "اطلب تعديلًا… «أضف وضعًا ليليًا» أو «صلّح الزر»", aiGo: "نفّذ",
+    working: "يفكر ويعدّل…", diffT: "مراجعة التعديلات", newF: "جديد", editF: "تعديل", delF: "حذف",
+    apply: "تطبيق المحدد", cancel: "إلغاء", applied: "طُبّقت التعديلات ✓", nothing: "لا تغييرات مقترحة",
+    delFileC: "حذف الملف؟", fileName: "اسم الملف (مثل js/tools.js)", saved: "حُفظ ✓", aiFail: "تعذّر التعديل — جرّب ثانية",
+    filesTab: "الملفات", editorTab: "المحرر", outTab: "النتيجة", replaceAll: "استبدال كامل للملف",
+  } : {
+    home: "Home", newProj: "New project", name: "Project name", create: "Create", tpl: "Template",
+    heroT: "Firas Code", heroSub: "A full dev workspace in the browser — you type, the AI edits surgically with you",
+    recent: "Your projects live in the sidebar", run: "▶ Refresh", zip: "⬇ ZIP", addFile: "+ File",
+    preview: "Preview", console: "Console", clearCon: "Clear", aiPh: "Ask for a change… \"add dark mode\" or \"fix the button\"", aiGo: "Run",
+    working: "Thinking & editing…", diffT: "Review changes", newF: "new", editF: "edit", delF: "delete",
+    apply: "Apply selected", cancel: "Cancel", applied: "Changes applied ✓", nothing: "No changes proposed",
+    delFileC: "Delete this file?", fileName: "File name (e.g. js/tools.js)", saved: "Saved ✓", aiFail: "Couldn't edit — try again",
+    filesTab: "Files", editorTab: "Editor", outTab: "Output", replaceAll: "Full file replacement",
+  };
+}
+function codeFilesOf(chat) {
+  const m = chat.messages && chat.messages[0];
+  const p = m ? parseProjectMeta(m.content) : null;
+  return p ? { name: p.name || chat.title || "project", files: p.files.map((f) => ({ path: f.path, content: String(f.content || "") })) } : { name: chat.title || "project", files: [] };
+}
+function codeSaveFiles(chat, name, files) {
+  const slim = files.slice(0, 30).map((f) => ({ path: String(f.path).slice(0, 120), content: String(f.content || "").slice(0, 60000) }));
+  let payload = JSON.stringify({ name: String(name || "project").slice(0, 80), files: slim });
+  for (let g = 0; g < 30 && payload.length > 180000; g++) {   // same server cap discipline as agent projects
+    const big = slim.reduce((a, b) => (b.content.length > a.content.length ? b : a), slim[0]);
+    big.content = big.content.slice(0, Math.floor(big.content.length * 0.8));
+    payload = JSON.stringify({ name, files: slim });
+  }
+  const content = "```firas-project\n" + payload + "\n```";
+  if (!chat.messages || !chat.messages.length) chat.messages = [{ role: "assistant", content, reasoning: "", lang: state.lang }];
+  else chat.messages[0].content = content;
+  chat.updatedAt = Date.now();
+  persistChat(chat);
+}
+function createCodeProject(name, files) {
+  const chat = { id: uid(), serverId: null, title: String(name || "مشروع").slice(0, 80), codeProj: true, createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
+  state.chats.unshift(chat);
+  codeSaveFiles(chat, name, files);
+  state.activeId = chat.id;
+  return chat;
+}
+/* Open any delivered project folder inside Firas Code (the Agent → Code bridge). */
+function openProjectInFirasCode(proj) {
+  if (PRODUCTS.code.locked) { showUnderDevModal(PRODUCTS.code.name); return; }   // gated until launch
+  const chat = createCodeProject(proj.name || "project", (proj.files || []).map((f) => ({ path: f.path, content: f.content })));
+  state.product = "code";
+  try { localStorage.setItem(LS_PRODUCT, "code"); } catch (_) {}
+  cwState.file = 0; cwState.renderedChat = "";
+  applyShellLang(state.lang);
+  renderAll();
+  showToast(state.lang === "ar" ? "انفتح المشروع في فراس كود ⚡" : "Opened in Firas Code ⚡");
+}
+/* CodeMirror 5 (UMD, no build step). Best-effort: the editor falls back to a plain textarea. */
+let _cmReady = null;
+function ensureCodeMirror() {
+  if (window.CodeMirror) return Promise.resolve(true);
+  if (_cmReady) return _cmReady;
+  const base = "https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/";
+  if (!document.getElementById("cmCss")) {
+    const l = document.createElement("link"); l.id = "cmCss"; l.rel = "stylesheet"; l.href = base + "codemirror.min.css";
+    document.head.appendChild(l);
+  }
+  _cmReady = (async () => {
+    try {
+      await loadScripts([base + "codemirror.min.js", base + "mode/xml/xml.min.js", base + "mode/javascript/javascript.min.js", base + "mode/css/css.min.js", base + "mode/htmlmixed/htmlmixed.min.js", base + "mode/python/python.min.js", base + "addon/selection/active-line.min.js"]);
+      return !!window.CodeMirror;
+    } catch (_) { return false; }
+  })();
+  return _cmReady;
+}
+function cwModeFor(path) {
+  const ext = String(path).split(".").pop().toLowerCase();
+  return ext === "html" || ext === "htm" ? "htmlmixed"
+    : ext === "js" || ext === "mjs" || ext === "jsx" ? "javascript"
+    : ext === "json" ? { name: "javascript", json: true }
+    : ext === "css" ? "css"
+    : ext === "py" ? "python"
+    : ext === "xml" || ext === "svg" ? "xml"
+    : null;
+}
+/* Simple line diff (LCS). Returns rows [{t:' '|'+'|'-'|'~', s|n}] with long unchanged runs folded. */
+function cwLineDiff(aStr, bStr) {
+  const a = String(aStr).split("\n"), b = String(bStr).split("\n");
+  if (a.length > 1200 || b.length > 1200) return null;
+  const n = a.length, m = b.length;
+  const dp = new Uint16Array((n + 1) * (m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+    dp[i * (m + 1) + j] = a[i] === b[j] ? dp[(i + 1) * (m + 1) + j + 1] + 1 : Math.max(dp[(i + 1) * (m + 1) + j], dp[i * (m + 1) + j + 1]);
+  }
+  const rows = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { rows.push({ t: " ", s: a[i] }); i++; j++; }
+    else if (dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1]) { rows.push({ t: "-", s: a[i] }); i++; }
+    else { rows.push({ t: "+", s: b[j] }); j++; }
+  }
+  while (i < n) { rows.push({ t: "-", s: a[i++] }); }
+  while (j < m) { rows.push({ t: "+", s: b[j++] }); }
+  // fold unchanged runs longer than 8 lines to 3+…+3
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (run.length > 8) { out.push(...run.slice(0, 3), { t: "~", n: run.length - 6 }, ...run.slice(-3)); }
+    else out.push(...run);
+    run = [];
+  };
+  rows.forEach((r) => { if (r.t === " ") run.push(r); else { flush(); out.push(r); } });
+  flush();
+  return out;
+}
+/* Console capture: injected into the preview so its logs/errors stream into the console pane. */
+const CW_CONSOLE_HOOK = "<script>(function(){function s(t,a){try{parent.postMessage({__fcw:1,t:t,m:Array.prototype.slice.call(a).map(function(x){try{return typeof x===\"object\"?JSON.stringify(x).slice(0,300):String(x)}catch(e){return String(x)}}).join(\" \").slice(0,600)},\"*\")}catch(e){}}[\"log\",\"warn\",\"error\",\"info\"].forEach(function(k){var o=console[k];console[k]=function(){s(k,arguments);try{o.apply(console,arguments)}catch(e){}}});window.addEventListener(\"error\",function(e){s(\"error\",[e.message+\" @ line \"+e.lineno])});window.addEventListener(\"unhandledrejection\",function(e){s(\"error\",[\"Promise: \"+e.reason])})})();</" + "script>";
+let _cwMsgWired = false;
+function cwWireConsoleListener() {
+  if (_cwMsgWired) return;
+  _cwMsgWired = true;
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d || d.__fcw !== 1) return;
+    const pane = document.querySelector("#codeWorkspace .cw-console__list");
+    if (!pane) return;
+    const row = document.createElement("div");
+    row.className = "cw-conrow cw-conrow--" + (d.t || "log");
+    row.textContent = d.m;
+    pane.appendChild(row);
+    pane.scrollTop = pane.scrollHeight;
+    if (d.t === "error") {
+      const tab = document.querySelector("#codeWorkspace .cw-tab[data-tab=console]");
+      if (tab) tab.classList.add("has-errors");
+    }
+  });
+}
+function renderCodeWorkspace() {
+  els.welcome.classList.add("hidden");
+  let root = document.getElementById("codeWorkspace");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "codeWorkspace";
+    els.chatScroll.parentElement.insertBefore(root, els.chatScroll.nextSibling);
+  }
+  const chat = activeChat();
+  if (!chat || !chat.codeProj) { cwState.renderedChat = ""; renderCodeHome(root); return; }
+  renderCodeIDE(root, chat);
+}
+function renderCodeHome(root) {
+  const L = cwT(), ar = state.lang === "ar";
+  root.setAttribute("dir", ar ? "rtl" : "ltr");
+  const TPL_META = {
+    blank: { ic: "📄", desc: ar ? "صفحة HTML واحدة نظيفة تبدأ منها" : "One clean HTML page to start from" },
+    site:  { ic: "🌐", desc: ar ? "هيكل موقع كامل: صفحة + تنسيق + تفاعل" : "Full site scaffold: page + styles + logic" },
+  };
+  root.innerHTML =
+    '<div class="cw-home">' +
+      '<div class="cw-home__hero">' +
+        '<span class="cw-home__mark"><span class="cw-home__mark-glyph">&lt;/&gt;</span></span>' +
+        "<h1>" + L.heroT + "</h1><p>" + L.heroSub + "</p>" +
+      "</div>" +
+      '<div class="cw-home__card">' +
+        '<label class="cw-home__lbl">' + L.name + '</label><input class="cw-home__name" maxlength="60" placeholder="' + (ar ? "متجري الإلكتروني" : "my-store") + '">' +
+        '<label class="cw-home__lbl">' + L.tpl + '</label>' +
+        '<div class="cw-home__tpls">' + Object.keys(CW_TEMPLATES).map((k, i) =>
+          '<button type="button" class="cw-home__tpl' + (i === 1 ? " is-active" : "") + '" data-tpl="' + k + '">' +
+            '<span class="cw-home__tpl-ic">' + (TPL_META[k] ? TPL_META[k].ic : "📦") + "</span>" +
+            '<span class="cw-home__tpl-txt"><strong>' + (ar ? CW_TEMPLATES[k].ar : CW_TEMPLATES[k].en) + "</strong>" +
+            '<small>' + (TPL_META[k] ? TPL_META[k].desc : "") + "</small></span>" +
+            '<span class="cw-home__tpl-check">✓</span>' +
+          "</button>").join("") + "</div>" +
+        '<button type="button" class="cw-home__create">' + L.create + " ⚡</button>" +
+      "</div>" +
+      '<p class="cw-home__hint">' + L.recent + "</p>" +
+    "</div>";
+  let tpl = "site";
+  root.querySelectorAll(".cw-home__tpl").forEach((b) => b.addEventListener("click", () => {
+    tpl = b.getAttribute("data-tpl");
+    root.querySelectorAll(".cw-home__tpl").forEach((x) => x.classList.toggle("is-active", x === b));
+  }));
+  root.querySelector(".cw-home__create").addEventListener("click", () => {
+    const name = root.querySelector(".cw-home__name").value.trim() || (ar ? "مشروع جديد" : "new-project");
+    createCodeProject(name, CW_TEMPLATES[tpl].files.map((f) => ({ path: f.path, content: f.content })));
+    cwState.file = 0; cwState.renderedChat = "";
+    renderAll();
+  });
+}
+function cwRefreshPreview(root, chat) {
+  const { files } = codeFilesOf(chat);
+  const ifr = root.querySelector(".cw-preview");
+  if (!ifr) return;
+  let html = projPreviewHtml({ name: "p", files }) || "<!DOCTYPE html><html><body style='font-family:sans-serif;color:#888;display:grid;place-items:center;height:100vh'>" + (state.lang === "ar" ? "أضف ملف index.html للمعاينة" : "Add an index.html to preview") + "</body></html>";
+  html = html.replace(/<head([^>]*)>/i, "<head$1>" + CW_CONSOLE_HOOK);
+  if (html.indexOf(CW_CONSOLE_HOOK) === -1) html = CW_CONSOLE_HOOK + html;
+  const list = root.querySelector(".cw-console__list"); if (list) list.innerHTML = "";
+  const tab = root.querySelector(".cw-tab[data-tab=console]"); if (tab) tab.classList.remove("has-errors");
+  ifr.srcdoc = html;
+}
+function cwSelectFile(root, chat, idx) {
+  const { files } = codeFilesOf(chat);
+  cwState.file = Math.max(0, Math.min(idx, files.length - 1));
+  root.querySelectorAll(".cw-file").forEach((el, k) => el.classList.toggle("is-active", k === cwState.file));
+  const f = files[cwState.file];
+  if (!f) return;
+  if (cwState.cm) {
+    cwState.cm.setValue(f.content);
+    const mode = cwModeFor(f.path);
+    cwState.cm.setOption("mode", mode);
+    cwState.cm.clearHistory();
+  } else if (cwState.cmFallback) {
+    cwState.cmFallback.value = f.content;
+  }
+}
+function cwCurrentEditorValue() {
+  return cwState.cm ? cwState.cm.getValue() : (cwState.cmFallback ? cwState.cmFallback.value : null);
+}
+function cwCommitEdit(root, chat, alsoPreview) {
+  const val = cwCurrentEditorValue();
+  if (val == null) return;
+  const st = codeFilesOf(chat);
+  if (!st.files[cwState.file]) return;
+  if (st.files[cwState.file].content === val) { if (alsoPreview) cwRefreshPreview(root, chat); return; }
+  st.files[cwState.file].content = val;
+  codeSaveFiles(chat, st.name, st.files);
+  const row = root.querySelectorAll(".cw-file")[cwState.file];
+  if (row) { const sz = row.querySelector(".cw-file__size"); if (sz) sz.textContent = Math.max(1, Math.round(val.length / 1024)) + "K"; }
+  if (alsoPreview) cwRefreshPreview(root, chat);
+}
+function cwRenderTree(root, chat) {
+  const L = cwT();
+  const { files } = codeFilesOf(chat);
+  const tree = root.querySelector(".cw-tree__list");
+  tree.innerHTML = "";
+  const nEl = root.querySelector(".cw-tree__n"); if (nEl) nEl.textContent = files.length;
+  const cEl = root.querySelector(".cw-bar__count"); if (cEl) cEl.textContent = files.length + (state.lang === "ar" ? " ملفات" : " files");
+  const extOf = (p) => (/\.html?$/.test(p) ? "html" : /\.css$/.test(p) ? "css" : /\.m?jsx?$/.test(p) ? "js" : /\.py$/.test(p) ? "py" : /\.json$/.test(p) ? "json" : /\.md$/.test(p) ? "md" : "txt");
+  files.forEach((f, i) => {
+    const ext = extOf(f.path);
+    const row = document.createElement("div");
+    row.className = "cw-file" + (i === cwState.file ? " is-active" : "");
+    row.innerHTML = '<span class="cw-file__dot" data-ext="' + ext + '"></span>' +
+      '<span class="cw-file__p" dir="ltr">' + escapeHtml(f.path) + "</span>" +
+      '<span class="cw-file__size">' + Math.max(1, Math.round((f.content || "").length / 1024)) + "K</span>" +
+      '<button type="button" class="cw-file__x" title="' + L.delF + '">✕</button>';
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".cw-file__x")) {
+        if (!confirm(L.delFileC)) return;
+        const st = codeFilesOf(chat);
+        st.files.splice(i, 1);
+        codeSaveFiles(chat, st.name, st.files);
+        cwState.file = 0;
+        cwRenderTree(root, chat); cwSelectFile(root, chat, 0); cwRefreshPreview(root, chat);
+        return;
+      }
+      cwCommitEdit(root, chat, false);
+      cwSelectFile(root, chat, i);
+    });
+    tree.appendChild(row);
+  });
+}
+async function renderCodeIDE(root, chat) {
+  const L = cwT(), ar = state.lang === "ar";
+  cwWireConsoleListener();
+  if (cwState.renderedChat === chat.id && root.querySelector(".cw")) { return; }   // already mounted
+  cwState.renderedChat = chat.id; cwState.file = 0; cwState.cm = null; cwState.cmFallback = null;
+  root.setAttribute("dir", ar ? "rtl" : "ltr");
+  root.innerHTML =
+    '<div class="cw">' +
+      '<div class="cw-bar">' +
+        '<button type="button" class="cw-bar__home" title="' + L.home + '">⌂</button>' +
+        '<span class="cw-bar__logo">&lt;/&gt;</span>' +
+        '<span class="cw-bar__name">' + escapeHtml(chat.title || "project") + "</span>" +
+        '<span class="cw-bar__count"></span>' +
+        '<span class="cw-bar__sp"></span>' +
+        '<button type="button" class="cw-bar__btn cw-run">' + L.run + "</button>" +
+        '<button type="button" class="cw-bar__btn cw-addfile">' + L.addFile + "</button>" +
+        '<button type="button" class="cw-bar__btn cw-zip">' + L.zip + "</button>" +
+      "</div>" +
+      '<div class="cw-main">' +
+        '<aside class="cw-tree">' +
+          '<div class="cw-tree__head">' + (state.lang === "ar" ? "الملفات" : "Files") + '<span class="cw-tree__n"></span></div>' +
+          '<div class="cw-tree__list"></div>' +
+        "</aside>" +
+        '<section class="cw-ed"><textarea class="cw-ed__ta" spellcheck="false"></textarea></section>' +
+        '<section class="cw-right">' +
+          '<div class="cw-tabs">' +
+            '<button type="button" class="cw-tab is-active" data-tab="preview">' + L.preview + "</button>" +
+            '<button type="button" class="cw-tab" data-tab="console">' + L.console + "</button>" +
+            '<button type="button" class="cw-conclear" title="' + L.clearCon + '">🗑</button>' +
+          "</div>" +
+          '<div class="cw-prevwrap">' +
+            '<div class="cw-prevchrome"><span class="cw-prevdots"><i></i><i></i><i></i></span><span class="cw-prevaddr">' + L.preview + " · localhost</span></div>" +
+            '<iframe class="cw-preview" sandbox="allow-scripts allow-modals" title="preview"></iframe>' +
+          "</div>" +
+          '<div class="cw-console" hidden><div class="cw-console__list"></div></div>' +
+        "</section>" +
+      "</div>" +
+      '<form class="cw-ai">' +
+        '<input class="cw-ai__in" placeholder="' + L.aiPh + '" maxlength="1200">' +
+        '<button type="submit" class="cw-ai__go">⚡ ' + L.aiGo + "</button>" +
+      "</form>" +
+      '<div class="cw-diff" hidden></div>' +
+    "</div>";
+  // tree + editor + preview
+  cwRenderTree(root, chat);
+  const ta = root.querySelector(".cw-ed__ta");
+  const ok = await ensureCodeMirror();
+  if (ok && window.CodeMirror && cwState.renderedChat === chat.id) {
+    cwState.cm = window.CodeMirror.fromTextArea(ta, {
+      lineNumbers: true, lineWrapping: false, indentUnit: 2, tabSize: 2,
+      direction: "ltr", viewportMargin: 30, styleActiveLine: true,
+    });
+    cwState.cm.on("change", () => {
+      clearTimeout(cwState.saveTimer);
+      cwState.saveTimer = setTimeout(() => { cwCommitEdit(root, chat, false); }, 900);
+      clearTimeout(cwState.prevTimer);
+      cwState.prevTimer = setTimeout(() => { cwCommitEdit(root, chat, true); }, 1600);
+    });
+  } else {
+    cwState.cmFallback = ta;
+    ta.addEventListener("input", () => {
+      clearTimeout(cwState.saveTimer);
+      cwState.saveTimer = setTimeout(() => { cwCommitEdit(root, chat, true); }, 1200);
+    });
+  }
+  cwSelectFile(root, chat, 0);
+  cwRefreshPreview(root, chat);
+  // bar actions
+  root.querySelector(".cw-bar__home").addEventListener("click", () => { cwCommitEdit(root, chat, false); state.activeId = null; cwState.renderedChat = ""; renderAll(); });
+  root.querySelector(".cw-run").addEventListener("click", () => cwCommitEdit(root, chat, true));
+  root.querySelector(".cw-zip").addEventListener("click", () => {
+    cwCommitEdit(root, chat, false);
+    const st = codeFilesOf(chat);
+    let folder = String(st.name || "project").replace(/[^\w؀-ۿ .-]+/g, " ").replace(/\s+/g, "-").replace(/^-+|-+$/g, "") || "project";
+    const blob = buildZip(st.files.map((f) => ({ path: folder + "/" + f.path, content: f.content })));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = folder + ".zip";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  });
+  root.querySelector(".cw-addfile").addEventListener("click", () => {
+    const p = prompt(L.fileName);
+    if (!p) return;
+    const path = p.trim().replace(/^\/+/, "").replace(/[^\w./ -]+/g, "-").slice(0, 120);
+    if (!path) return;
+    const st = codeFilesOf(chat);
+    if (st.files.some((f) => f.path === path)) { showToast(state.lang === "ar" ? "الملف موجود" : "File exists"); return; }
+    st.files.push({ path, content: "" });
+    codeSaveFiles(chat, st.name, st.files);
+    cwRenderTree(root, chat);
+    cwSelectFile(root, chat, st.files.length - 1);
+  });
+  // tabs
+  root.querySelectorAll(".cw-tab").forEach((b) => b.addEventListener("click", () => {
+    cwState.tab = b.getAttribute("data-tab");
+    root.querySelectorAll(".cw-tab").forEach((x) => x.classList.toggle("is-active", x === b));
+    root.querySelector(".cw-prevwrap").style.display = cwState.tab === "preview" ? "" : "none";
+    root.querySelector(".cw-console").hidden = cwState.tab !== "console";
+    if (cwState.tab === "console") b.classList.remove("has-errors");
+  }));
+  root.querySelector(".cw-conclear").addEventListener("click", () => { const l = root.querySelector(".cw-console__list"); if (l) l.innerHTML = ""; });
+  // Ctrl/Cmd+S → save + refresh
+  root.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) { e.preventDefault(); cwCommitEdit(root, chat, true); showToast(L.saved); }
+  });
+  // AI command bar
+  root.querySelector(".cw-ai").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (cwState.busy) return;
+    const inp = root.querySelector(".cw-ai__in");
+    const ask = inp.value.trim();
+    if (!ask) return;
+    cwCommitEdit(root, chat, false);
+    const go = root.querySelector(".cw-ai__go");
+    cwState.busy = true; go.disabled = true; inp.disabled = true; go.textContent = L.working;
+    try {
+      const res = await cwAskAI(chat, ask);
+      if (!res || (!res.changes.length && !res.dels.length)) { showToast(L.nothing); }
+      else cwShowDiff(root, chat, res);
+      inp.value = "";
+    } catch (_) { showToast(L.aiFail); }
+    finally { cwState.busy = false; go.disabled = false; inp.disabled = false; go.textContent = "⚡ " + L.aiGo; }
+  });
+}
+async function cwAskAI(chat, instruction) {
+  const st = codeFilesOf(chat);
+  const isWeb = st.files.some((f) => /\.html?$/.test(f.path));
+  const filesTxt = st.files.map((f) => "===== " + f.path + " =====\n" + String(f.content).slice(0, 15000)).join("\n\n").slice(0, 90000);
+  const sys = "You are Firas Code, an expert pair-programmer editing the user's OPEN project. Apply the request with MINIMAL surgical changes — keep everything that shouldn't change byte-identical. STRICT OUTPUT FORMAT: first ONE short summary line in the user's language; then for EVERY added or modified file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE new file content>\n```\nTo delete a file output a line: DELETE: relative/path.ext\nRules: include ONLY files that change; ALWAYS output full file content (never snippets, never '...'), valid runnable code; do not invent files the request doesn't need." + (isWeb ? VISUAL_POLICY : "");
+  const usr = "PROJECT: " + st.name + "\n\nCURRENT FILES:\n" + filesTxt + "\n\nUSER REQUEST:\n" + String(instruction).slice(0, 1200);
+  const out = await callAgentText([{ role: "system", content: sys }, { role: "user", content: usr }], "max", null);
+  const changes = [];
+  const re = /```file:([^\n]+)\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(out))) {
+    const path = m[1].trim().replace(/^\/+/, "").slice(0, 120);
+    if (path) changes.push({ path, content: m[2].replace(/\n$/, "") });
+  }
+  const dels = [...out.matchAll(/^DELETE:\s*([^\s`]+)\s*$/gm)].map((x) => x[1]).filter((p) => st.files.some((f) => f.path === p));
+  const summary = (out.split("```")[0] || "").trim().split("\n")[0].slice(0, 220);
+  return { changes, dels, summary };
+}
+function cwShowDiff(root, chat, res) {
+  const L = cwT();
+  const st = codeFilesOf(chat);
+  const wrap = root.querySelector(".cw-diff");
+  const items = res.changes.map((c) => {
+    const old = st.files.find((f) => f.path === c.path);
+    return { kind: old ? "edit" : "new", path: c.path, content: c.content, old: old ? old.content : "" };
+  }).concat(res.dels.map((p) => ({ kind: "del", path: p, content: "", old: (st.files.find((f) => f.path === p) || {}).content || "" })));
+  const rowsHtml = items.map((it, i) => {
+    let body = "";
+    if (it.kind === "del") body = '<div class="cw-diff__all cw-diff__all--del">' + L.delF + "</div>";
+    else {
+      const d = it.kind === "new" ? null : cwLineDiff(it.old, it.content);
+      if (!d) {
+        body = '<div class="cw-diff__all">' + (it.kind === "new" ? "" : L.replaceAll) + '<pre class="cw-diff__pre">' + escapeHtml(it.content.slice(0, 4000)) + (it.content.length > 4000 ? "\n…" : "") + "</pre></div>";
+      } else {
+        body = '<div class="cw-diff__lines">' + d.map((r) => r.t === "~"
+          ? '<div class="cw-dl cw-dl--fold">⋯ ' + r.n + " ⋯</div>"
+          : '<div class="cw-dl cw-dl--' + (r.t === "+" ? "add" : r.t === "-" ? "del" : "same") + '">' + escapeHtml(r.s || " ") + "</div>").join("") + "</div>";
+      }
+    }
+    return '<details class="cw-diff__file" data-i="' + i + '" ' + (items.length <= 2 ? "open" : "") + '>' +
+      '<summary><input type="checkbox" checked data-ck="' + i + '" onclick="event.stopPropagation()"> ' +
+      '<span class="cw-diff__badge cw-diff__badge--' + it.kind + '">' + (it.kind === "new" ? L.newF : it.kind === "del" ? L.delF : L.editF) + "</span>" +
+      '<code dir="ltr">' + escapeHtml(it.path) + "</code></summary>" + body + "</details>";
+  }).join("");
+  wrap.innerHTML =
+    '<div class="cw-diff__card">' +
+      '<div class="cw-diff__head"><strong>' + L.diffT + "</strong>" + (res.summary ? '<span class="cw-diff__sum">' + escapeHtml(res.summary) + "</span>" : "") + "</div>" +
+      '<div class="cw-diff__list">' + rowsHtml + "</div>" +
+      '<div class="cw-diff__acts"><button type="button" class="cw-diff__apply">✓ ' + L.apply + '</button><button type="button" class="cw-diff__cancel">' + L.cancel + "</button></div>" +
+    "</div>";
+  wrap.hidden = false;
+  wrap.querySelector(".cw-diff__cancel").addEventListener("click", () => { wrap.hidden = true; wrap.innerHTML = ""; });
+  wrap.querySelector(".cw-diff__apply").addEventListener("click", () => {
+    const picked = [...wrap.querySelectorAll("[data-ck]")].filter((c) => c.checked).map((c) => parseInt(c.getAttribute("data-ck"), 10));
+    const cur = codeFilesOf(chat);
+    picked.forEach((i) => {
+      const it = items[i];
+      if (it.kind === "del") { const k = cur.files.findIndex((f) => f.path === it.path); if (k >= 0) cur.files.splice(k, 1); }
+      else {
+        const ex = cur.files.find((f) => f.path === it.path);
+        if (ex) ex.content = it.content; else cur.files.push({ path: it.path, content: it.content });
+      }
+    });
+    codeSaveFiles(chat, cur.name, cur.files);
+    wrap.hidden = true; wrap.innerHTML = "";
+    cwState.file = Math.min(cwState.file, Math.max(0, cur.files.length - 1));
+    cwRenderTree(root, chat);
+    cwSelectFile(root, chat, cwState.file);
+    cwRefreshPreview(root, chat);
+    showToast(L.applied);
+  });
+}
+
 function showUnderDevModal(name) {
   const old = document.getElementById("firasDevModal"); if (old) old.remove();
   const ar = state.lang === "ar";
@@ -10726,13 +11254,21 @@ async function shareActiveChat() {
   if (!chat || !chat.messages || !chat.messages.length) { showToast(ar ? "افتح محادثة فيها رسائل أولًا" : "Open a chat with messages first"); return; }
   showToast(ar ? "ينشئ رابط المشاركة…" : "Creating share link…");
   try {
-    const r = await apiJson("/api/share", { method: "POST", body: JSON.stringify({ chatId: chat.id }) });
+    // SAVE FIRST, ALWAYS: creates the chat on the server if it's new (that's where serverId is
+    // born) and pushes the LATEST messages, so sharing works mid-conversation and the snapshot
+    // is current. The old code sent the LOCAL chat.id — the server has never heard of it for any
+    // chat created this session, so sharing "randomly" failed until a reload.
+    await persistChat(chat);
+    if (!chat.serverId && chat._creating) { try { await chat._creating; } catch (_) {} }
+    const sid = chat.serverId || chat.id;
+    if (!chat.serverId) throw new Error("not saved");
+    const r = await apiJson("/api/share", { method: "POST", body: JSON.stringify({ chatId: sid }) });
     if (!r || !r.id) throw new Error("no id");
     const link = location.origin + "/?share=" + r.id;
     const ok = await copyText(link);
     showToast(ok ? (ar ? "تم نسخ رابط المشاركة ✓" : "Share link copied ✓") : link);
   } catch (e) {
-    showToast(ar ? "تعذّر إنشاء الرابط — احفظ المحادثة أولًا (أرسل رسالة) ثم أعد المحاولة" : "Couldn't create the link — try again after the chat is saved");
+    showToast(ar ? "تعذّر إنشاء الرابط — تأكد من تسجيل الدخول واتصالك ثم أعد المحاولة" : "Couldn't create the link — check you're signed in and online, then retry");
   }
 }
 
