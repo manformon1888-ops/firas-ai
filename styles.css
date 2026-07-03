@@ -618,13 +618,21 @@ h1, h2, h3 { margin: 0; font-family: var(--font-serif); font-weight: var(--weigh
   border: var(--border-hairline) solid var(--color-border-hairline);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
-  -webkit-touch-callout: none;   /* long-press opens our own copy menu, not the OS callout */
+  /* Long-press (any device) opens ONLY our Copy menu — never the OS callout and never a
+     text selection. The user copies via the button, not by selecting the text. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
   font-family: var(--font-sans);
   font-size: var(--text-base); line-height: var(--leading-base);
   color: var(--color-text-primary);
   white-space: pre-wrap;
   word-wrap: break-word; overflow-wrap: anywhere;
 }
+/* KaTeX inside a user bubble keeps its own layout; selection stays off */
+.msg-user__bubble * { -webkit-user-select: none; user-select: none; }
 .msg-user__bubble[dir="rtl"] { font-family: var(--font-arabic); }
 
 /* ----- Assistant prose — no bubble, document on bg ----- */

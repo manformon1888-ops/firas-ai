@@ -1650,9 +1650,32 @@ function decorateMarkdown(container) {
 }
 
 /** Typeset LaTeX math in a rendered node via KaTeX auto-render. Never throws.
-    Runs on already-sanitized DOM. Supports $..$, \(..\), $$..$$, \[..\]. */
+    Runs on already-sanitized DOM. Supports $..$, \(..\), $$..$$, \[..\].
+    KaTeX loads via <script defer> — on a slow phone it may not be ready when a message first
+    renders. So if it's not loaded yet we QUEUE the node and re-typeset the moment it arrives,
+    guaranteeing math renders on EVERY device (not just fast desktops). */
+const _mathQueue = [];
+let _mathWatching = false;
+function _drainMathQueue() {
+  const q = _mathQueue.splice(0);
+  q.forEach((n) => { if (n && n.isConnected) typesetMath(n); });
+}
 function typesetMath(node) {
-  if (!node || typeof window.renderMathInElement !== "function") return;
+  if (!node) return;
+  if (typeof window.renderMathInElement !== "function") {
+    _mathQueue.push(node);
+    if (!_mathWatching) {
+      _mathWatching = true;
+      let tries = 0;
+      const tick = () => {
+        if (typeof window.renderMathInElement === "function") { _mathWatching = false; _drainMathQueue(); }
+        else if (++tries < 120) { setTimeout(tick, 150); }   // poll up to ~18s
+        else { _mathWatching = false; _mathQueue.length = 0; }
+      };
+      setTimeout(tick, 120);
+    }
+    return;
+  }
   try {
     window.renderMathInElement(node, {
       delimiters: [
@@ -4096,13 +4119,17 @@ async function ensureExportFonts(isAr) {
       _exportFontsLink = true;
     }
     if (document.fonts && document.fonts.load) {
+      // Load against REAL Arabic text (not "1em") so the browser actually fetches the glyphs a
+      // title/body needs — some engines lazy-load per codepoint and report "loaded" for an empty
+      // sample. Bigger timeout because PHONES on mobile data are slower than desktops; if the
+      // webfont still isn't ready the OS-native Arabic font (in the stack) shapes correctly anyway.
+      const sample = isAr ? "الفيزياء" : "Reading";
       const want = isAr
         ? ["400 1em Tajawal", "500 1em Tajawal", "700 1em Tajawal", "800 1em Tajawal", "600 1em Cairo", "700 1em Cairo", "800 1em Cairo"]
         : ["400 1em Lora", "500 1em Lora", "700 1em Lora", "italic 400 1em Lora", "500 1em Inter", "600 1em Inter", "700 1em Inter"];
-      // Never hang the export on a slow/blocked CDN → cap the wait, then fall back.
       await Promise.race([
-        Promise.all(want.map((f) => document.fonts.load(f).catch(() => {}))).then(() => document.fonts.ready),
-        new Promise((r) => setTimeout(r, 2500)),
+        Promise.all(want.map((f) => document.fonts.load(f, sample).catch(() => {}))).then(() => document.fonts.ready),
+        new Promise((r) => setTimeout(r, 6000)),
       ]);
     }
   } catch (_) { /* offline / blocked → system fonts */ }
@@ -4111,8 +4138,8 @@ async function ensureExportFonts(isAr) {
 /* ── ③ NAMED DOCUMENT TEMPLATES — full layout identities, not just colors. ── */
 function templateCss(tpl, th, isAr, scope) {
   const dp = scope ? scope + " " : "";
-  const sans = isAr ? '"Cairo","Tajawal","Segoe UI",Arial,sans-serif' : '"Inter","Helvetica Neue",Arial,sans-serif';
-  const serif = isAr ? '"Tajawal","Segoe UI",Arial,sans-serif' : '"Lora",Georgia,serif';
+  const sans = isAr ? '"Cairo","Tajawal","Noto Sans Arabic","Geeza Pro","Segoe UI","Tahoma",sans-serif' : '"Inter","Helvetica Neue",Arial,sans-serif';
+  const serif = isAr ? '"Tajawal","Noto Naskh Arabic","Geeza Pro","Segoe UI","Tahoma",sans-serif' : '"Lora",Georgia,serif';
   const ink = th.ink || "1A1A18";
   if (tpl === "academic") return (
     // Numbered headings (1. / 1.1) + formal light cover + abstract-style first blockquote.
@@ -4185,8 +4212,11 @@ function splitIntoVolumes(body, maxLen) {
   return vols.length ? vols : [String(body || "")];
 }
 function exportCss(th, isAr, scope, tpl) {
-  const fontStack = isAr ? '"Tajawal","Segoe UI","Tahoma",Arial,sans-serif' : '"Lora",Georgia,"Times New Roman","Cambria",serif';
-  const sansStack = isAr ? '"Cairo","Tajawal","Segoe UI",Arial,sans-serif' : '"Inter","Helvetica Neue","Segoe UI",Arial,sans-serif';
+  // Arabic stacks end in OS-native Arabic shapers (Geeza Pro=iOS, Noto=Android, Segoe/Tahoma=Windows)
+  // then bare `sans-serif` — the OS default ALWAYS shapes Arabic. Bare "Arial" is dropped: on some
+  // phones its Arabic substitution confuses html2canvas → separated/overlapping letters.
+  const fontStack = isAr ? '"Tajawal","Noto Naskh Arabic","Geeza Pro","Segoe UI","Tahoma",sans-serif' : '"Lora",Georgia,"Times New Roman","Cambria",serif';
+  const sansStack = isAr ? '"Cairo","Tajawal","Noto Sans Arabic","Geeza Pro","Segoe UI","Tahoma",sans-serif' : '"Inter","Helvetica Neue","Segoe UI",Arial,sans-serif';
   const bg = th.bg || "FFFFFF", ink = th.ink || "1A1A18", line = th.border || "D8D6CB";
   const root = scope || "body";
   const dp = scope ? scope + " " : "";
@@ -4487,7 +4517,7 @@ async function exportPdf(turn, lang, msg) {
   showToast(t().preparing);
   await ensureExportFonts(isAr);                  // professional fonts ready first
   await tikzReady(30000);                         // let TikZ/plot figures finish rendering
-  await new Promise((r) => setTimeout(r, 160));   // fonts + layout settle
+  await new Promise((r) => setTimeout(r, isAr ? 320 : 160));   // Arabic needs a touch more to paint shaped glyphs before capture
 
   let done = false;
   const cleanup = () => { if (done) return; done = true; try { root.remove(); } catch (_) {} try { document.title = prevDocTitle; } catch (_) {} };
@@ -9871,7 +9901,12 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     + (ctx.prevRunTitle ? "\n\nPREVIOUS COMPLETED TASK: " + ctx.prevRunTitle : "");
   let taskCtx = task + convoCtx;
   const ar = replyLang === "ar";
-  const langRule = ar ? " Respond entirely in Arabic (الفصحى الواضحة)." : " Respond in English.";
+  // The deliverable MUST match the language the user wrote in — content AND every human-readable
+  // string (UI labels, titles, headings, captions, chart/table labels, filenames). Only code
+  // keywords/APIs stay English. This applies to files, websites, docs, decks — everything.
+  const langRule = ar
+    ? " LANGUAGE — ABSOLUTE RULE: the user wrote in ARABIC, so EVERYTHING you produce is in Arabic (فصحى واضحة): all prose and content; ALL user-facing text in any website/app (buttons, nav, labels, headings, placeholders, messages); every document/section title and heading; all table and chart labels; captions. Programming keywords and APIs stay English, but every human-readable string is Arabic. NEVER switch to English for the content."
+    : " LANGUAGE — ABSOLUTE RULE: the user wrote in ENGLISH, so EVERYTHING you produce is in English: all prose and content; ALL user-facing text in any website/app (buttons, nav, labels, headings, placeholders, messages); every document/section title and heading; all table and chart labels; captions. NEVER switch to Arabic or any other language for the content.";
   const run = { task, title: "", phase: "plan", lang: replyLang, steps: [], final: "", mode: "answer", stats: { startedAt: Date.now(), files: 0, lines: 0, fixes: 0, visual: 0, searches: 0, images: 0, checks: 0 } };
   // DELIVERABLE MODE: doc (PDF/Word…) · codefile (ONE complete code file — user asked "بكود واحد")
   // · project (a real multi-file FOLDER, downloadable as ZIP — the default for sites/apps) · answer.
@@ -9994,13 +10029,13 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
       usrTxt = "THE TASK:\n" + task.slice(0, 3000) + "\n\nPLANNED FILES:\n" + run.steps.filter((s) => s.file).map((s) => "- " + s.file + " — " + s.title).join("\n");
     } else if (run.mode === "project") {
       const built = run.steps.filter((s) => s.s === "done" && s.file).map((s) => "===== " + s.file + " (already built) =====\n" + stripToCode(s.out).slice(0, 1800)).join("\n\n").slice(0, 10000);
-      sysTxt = "You are Firas Agent building ONE FILE of a professional multi-file project. Output ONLY the COMPLETE, FINAL content of the file `" + st.file + "` in ONE fenced code block — no commentary, no omissions, never stop mid-file. PRODUCTION-GRADE; stay perfectly CONSISTENT with the design system and the other files (ids, classes, imports, paths)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "") + " User-facing text in the interface must be in the user's language.";
+      sysTxt = "You are Firas Agent building ONE FILE of a professional multi-file project. Output ONLY the COMPLETE, FINAL content of the file `" + st.file + "` in ONE fenced code block — no commentary, no omissions, never stop mid-file. PRODUCTION-GRADE; stay perfectly CONSISTENT with the design system and the other files (ids, classes, imports, paths)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "") + langRule;
       const prevFile = ctx.prevProj ? (ctx.prevProj.files.find((x) => x.path === st.file) || null) : null;
       const siblings = run.steps.filter((s) => s.s === "done" && s.file && s.file !== st.file && s.kind !== "design").map((s) => { const c = stripToCode(s.out); const ids = [...c.matchAll(/id=["']([\w-]+)["']/g)].map((m) => m[1]); const cls = [...c.matchAll(/class=["']([^"']+)["']/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean); const fns = [...c.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]); return "• " + s.file + " → ids[" + [...new Set(ids)].slice(0, 40).join(",") + "] classes[" + [...new Set(cls)].slice(0, 60).join(",") + "] symbols[" + [...new Set(fns)].slice(0, 40).join(",") + "]"; }).join("\n").slice(0, 4000);
       usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + designSpec + (/\.html?$/i.test(st.file || "") ? imgSpec : "") + "\n\nPROJECT FILES (plan):\n" + run.steps.filter((s) => s.file).map((s) => "- " + s.file + " — " + s.title).join("\n") + (built ? "\n\nFILES ALREADY BUILT:\n" + built : "") + (siblings ? "\n\nCROSS-FILE CONTRACT — this file MUST reference these EXACT ids/classes/symbols the sibling files already expose; use them precisely, and only ADD new ones, never rename an existing shared one:\n" + siblings : "") + (prevFile ? "\n\nCURRENT VERSION OF `" + st.file + "` (EVOLVE it — apply the new request, keep everything that should stay):\n" + String(prevFile.content || "").slice(0, 22000) : "") + "\n\nBUILD THIS FILE NOW, COMPLETE: " + st.file;
     } else if (run.mode === "codefile") {
       const built = prevOutline();
-      sysTxt = "You are Firas Agent building ONE SECTION of a single-file deliverable (all sections get merged into ONE complete file at the end). Output ONLY this section's code in ONE fenced code block — consistent with the design system and the sections already built (same ids/classes)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "");
+      sysTxt = "You are Firas Agent building ONE SECTION of a single-file deliverable (all sections get merged into ONE complete file at the end). Output ONLY this section's code in ONE fenced code block — consistent with the design system and the sections already built (same ids/classes)." + SIZE_MANDATE + TECH_BRAIN + (isWebFile ? VISUAL_POLICY : "") + langRule;
       usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + designSpec + imgSpec + (ctx.prevCode ? "\n\nTHE CURRENT FILE BEING EVOLVED (head):\n" + ctx.prevCode.slice(0, 8000) : "") + "\n\nFULL PLAN:\n" + planList + (built ? "\n\nSECTIONS ALREADY BUILT (stay consistent — do not repeat):\n" + built : "") + "\n\nBUILD SECTION " + (i + 1) + " NOW: " + st.title;
     } else if (run._deck) {
       // ④ DECK author — this step writes the SLIDES for one section, in the exact markdown the PPTX
@@ -10223,7 +10258,7 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     run.phase = "assemble"; sync(false);
     try {
       const merged = await agentCall([
-        { role: "system", content: "You are Firas Agent's INTEGRATOR. Merge the section outputs into ONE complete, coherent, production-quality file. Include EVERYTHING from every section (deduplicate overlapping boilerplate, unify the design system), fix any inconsistency, and output ONLY the final file in ONE fenced code block — no commentary, never stop mid-file." + VISUAL_POLICY },
+        { role: "system", content: "You are Firas Agent's INTEGRATOR. Merge the section outputs into ONE complete, coherent, production-quality file. Include EVERYTHING from every section (deduplicate overlapping boilerplate, unify the design system), fix any inconsistency, and output ONLY the final file in ONE fenced code block — no commentary, never stop mid-file." + VISUAL_POLICY + langRule },
         { role: "user", content: "THE TASK:\n" + taskCtx.slice(0, 3000) + (run._design ? "\n\nDESIGN SYSTEM (the file must follow it):\n" + run._design.slice(0, 4000) : "") + (ctx.prevCode ? "\n\nCURRENT FILE (the BASE — merge the sections/changes INTO it, keep everything that should stay):\n" + ctx.prevCode.slice(0, 40000) : "") + "\n\nSECTIONS TO MERGE:\n" + run.steps.filter((s) => s.s === "done" && s.kind !== "design").map((s, i) => "===== SECTION " + (i + 1) + ": " + s.title + " =====\n" + stripToCode(s.out)).join("\n\n").slice(0, 120000) },
       ], "max", signal);
       // Code lang of the deliverable (html unless the task named another language) — so the
