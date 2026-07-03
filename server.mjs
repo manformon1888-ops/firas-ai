@@ -1331,7 +1331,9 @@ async function streamOllama(res, messages, tier, think, signal, modelOverride) {
   // 429/503 on the hosted pool clears within a second or two.
   let upstream = null;
   let lastErr = null;
+  let was429 = false;
   const OLLAMA_BACKOFF = [600, 1800];
+  const OLLAMA_BACKOFF_429 = [4500, 9000];   // per-minute rate limit — a real wait beats burning the Gemini quota
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       upstream = await fetch(OLLAMA_CHAT_URL, {
@@ -1341,6 +1343,7 @@ async function streamOllama(res, messages, tier, think, signal, modelOverride) {
         signal,
       });
       if (upstream.ok && upstream.body) break;
+      was429 = (upstream.status === 429);   // reset each attempt so a 429→503 sequence doesn't over-wait
       lastErr = new Error("ollama " + upstream.status);
       upstream = null;
       // a non-OK HTTP status from Ollama itself is not a "connect" failure;
@@ -1352,7 +1355,7 @@ async function streamOllama(res, messages, tier, think, signal, modelOverride) {
       lastErr = e;
       upstream = null;
     }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, OLLAMA_BACKOFF[attempt]));
+    if (attempt < 2) await new Promise((r) => setTimeout(r, (was429 ? OLLAMA_BACKOFF_429 : OLLAMA_BACKOFF)[attempt]));
   }
 
   if (!upstream) {
@@ -1823,10 +1826,18 @@ async function handleImage(req, res) {
   const prompt = (u.searchParams.get("prompt") || "").trim().slice(0, 1000);
   if (!prompt) { res.writeHead(400); return res.end("no prompt"); }
   // Daily cap keyed by creation id: a NEW image (unseen cid) counts ONCE and only
-  // on success; reloads (same cid) are free; failures never charge.
-  const cid = (u.searchParams.get("cid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+  // on success; reloads (same cid) are free; failures never charge. A MISSING cid must still
+  // be charged (an omitted cid was a full quota bypass) → synthesize one from prompt+seed so a
+  // retry of the same prompt doesn't double-count. (Matches the edge backend.)
+  let cid = (u.searchParams.get("cid") || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+  const _seedParam = (u.searchParams.get("seed") || "").replace(/[^0-9]/g, "").slice(0, 12);
+  if (!cid) {
+    let hsh = 0; const pk = prompt + "|" + _seedParam;
+    for (let i = 0; i < pk.length; i++) hsh = ((hsh << 5) - hsh + pk.charCodeAt(i)) | 0;
+    cid = "auto" + (hsh >>> 0).toString(36);
+  }
   imgRollDay(user);
-  const isNew = !!cid && !user.imgCids.includes(cid);
+  const isNew = !user.imgCids.includes(cid);
   if (isNew && user.imgCids.length >= IMAGE_DAILY_LIMIT) { res.writeHead(429); return res.end("daily limit reached"); }
   const w = Math.min(1280, Math.max(256, parseInt(u.searchParams.get("w"), 10) || 1024));
   const h = Math.min(1280, Math.max(256, parseInt(u.searchParams.get("h"), 10) || 1024));

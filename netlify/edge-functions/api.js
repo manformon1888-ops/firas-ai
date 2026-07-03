@@ -668,15 +668,19 @@ async function streamOllamaInto(enc, messages, tier, think, signal, modelOverrid
   if (OLLAMA_API_KEY) headers["Authorization"] = "Bearer " + OLLAMA_API_KEY;
   let upstream = null;
   // 3 attempts with REAL backoff — a transient 429/503 (Ollama cloud briefly saturated) usually
-  // clears within a second or two; 2 tries 400ms apart were far too impatient and surfaced "busy".
+  // clears within a second or two. A 429 (per-minute rate limit, e.g. parallel agent steps) gets a
+  // LONGER wait — retrying it in 600ms just burns the Gemini fallback quota too.
   const BACKOFF = [600, 1800];
+  const BACKOFF_429 = [4500, 9000];
+  let was429 = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       upstream = await fetch(OLLAMA_CHAT_URL, { method: "POST", headers, body: reqBody, signal });
       if (upstream.ok && upstream.body) break;
+      was429 = upstream.status === 429;
       upstream = null;
     } catch (e) { if (signal.aborted) return true; upstream = null; }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, BACKOFF[attempt]));
+    if (attempt < 2) await new Promise((r) => setTimeout(r, (was429 ? BACKOFF_429 : BACKOFF)[attempt]));
   }
   if (!upstream) return false; // unreachable -> caller falls back
   const reader = upstream.body.getReader(); let buffer = "";

@@ -7590,8 +7590,11 @@ function finalizeAi(aiMsg, chat) {
   }
 
   // Append the downloadable file card if this reply answered a file request and
-  // is a real reply. The placeholder turn was built empty (no card yet).
-  if (!imgMeta && !codeMeta && !aiNode.querySelector(".file-card") &&
+  // is a real reply. The placeholder turn was built empty (no card yet). Structured blocks
+  // (firas-ask/agent/deck/project) are NEVER file-cards — without this exclusion a plan-mode
+  // clarifying-questions turn after a "…pdf" request got a stray card that exported raw JSON
+  // (the static render path already excludes them; this mirrors it for the streaming path).
+  if (!imgMeta && !codeMeta && !/^\s*```firas-(?!file)/.test(aiMsg.content || "") && !aiNode.querySelector(".file-card") &&
       aiMsg.content && aiMsg.content.trim() && !aiMsg.offline) {
     const fmt = requestedFormatForAssistant(chat, idx);
     if (fmt) {
@@ -10058,9 +10061,12 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     }
     // the remaining files — concurrently (each sees the design + the foundation file)
     const rest = fileSteps.map((x) => x.i).filter((i) => i !== foundationI && run.steps[i].s !== "done");
-    let p = 0; const CONC = 3;
-    const worker = async () => { while (p < rest.length && !signal.aborted) { await buildStep(rest[p++]); } };
-    await Promise.all(Array.from({ length: Math.min(CONC, rest.length) }, () => worker()));
+    let p = 0; const CONC = 2;   // 2 staggered lanes — 3 simultaneous calls tripped the engines' per-minute 429s
+    const worker = async (w) => {
+      if (w) await new Promise((r) => setTimeout(r, w * 2500));
+      while (p < rest.length && !signal.aborted) { await buildStep(rest[p++]); }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONC, rest.length) }, (_, w) => worker(w)));
     if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
   } else if ((run.mode === "doc" || run.mode === "answer") && run.steps.length >= 3) {
     // DOCS/ANSWERS run their content steps IN PARALLEL too (~3× faster) — each chapter/question-set
@@ -10078,9 +10084,15 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
       if (s.kind === "research" || s.s === "done") return;
       (DEPENDENT.test(s.title || "") || i === run.steps.length - 1 && run._courseExam ? finals : mains).push(i);
     });
-    let dp = 0; const DCONC = 3;
-    const dworker = async () => { while (dp < mains.length && !signal.aborted) { await buildStep(mains[dp++]); } };
-    await Promise.all(Array.from({ length: Math.min(DCONC, Math.max(1, mains.length)) }, () => dworker()));
+    // Concurrency 2 with STAGGERED starts: the free-tier engines rate-limit per minute — three
+    // simultaneous heavy calls made every provider return 429 and the mission crawled through
+    // fallbacks. Two offset lanes keep the ~2× speedup without tripping the limits.
+    let dp = 0; const DCONC = 2;
+    const dworker = async (w) => {
+      if (w) await new Promise((r) => setTimeout(r, w * 2500));
+      while (dp < mains.length && !signal.aborted) { await buildStep(mains[dp++]); }
+    };
+    await Promise.all(Array.from({ length: Math.min(DCONC, Math.max(1, mains.length)) }, (_, w) => dworker(w)));
     if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
     for (const i of finals) {
       if (signal.aborted) { run.phase = "stopped"; sync(true); return run; }
@@ -10796,11 +10808,12 @@ function codeFilesOf(chat) {
 }
 function codeSaveFiles(chat, name, files) {
   const slim = files.slice(0, 30).map((f) => ({ path: String(f.path).slice(0, 120), content: String(f.content || "").slice(0, 60000) }));
-  let payload = JSON.stringify({ name: String(name || "project").slice(0, 80), files: slim });
+  const cappedName = String(name || "project").slice(0, 80);
+  let payload = JSON.stringify({ name: cappedName, files: slim });
   for (let g = 0; g < 30 && payload.length > 180000; g++) {   // same server cap discipline as agent projects
     const big = slim.reduce((a, b) => (b.content.length > a.content.length ? b : a), slim[0]);
     big.content = big.content.slice(0, Math.floor(big.content.length * 0.8));
-    payload = JSON.stringify({ name, files: slim });
+    payload = JSON.stringify({ name: cappedName, files: slim });
   }
   const content = "```firas-project\n" + payload + "\n```";
   if (!chat.messages || !chat.messages.length) chat.messages = [{ role: "assistant", content, reasoning: "", lang: state.lang }];
@@ -11265,11 +11278,51 @@ async function shareActiveChat() {
     const r = await apiJson("/api/share", { method: "POST", body: JSON.stringify({ chatId: sid }) });
     if (!r || !r.id) throw new Error("no id");
     const link = location.origin + "/?share=" + r.id;
-    const ok = await copyText(link);
-    showToast(ok ? (ar ? "تم نسخ رابط المشاركة ✓" : "Share link copied ✓") : link);
+    // Copy IMMEDIATELY (works while the click's clipboard permission is still warm), then show the
+    // share sheet — its Copy button is a FRESH gesture, so copying is guaranteed even when the
+    // network wait outlived the permission (the old silent-failure case).
+    const autoCopied = await copyText(link);
+    openShareSheet(link, ar, autoCopied);
+    if (autoCopied) showToast(ar ? "تم نسخ رابط المشاركة ✓" : "Share link copied ✓");
   } catch (e) {
     showToast(ar ? "تعذّر إنشاء الرابط — تأكد من تسجيل الدخول واتصالك ثم أعد المحاولة" : "Couldn't create the link — check you're signed in and online, then retry");
   }
+}
+/* Small bottom sheet with the share link: tap-to-select input, a guaranteed Copy button,
+   and the OS share sheet on devices that support it. */
+function openShareSheet(link, ar, autoCopied) {
+  const old = document.getElementById("firasShareSheet"); if (old) old.remove();
+  const ov = document.createElement("div");
+  ov.id = "firasShareSheet"; ov.className = "share-sheet";
+  ov.setAttribute("dir", ar ? "rtl" : "ltr");
+  ov.innerHTML =
+    '<div class="share-sheet__card" role="dialog" aria-modal="true">' +
+      '<div class="share-sheet__head"><strong>' + (ar ? "رابط المشاركة" : "Share link") + "</strong>" +
+        '<button type="button" class="share-sheet__x" aria-label="close">✕</button></div>' +
+      '<input class="share-sheet__link" readonly dir="ltr" value="' + escapeHtml(link) + '">' +
+      '<div class="share-sheet__acts">' +
+        '<button type="button" class="share-sheet__copy">' + (autoCopied ? (ar ? "تم النسخ ✓" : "Copied ✓") : (ar ? "📋 نسخ الرابط" : "📋 Copy link")) + "</button>" +
+        (navigator.share ? '<button type="button" class="share-sheet__os">' + (ar ? "مشاركة عبر التطبيقات" : "Share via apps…") + "</button>" : "") +
+      "</div>" +
+      '<p class="share-sheet__note">' + (ar ? "أي شخص يملك الرابط يستطيع قراءة هذه المحادثة." : "Anyone with the link can read this conversation.") + "</p>" +
+    "</div>";
+  document.body.appendChild(ov);
+  requestAnimationFrame(() => ov.classList.add("is-open"));
+  const close = () => { ov.classList.remove("is-open"); setTimeout(() => ov.remove(), 180); };
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  ov.querySelector(".share-sheet__x").addEventListener("click", close);
+  const inp = ov.querySelector(".share-sheet__link");
+  inp.addEventListener("focus", () => inp.select());
+  inp.addEventListener("click", () => inp.select());
+  const cp = ov.querySelector(".share-sheet__copy");
+  cp.addEventListener("click", async () => {
+    const ok = await copyText(link);
+    cp.textContent = ok ? (ar ? "تم النسخ ✓" : "Copied ✓") : (ar ? "حدّد الرابط وانسخه يدويًا" : "Select the link & copy manually");
+    if (ok) showToast(ar ? "تم نسخ الرابط ✓" : "Link copied ✓");
+    else { inp.focus(); inp.select(); }
+  });
+  const os = ov.querySelector(".share-sheet__os");
+  if (os) os.addEventListener("click", () => { try { navigator.share({ title: "Firas AI", url: link }); } catch (_) {} });
 }
 
 /* Public read-only viewer for /?share=<id> — no login needed. Renders with the SAME pipeline
