@@ -2500,7 +2500,7 @@ function applyTheme(theme) {
   state.theme = theme;
   localStorage.setItem(LS_THEME, theme);
   document.documentElement.setAttribute("data-theme", theme);
-  els.themeToggle.setAttribute("aria-checked", theme === "dark" ? "true" : "false");
+  if (els.themeToggle) els.themeToggle.setAttribute("aria-checked", theme === "dark" ? "true" : "false"); // control now lives in Settings
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute("content", theme === "dark" ? "#262624" : "#FAF9F5");
 }
@@ -8230,6 +8230,7 @@ function openSettingsPanel() {
 
   const tx = ar ? {
     title: "الإعدادات", sub: "إدارة حسابك وأمانه", account: "الحساب",
+    appearanceH: "المظهر", themeLight: "نهاري", themeDark: "ليلي",
     chEmailH: "تغيير البريد الإلكتروني", newEmail: "البريد الجديد", curPw: "كلمة المرور الحالية", saveEmail: "حفظ البريد",
     chPwH: "تغيير كلمة المرور", newPw: "كلمة المرور الجديدة", newPwHint: "٨ أحرف على الأقل", savePw: "حفظ كلمة المرور",
     dangerH: "منطقة الخطر", dangerP: "حذف الحساب يمسح جميع محادثاتك نهائياً ولا يمكن التراجع عنه.",
@@ -8238,6 +8239,7 @@ function openSettingsPanel() {
     errPw: "كلمة المرور غير صحيحة", errEmailTaken: "هذا البريد مستخدم بالفعل", errEmailInvalid: "أدخل بريداً صالحاً", errPwShort: "كلمة المرور 8 أحرف على الأقل", errGeneric: "حدث خطأ، حاول مجدداً",
   } : {
     title: "Settings", sub: "Manage your account & security", account: "Account",
+    appearanceH: "Appearance", themeLight: "Light", themeDark: "Dark",
     chEmailH: "Change email", newEmail: "New email", curPw: "Current password", saveEmail: "Save email",
     chPwH: "Change password", newPw: "New password", newPwHint: "at least 8 characters", savePw: "Save password",
     dangerH: "Danger zone", dangerP: "Deleting your account erases all your conversations permanently. This can't be undone.",
@@ -8255,6 +8257,8 @@ function openSettingsPanel() {
     return tx.errGeneric;
   };
   const ICO = {
+    sun: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    moon: '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>',
     mail: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
     lock: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
     alert: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>',
@@ -8274,6 +8278,13 @@ function openSettingsPanel() {
         '<section class="set-hero">' +
           '<span class="set-avatar"></span>' +
           '<div class="set-hero-info"><span class="set-hero-eyebrow">' + tx.account + '</span><strong class="set-acct-name"></strong><span class="set-acct-email" dir="ltr"></span></div>' +
+        '</section>' +
+        '<section class="set-card set-appearance">' +
+          '<div class="set-card-h"><span class="set-ico set-theme-ico">' + (state.theme === "dark" ? ICO.moon : ICO.sun) + '</span>' + tx.appearanceH + '</div>' +
+          '<div class="set-theme-seg" role="radiogroup" aria-label="' + tx.appearanceH + '">' +
+            '<button type="button" class="set-theme-opt" data-theme-opt="light" role="radio">' + ICO.sun + '<span>' + tx.themeLight + '</span></button>' +
+            '<button type="button" class="set-theme-opt" data-theme-opt="dark" role="radio">' + ICO.moon + '<span>' + tx.themeDark + '</span></button>' +
+          '</div>' +
         '</section>' +
         '<form class="set-card set-email-form" novalidate autocomplete="off">' +
           '<div class="set-card-h"><span class="set-ico">' + ICO.mail + '</span>' + tx.chEmailH + '</div>' +
@@ -8324,6 +8335,25 @@ function openSettingsPanel() {
   ov.querySelector(".mem-x").addEventListener("click", close);
   onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
+
+  // — appearance (light / dark) — applies instantly, persists via applyTheme
+  const themeSeg = ov.querySelector(".set-theme-seg");
+  const syncThemeSeg = () => {
+    themeSeg.querySelectorAll(".set-theme-opt").forEach((b) => {
+      const on = b.getAttribute("data-theme-opt") === state.theme;
+      b.classList.toggle("is-active", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    const ico = ov.querySelector(".set-theme-ico");
+    if (ico) ico.innerHTML = state.theme === "dark" ? ICO.moon : ICO.sun;
+  };
+  themeSeg.addEventListener("click", (e) => {
+    const b = e.target.closest(".set-theme-opt");
+    if (!b) return;
+    applyTheme(b.getAttribute("data-theme-opt") === "dark" ? "dark" : "light");
+    syncThemeSeg();
+  });
+  syncThemeSeg();
 
   // — change email —
   const emailForm = ov.querySelector(".set-email-form");
@@ -9056,8 +9086,9 @@ function wireEvents() {
   const prodBtn = document.getElementById("productSwitch");
   if (prodBtn) prodBtn.addEventListener("click", openProductMenu);
 
-  // Theme
-  els.themeToggle.addEventListener("click", () => applyTheme(state.theme === "light" ? "dark" : "light"));
+  // Theme — the toggle moved into Settings (Appearance card); keep the wiring if a topbar
+  // toggle ever returns.
+  if (els.themeToggle) els.themeToggle.addEventListener("click", () => applyTheme(state.theme === "light" ? "dark" : "light"));
 
   // Sidebar collapse (desktop taskbar)
   const sidebarToggle = $("#sidebarToggle");
@@ -10662,7 +10693,9 @@ function openProductMenu() {
   if (isRtl) menu.style.right = Math.max(8, window.innerWidth - r.right) + "px";
   else menu.style.left = Math.max(8, r.left) + "px";
   setTimeout(() => {
-    const onDown = (e) => { if (!menu.contains(e.target) && e.target !== btn) { menu.remove(); document.removeEventListener("pointerdown", onDown, true); } };
+    // btn.contains — a press on the trigger's CHILDREN (label/arrow) must NOT count as
+    // outside-close, or the following click instantly REOPENS the menu (close→open flicker).
+    const onDown = (e) => { if (!menu.contains(e.target) && !btn.contains(e.target)) { menu.remove(); document.removeEventListener("pointerdown", onDown, true); } };
     document.addEventListener("pointerdown", onDown, true);
   }, 0);
 }
