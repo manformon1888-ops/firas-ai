@@ -716,6 +716,14 @@ function detectFileRequest(text) {
   if (!text) return null;
   const s = String(text).toLowerCase();
 
+  // EXPLICIT NEGATION — the user said NOT to make a file/pdf ("no pdf", "without a file",
+  // "بدون pdf", "لا تسوي ملف", "مو بي دي اف"). Honor it: no file deliverable at all.
+  if (/\b(?:no|without|don'?t\s+(?:make|create|want|need|give)|not\s+(?:a|an|as))\s+(?:a\s+|an\s+|any\s+)?(?:pdf|file|document|word|excel|powerpoint|ppt|csv|slides?|deck)\b/i.test(s) ||
+      /(?:بدون|بلا|من\s*دون|مو|مش|ليس|بغير|لا)\s*(?:ملف|مستند|وثيقة|pdf|بي\s*دي\s*اف|بدف|وورد|ورد|اكسل|إكسل|بوربوينت|عرض\s*تقديمي)/i.test(s) ||
+      /(?:لا\s*(?:تسوي|تعمل|تصنع|تنشئ|تحول|تحوّل)|ما\s*(?:اريد|أريد|ابي|أبي|بدي|بغيت))\s*[^.؟?!\n]{0,22}?(?:ملف|pdf|بي\s*دي\s*اف|بدف|مستند|وثيقة|بوربوينت|اكسل|وورد)/i.test(s)) {
+    return null;
+  }
+
   // STRONG = unambiguous format words (can request a file on their own).
   // WEAK   = everyday words (word/sheet/slides/ppt/presentation) that only count
   //          as a file request alongside a request verb or a generic "file" word.
@@ -1027,7 +1035,10 @@ function protectMath(text, store) {
   s = s.replace(/\$\$[\s\S]+?\$\$/g, stash);     // display $$ ... $$
   s = s.replace(/\\\[[\s\S]+?\\\]/g, stash);     // display \[ ... \]
   s = s.replace(/\\\([\s\S]+?\\\)/g, stash);     // inline  \( ... \)
-  s = s.replace(/\$(?!\s)[^$\n]*?[^\s$]\$(?!\d)/g, stash); // inline $ ... $
+  // Bare \ce{...} / \pu{...} (chemistry) written OUTSIDE math delimiters → wrap in \(…\) so KaTeX+mhchem
+  // renders it AND the later unicode-substitution pass never corrupts \cdot/\times inside it.
+  s = s.replace(/\\(?:ce|pu)\s*\{(?:[^{}]|\{[^{}]*\})*\}/g, (m) => stash("\\(" + m + "\\)"));
+  s = s.replace(/\$(?!\s)[^$]*?[^\s$]\$(?!\d)/g, stash); // inline $ ... $ (allow a newline inside → multiline math not dropped)
   return s;
 }
 
@@ -2068,9 +2079,10 @@ function compilePlotExpr(src) {
     sqrt: Math.sqrt, cbrt: Math.cbrt, abs: Math.abs, sign: Math.sign, floor: Math.floor,
     ceil: Math.ceil, round: Math.round };
   const C = { pi: Math.PI, e: Math.E, tau: 2 * Math.PI };
+  const VAR = (arguments[1] || "x").toLowerCase();   // free variable: x (default), theta (polar), t (parametric)
   let s = String(src).replace(/\s+/g, "").toLowerCase();
   if (!s) return null;
-  s = s.replace(/\*\*/g, "^").replace(/(\d)([x(])/g, "$1*$2").replace(/\)([x(\d.])/g, ")*$1").replace(/x([x(])/g, "x*$1");
+  s = s.replace(/\*\*/g, "^").replace(/(\d)([a-z(])/g, "$1*$2").replace(/\)([a-z(\d.])/g, ")*$1").replace(new RegExp(VAR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([a-z(])", "g"), VAR + "*$1");
   let i = 0;
   function expr() { let a = term(); while (s[i] === "+" || s[i] === "-") { const o = s[i++], b = term(), A = a, B = b; a = o === "+" ? (x) => A(x) + B(x) : (x) => A(x) - B(x); } return a; }
   function term() { let a = unary(); while (s[i] === "*" || s[i] === "/") { const o = s[i++], b = unary(), A = a, B = b; a = o === "*" ? (x) => A(x) * B(x) : (x) => A(x) / B(x); } return a; }
@@ -2083,7 +2095,7 @@ function compilePlotExpr(src) {
     m = /^[a-z_][a-z0-9_]*/.exec(s.slice(i));
     if (m) {
       const n = m[0]; i += n.length;
-      if (n === "x") return (x) => x;
+      if (n === VAR) return (x) => x;
       if (Object.prototype.hasOwnProperty.call(C, n)) { const v = C[n]; return () => v; }
       if (Object.prototype.hasOwnProperty.call(F, n)) { if (s[i] !== "(") throw 0; i++; const a = expr(); if (s[i] !== ")") throw 0; i++; const f = F[n], A = a; return (x) => f(A(x)); }
       throw 0;
@@ -2161,20 +2173,68 @@ const PLOT_PW = PLOT_W - PLOT_L - PLOT_R, PLOT_PH = PLOT_H - PLOT_T - PLOT_B;
 // context), stroke:var(--plot-c1) would fall back to "none" → an INVISIBLE curve ("no graph").
 const PLOT_PAL = ["var(--plot-c1,#237a68)", "var(--plot-c2,#3b82f6)", "var(--plot-c3,#ef4444)", "var(--plot-c4,#d97706)", "var(--plot-c5,#7c3aed)"];
 
-/* Parse a plot spec → { fns:[{fn,expr,color}], dom:[a,b] } (or null if no function parses). */
+/* Evaluate a simple angle/number literal that may use pi (e.g. "2*pi", "pi/2", "-1.5"). */
+function plotParseNum(t) {
+  const f = compilePlotExpr(String(t).replace(/π/g, "pi"), "_none_");
+  if (!f) return NaN;
+  try { const v = f(0); return isFinite(v) ? v : NaN; } catch (_) { return NaN; }
+}
+/* Parse a plot spec → { fns:[{fn|points, expr, color}], dom, mode }. Supports THREE modes:
+   cartesian (y=f(x)), polar (r=f(theta)), parametric (x=f(t) & y=g(t)). null if nothing parses. */
 function parsePlotSpec(spec) {
-  const fns = []; let dom = null;
-  String(spec).split(/\r?\n/).forEach((ln) => {
-    ln = ln.trim(); if (!ln || /^(#|\/\/)/.test(ln)) return;
-    const m = /^(?:domain|x)\s*[:=]\s*(-?[0-9.]+)\s*(?:\.\.|,|to|:)\s*(-?[0-9.]+)/i.exec(ln)
-           || /^(-?[0-9.]+)\s*(?:\.\.|to)\s*(-?[0-9.]+)$/i.exec(ln);
-    if (m) { const a = parseFloat(m[1]), b = parseFloat(m[2]); if (isFinite(a) && isFinite(b) && a < b) dom = [a, b]; return; }
+  const lines = String(spec).split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^(#|\/\/)/.test(l));
+  let dom = null, pdom = null, polarSrc = null, px = null, py = null;
+  const cart = [];
+  lines.forEach((ln) => {
+    // cartesian x-domain
+    let m = /^(?:domain|x)\s*[:=]\s*(-?[0-9.]+)\s*(?:\.\.|,|to|:)\s*(-?[0-9.]+)/i.exec(ln) || /^(-?[0-9.]+)\s*(?:\.\.|to)\s*(-?[0-9.]+)$/i.exec(ln);
+    if (m && !/theta|θ|\bt\b/i.test(ln)) { const a = parseFloat(m[1]), b = parseFloat(m[2]); if (isFinite(a) && isFinite(b) && a < b) dom = [a, b]; return; }
+    // parameter domain (theta / t)
+    let pm = /^(?:theta|θ|t)\s*[:=]\s*([^\s]+)\s*(?:\.\.|,|to|:)\s*([^\s]+)$/i.exec(ln);
+    if (pm) { const a = plotParseNum(pm[1]), b = plotParseNum(pm[2]); if (isFinite(a) && isFinite(b) && a < b) pdom = [a, b]; return; }
+    // polar r = f(theta)
+    let rm = /^(?:polar\s*:?\s*)?r\s*(?:\(\s*(?:theta|θ|t)\s*\))?\s*=\s*(.+)$/i.exec(ln);
+    if (rm && /theta|θ|\bt\b/i.test(rm[1])) { polarSrc = rm[1].replace(/θ/g, "theta").trim(); return; }
+    // parametric x(t)= / y(t)=
+    let xm = /^x\s*(?:\(\s*t\s*\))?\s*=\s*(.+)$/i.exec(ln);
+    let ym = /^y\s*(?:\(\s*t\s*\))?\s*=\s*(.+)$/i.exec(ln);
+    if (xm && /\bt\b/i.test(xm[1])) { px = xm[1].trim(); return; }
+    if (ym && /\bt\b/i.test(ym[1]) && px) { py = ym[1].trim(); return; }
+    // cartesian y=f(x)
     const e = ln.replace(/^[a-z]\s*\(\s*x\s*\)\s*=/i, "").replace(/^y\s*=/i, "").trim();
-    const fn = compilePlotExpr(e);
-    if (fn) fns.push({ fn: fn, expr: e, color: PLOT_PAL[fns.length % PLOT_PAL.length] });
+    const fn = compilePlotExpr(e, "x");
+    if (fn) cart.push({ fn: fn, expr: e, color: PLOT_PAL[cart.length % PLOT_PAL.length] });
   });
-  if (!fns.length) return null;
-  return { fns: fns, dom: dom || [-6, 6] };
+  // POLAR
+  if (polarSrc) {
+    const rf = compilePlotExpr(polarSrc, "theta");
+    if (rf) {
+      const [t0, t1] = pdom || [0, 2 * Math.PI]; const N = 720, pts = [];
+      for (let k = 0; k <= N; k++) { const th = t0 + (t1 - t0) * k / N; let r; try { r = rf(th); } catch (_) { r = NaN; } if (isFinite(r)) pts.push([r * Math.cos(th), r * Math.sin(th)]); }
+      if (pts.length > 2) return { fns: [{ points: pts, expr: "r = " + polarSrc, color: PLOT_PAL[0] }], mode: "polar", bounds: plotPointsBounds(pts, true) };
+    }
+  }
+  // PARAMETRIC
+  if (px && py) {
+    const fx = compilePlotExpr(px, "t"), fy = compilePlotExpr(py, "t");
+    if (fx && fy) {
+      const [t0, t1] = pdom || [0, 2 * Math.PI]; const N = 720, pts = [];
+      for (let k = 0; k <= N; k++) { const t = t0 + (t1 - t0) * k / N; let X, Y; try { X = fx(t); Y = fy(t); } catch (_) { X = NaN; } if (isFinite(X) && isFinite(Y)) pts.push([X, Y]); }
+      if (pts.length > 2) return { fns: [{ points: pts, expr: "x = " + px + ",\\ y = " + py, color: PLOT_PAL[0] }], mode: "parametric", bounds: plotPointsBounds(pts, false) };
+    }
+  }
+  if (!cart.length) return null;
+  return { fns: cart, dom: dom || [-6, 6], mode: "cartesian" };
+}
+/* Bounds for a point cloud (polar/parametric). equalAspect keeps the plot square (nice for polar). */
+function plotPointsBounds(pts, equalAspect) {
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  pts.forEach(([x, y]) => { if (x < xmin) xmin = x; if (x > xmax) xmax = x; if (y < ymin) ymin = y; if (y > ymax) ymax = y; });
+  if (!isFinite(xmin)) return { xmin: -1, xmax: 1, ymin: -1, ymax: 1 };
+  const padX = (xmax - xmin) * 0.1 || 1, padY = (ymax - ymin) * 0.1 || 1;
+  xmin -= padX; xmax += padX; ymin -= padY; ymax += padY;
+  if (equalAspect) { const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2, r = Math.max(xmax - xmin, ymax - ymin) / 2; xmin = cx - r; xmax = cx + r; ymin = cy - r; ymax = cy + r; }
+  return { xmin, xmax, ymin, ymax };
 }
 
 /* Auto y-range for fns over [x0,x1] — percentile-clipped so asymptotes don't dominate. */
@@ -2216,7 +2276,16 @@ function plotSvgString(fns, view) {
   const N = 500, span = ymax - ymin;
   fns.forEach((f) => {
     let d = "", up = true;
-    for (let k = 0; k <= N; k++) { const x = xmin + (xmax - xmin) * k / N; let y; try { y = f.fn(x); } catch (_) { y = NaN; } if (typeof y !== "number" || !isFinite(y) || y < ymin - span || y > ymax + span) { up = true; continue; } const X = sx(x), Y = sy(Math.max(ymin, Math.min(ymax, y))); d += (up ? "M" : "L") + X.toFixed(1) + " " + Y.toFixed(1) + " "; up = false; }
+    if (f.points) {
+      // POLAR / PARAMETRIC — draw the pre-traced point path (clipped to the view).
+      f.points.forEach(([x, y]) => {
+        if (!isFinite(x) || !isFinite(y) || x < xmin - span || x > xmax + span || y < ymin - span || y > ymax + span) { up = true; return; }
+        const X = sx(Math.max(xmin, Math.min(xmax, x))), Y = sy(Math.max(ymin, Math.min(ymax, y)));
+        d += (up ? "M" : "L") + X.toFixed(1) + " " + Y.toFixed(1) + " "; up = false;
+      });
+    } else {
+      for (let k = 0; k <= N; k++) { const x = xmin + (xmax - xmin) * k / N; let y; try { y = f.fn(x); } catch (_) { y = NaN; } if (typeof y !== "number" || !isFinite(y) || y < ymin - span || y > ymax + span) { up = true; continue; } const X = sx(x), Y = sy(Math.max(ymin, Math.min(ymax, y))); d += (up ? "M" : "L") + X.toFixed(1) + " " + Y.toFixed(1) + " "; up = false; }
+    }
     if (d) curves += `<path class="plot-curve" style="stroke:${f.color}" d="${d}"/>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="function graph">` +
@@ -2226,11 +2295,16 @@ function plotSvgString(fns, view) {
     grid + ax + `<g clip-path="url(#${id}c)">${curves}</g>` + `</svg>`;
 }
 
+/* The home view for a parsed spec: point-cloud bounds for polar/parametric, auto-y for cartesian. */
+function plotHomeView(p) {
+  if (p.bounds) return p.bounds;                       // polar / parametric
+  const ay = plotAutoY(p.fns, p.dom[0], p.dom[1]);
+  return { xmin: p.dom[0], xmax: p.dom[1], ymin: ay.ymin, ymax: ay.ymax };
+}
 /* Back-compat: render straight from a spec at the auto view. */
 function renderPlotSvg(spec) {
   const p = parsePlotSpec(spec); if (!p) return null;
-  const ay = plotAutoY(p.fns, p.dom[0], p.dom[1]);
-  return plotSvgString(p.fns, { xmin: p.dom[0], xmax: p.dom[1], ymin: ay.ymin, ymax: ay.ymax });
+  return plotSvgString(p.fns, plotHomeView(p));
 }
 
 /* Make a rendered plot pan/zoomable: mouse drag + wheel; touch one-finger pan + two-finger pinch;
@@ -2312,8 +2386,7 @@ function plotifyCodeBlock(code) {
   const pre = code.parentElement; if (!pre) return false;
   const p = parsePlotSpec(code.textContent || "");
   if (!p) return false; // couldn't parse a function → leave as a normal code box
-  const ay = plotAutoY(p.fns, p.dom[0], p.dom[1]);
-  const home = { xmin: p.dom[0], xmax: p.dom[1], ymin: ay.ymin, ymax: ay.ymax };
+  const home = plotHomeView(p);
   const fig = document.createElement("figure");
   fig.className = "tikz-figure plot-figure plot-interactive";
   fig.innerHTML = plotSvgString(p.fns, home);
@@ -2324,8 +2397,9 @@ function plotifyCodeBlock(code) {
     const row = document.createElement("div"); row.className = "plot-legend__row";
     const sw = document.createElement("span"); sw.className = "plot-legend__sw"; sw.style.background = f.color;
     const lb = document.createElement("span"); lb.className = "plot-legend__lb";
-    const tex = plotExprToLatex(f.expr);
-    lb.textContent = tex ? ("\\(y = " + tex + "\\)") : ("y = " + f.expr);
+    // polar/parametric already carry a full "r = …" / "x = …, y = …" label; cartesian gets "y = …".
+    const tex = f.points ? null : plotExprToLatex(f.expr);
+    lb.textContent = tex ? ("\\(y = " + tex + "\\)") : (f.points ? ("\\(" + f.expr + "\\)") : ("y = " + f.expr));
     row.appendChild(sw); row.appendChild(lb); leg.appendChild(row);
   });
   fig.appendChild(leg);
@@ -4315,6 +4389,17 @@ function exportCss(th, isAr, scope, tpl) {
 function exportBody(mdNode, lang, meta) {
   const clone = mdNode.cloneNode(true);
   clone.querySelectorAll(".code-block__head, .code-block__copy, .code-preview-btn, .file-disclosure__summary, .tikz-figure__spin, .plot-reset, script[type='text/tikz']").forEach((n) => n.remove());
+  // PDF must use ONLY our in-house renderers. A TikZJax-engine figure has an SVG whose glyphs are
+  // <use xlink:href> into the EXTERNAL tikzjax stylesheet → unresolved off-screen → broken/blank in
+  // the PDF. Drop any engine or still-pending tikz figure; our self-contained plot / mini-tikz SVGs
+  // (class tikz-svg / plot-figure, no <use> refs) are kept untouched.
+  clone.querySelectorAll(".tikz-figure").forEach((fig) => {
+    if (fig.classList.contains("plot-figure")) return;                 // in-house plot — always safe
+    const svg = fig.querySelector("svg");
+    const safe = svg && (svg.classList.contains("tikz-svg") || fig.querySelector(".plot-figure")) && !/<use\b/i.test(svg.innerHTML);
+    const isEngine = fig.hasAttribute("data-tikz-pending") || !svg || (!safe && /<use\b/i.test(svg.innerHTML)) || /tikzjax/i.test(svg.outerHTML || "");
+    if (isEngine) fig.remove();
+  });
   // Each plot/tikz SVG has internal clip-path/marker/gradient ids; the LIVE chat SVG keeps the
   // SAME ids and stays (hidden) in the DOM during print, so url(#id) would resolve to the hidden
   // def and clip the whole graph away → blank. Re-id every cloned SVG's ids to make them unique.
@@ -4492,7 +4577,7 @@ async function exportPdf(turn, lang, msg) {
     .replace(/[\\/:*?"<>|\n\r]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 90) || "Firas AI";
   document.title = fileTitle;
   if (mdNode.querySelector(".tikz-figure[data-tikz-pending]")) showToast(isAr ? "يُحضّر الرسوم قبل الحفظ…" : "Rendering figures…");
-  await tikzReady(30000);                       // wait for TikZ figures to finish (the TeX engine can be slow to load)
+  await tikzReady(4000);                       // in-house figures settle fast; engine (TikZJax) figures are stripped from the PDF
   const { cover, body } = exportBody(mdNode, lang, meta);
 
   // DIRECT DOWNLOAD (not print). Build an OFF-SCREEN, themed, A4-width root and render it to a REAL PDF
@@ -4516,7 +4601,7 @@ async function exportPdf(turn, lang, msg) {
 
   showToast(t().preparing);
   await ensureExportFonts(isAr);                  // professional fonts ready first
-  await tikzReady(30000);                         // let TikZ/plot figures finish rendering
+  await tikzReady(4000);                         // in-house plot/mini-tikz settle (engine figures are stripped)
   await new Promise((r) => setTimeout(r, isAr ? 320 : 160));   // Arabic needs a touch more to paint shaped glyphs before capture
 
   let done = false;
@@ -4535,7 +4620,7 @@ async function exportPdf(turn, lang, msg) {
     const docEl = root.querySelector(".doc");
     const coverEl = root.querySelector(".cover");
     // — Split any single block taller than a chunk (a 1000-item list / giant table) into parts —
-    const CHUNK_CSS_MAX = 6200;   // css px per chunk (~5.5 pages) → canvas ≤ 12.4k px at scale 2
+    const CHUNK_CSS_MAX = 5000;   // css px per chunk → at scale 3 a chunk canvas is ≤15k px (< the ~16k cap)
     const splitTall = () => {
       [...docEl.children].forEach((el) => {
         if (el.offsetHeight <= CHUNK_CSS_MAX) return;
@@ -4581,8 +4666,10 @@ async function exportPdf(turn, lang, msg) {
     const totalCssH = docEl.scrollHeight + (coverEl ? 1160 : 0);
     // Adaptive quality: short docs get crisp scale-2; big books trade a little sharpness for a
     // sane file size (raster PDFs grow linearly with page count).
-    const baseScale = totalCssH > 120000 ? 1.25 : totalCssH > 40000 ? 1.4 : 2;
-    const jpegQ = totalCssH > 120000 ? 0.74 : totalCssH > 40000 ? 0.8 : 0.95;
+    // HIGH-DPI: short/medium docs render at 3× (crisp text + graphs); huge books at 2× to keep the
+    // file size sane. jpeg quality raised across the board.
+    const baseScale = totalCssH > 120000 ? 2 : totalCssH > 40000 ? 2.5 : 3;
+    const jpegQ = totalCssH > 120000 ? 0.82 : totalCssH > 40000 ? 0.9 : 0.97;
     const chunks = [];                              // each: { nodes:[...], scale }
     if (coverEl) chunks.push({ nodes: [coverEl], scale: baseScale, isCover: true });
     let cur = [], curH = 0;
@@ -4615,7 +4702,7 @@ async function exportPdf(turn, lang, msg) {
       document.body.appendChild(cr);
       await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 20)));
       const cssH = cr.scrollHeight;
-      const chScale = Math.min(ch.scale, 13800 / Math.max(cssH, 1));   // never exceed the canvas cap
+      const chScale = Math.min(ch.scale, 15600 / Math.max(cssH, 1));   // never exceed the ~16k canvas cap (headroom)
       const canvas = await H2C(cr, { scale: chScale, useCORS: true, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
       if (!canvas || !canvas.width || !canvas.height) { cr.remove(); continue; }
       const pxPerMm = canvas.width / contentWmm;
@@ -6002,7 +6089,13 @@ function buildMessages(tier, conversation, replyLang) {
     "and cite. If you do NOT have reliable information about something (e.g. a match result, a current office-holder, " +
     "a future/recent event), say clearly that you're not certain and offer to look it up — NEVER make up a specific " +
     "score, name, or detail. If a match/event did not happen or you can't confirm it, say so plainly. A correct " +
-    "'I'm not sure' is far better than a confident wrong answer, and inventing a fake result is unacceptable.";
+    "'I'm not sure' is far better than a confident wrong answer, and inventing a fake result is unacceptable." +
+    " MATH/SCIENCE CORRECTNESS — VERIFY BEFORE ANSWERING: for any calculation, equation, derivation or " +
+    "quantitative result, CHECK your work before giving the final answer: substitute the solution back " +
+    "into the original equation, differentiate an antiderivative back to the integrand, re-add/re-multiply, " +
+    "verify units and dimensional consistency, and test edge cases. If a check fails, fix it silently and " +
+    "give only the corrected result. State exact closed forms (fractions, radicals, π) unless a decimal is asked. " +
+    "Never present an unverified numeric/algebraic result as final.";
   // In PLAN MODE, do NOT send buildRule/engineerRule — they push the model to emit the
   // full code/deliverable, which contradicts planSystem and caused the plan itself to be
   // written as a code block (then the Start pill was suppressed). planSystem alone governs.
@@ -6023,9 +6116,10 @@ function buildMessages(tier, conversation, replyLang) {
     "fenced code block tagged `plot` — it renders INSTANTLY as a real graph (zero delay, no engine). Put one or " +
     "more `y = <expression>` lines using EXPLICIT operators and standard functions, e.g.\n```plot\ny = x^2\n" +
     "domain: -4..4\n```\nSupported: + - * / ^, parentheses, and sin cos tan asin acos atan sinh cosh tanh exp ln " +
-    "log(base10) sqrt cbrt abs floor ceil round; constants pi, e. Use ONLY x as the variable; write explicit " +
-    "operators (x^2, 2*x, 1/(1+x^2), exp(-x^2), sin(x)). Several `y = …` lines draw several curves together. Add " +
-    "an optional `domain: a..b` line. " +
+    "log(base10) sqrt cbrt abs floor ceil round; constants pi, e. For a normal graph use x (x^2, 2*x, sin(x)); " +
+    "several `y = …` lines draw several curves. Add an optional `domain: a..b` line. " +
+    "POLAR: write `r = <expr in theta>` (e.g. `r = 1 + cos(theta)`) with an optional `theta: 0..2*pi`. " +
+    "PARAMETRIC: write BOTH `x = <expr in t>` and `y = <expr in t>` (e.g. `x = cos(t)` / `y = sin(2*t)`) with an optional `t: 0..2*pi`. " +
     "OTHER DRAWINGS (geometry / diagrams — triangles, circles, vectors, number lines, shapes, NOT function graphs): " +
     "output a fenced `tikz` block with a COMPLETE, self-contained \\begin{tikzpicture} … \\end{tikzpicture} — PLAIN " +
     "TikZ only (NO \\documentclass / \\usepackage / pgfplots / external libraries; draw axes and labels manually " +
@@ -6322,7 +6416,18 @@ async function callAgentText(messages, tierKey, signal) {
       try { const j = JSON.parse(d); const del = j.choices && j.choices[0] && j.choices[0].delta; if (del && del.content) out += del.content; } catch (_) {}
     }
   }
+  // The backend, when EVERY engine is saturated, streams a human "engine is busy/offline" NOTICE as
+  // a 200 body. For an internal AGENT call that text is poison (it becomes the plan/step) → throw so
+  // agentCall's retry+backoff kicks in instead of rendering a broken card or an "engine off" message.
+  if (isEngineBusyText(out)) throw new Error("engine-unavailable");
   return out;
+}
+/* Detect the backend's "all engines busy/offline" fallback notice (any language) so agent calls
+   retry instead of treating it as a real answer. */
+function isEngineBusyText(s) {
+  const t = String(s || "").trim();
+  if (!t) return true;   // empty stream = no engine answered
+  return t.length < 400 && /(engine|vision engine)\s+is\s+(busy|off|offline|unavailable|idle)|جميع\s*المحركات|المحرك\s*مشغول|غير\s*متاح\s*(حالي|الآن)|حاول\s*(مرة\s*أخرى|لاحق|ثاني)|try\s+again\s+shortly/i.test(t);
 }
 
 /** Like callAgentText, but invokes onDelta(fullSoFar) on every token so the caller
@@ -6348,6 +6453,7 @@ async function streamAgentText(messages, tierKey, signal, onDelta) {
       try { const j = JSON.parse(d); const del = j.choices && j.choices[0] && j.choices[0].delta; if (del && del.content) { out += del.content; if (onDelta) onDelta(out); } } catch (_) {}
     }
   }
+  if (isEngineBusyText(out)) throw new Error("engine-unavailable");   // all engines busy → retry, don't render the notice
   return out;
 }
 
@@ -6697,7 +6803,9 @@ function fixMathBlanks(md) {
    "0.85 A\cdotpm²") — they reach the page as raw backslash text. Fix the TEXT segments only (math and
    fenced code are left untouched): wrap bare \underline blanks in $…$, unicode-ize simple commands. */
 function sanitizeBareLatex(md) {
-  return String(md).split(/(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/).map((seg, i) => {
+  // Protect \ce{...}/\pu{...} chemistry FIRST (odd-index = untouched) so the unicode substitutions
+  // below never eat a \cdot inside a hydrate like \ce{CuSO4 \cdot 5H2O} and leave a stray backslash.
+  return String(md).split(/(\\(?:ce|pu)\s*\{(?:[^{}]|\{[^{}]*\})*\}|```[\s\S]*?```|\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/).map((seg, i) => {
     if (i % 2 === 1) return seg;                       // math / fenced code — untouched
     let s = seg;
     s = s.replace(/\\underline\{\\hspace\{([^{}]*)\}\}/g, (m, l) => "$\\underline{\\hspace{" + l + "}}$");
@@ -9170,8 +9278,10 @@ function wireEvents() {
   els.input.addEventListener("input", () => { autoGrow(); syncComposerDir(); updateSendState(); });
   els.input.addEventListener("focus", () => els.composer.classList.add("is-focused"));
   els.input.addEventListener("blur", () => els.composer.classList.remove("is-focused"));
+  // Enter inserts a NEWLINE (default textarea behavior) on EVERY device — sending happens ONLY via
+  // the send button, per the user's request. Ctrl/Cmd+Enter stays as an optional power-user send.
   els.input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
       e.preventDefault();
       if (!state.streaming) sendMessage();
     }

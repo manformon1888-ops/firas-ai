@@ -25,6 +25,9 @@ const ANTHROPIC_URL      = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MAX_TOK  = Math.max(1024, parseInt(env("ANTHROPIC_MAX_TOKENS") || "8192", 10) || 8192);
 const OPENROUTER_API_KEY = env("OPENROUTER_API_KEY") || "";
 const OPENROUTER_MODEL   = env("OPENROUTER_MODEL") || "nvidia/nemotron-3-ultra-550b-a55b:free";
+// Free VISION models on OpenRouter — used to READ attached images when Gemini/Ollama vision are
+// unavailable, so image support never fully dies. Comma-separated, tried in order.
+const OPENROUTER_VISION_MODELS = (env("OPENROUTER_VISION_MODELS") || "meta-llama/llama-3.2-11b-vision-instruct:free,qwen/qwen2.5-vl-32b-instruct:free,google/gemma-3-27b-it:free").split(",").map((s) => s.trim()).filter(Boolean);
 const OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions";
 // Gemini TEXT for Max — Google AI Studio FREE tier (Flash family, ~1500 req/day, no card).
 // OpenAI-compatible endpoint → streams like OpenRouter. Tried FIRST in the Max chain.
@@ -637,16 +640,19 @@ function chatStreamResponse(messages, tier, think, vision) {
         }
         const okOllama = served ? true : await streamOllamaInto(enc, ollamaMessages, tier, think, ac.signal, modelOverride);
         if (!okOllama && !closed) {
-          if (vision) { enc(sseFrame("The Firas AI vision engine is offline right now, so I can't view images. Please try again shortly.")); }
+          if (vision) {
+            // Gemini + Ollama vision failed → free OpenRouter vision model reads the image before giving up.
+            let vr = await streamOpenRouterVisionInto(enc, messages, ac.signal);
+            if (!vr && !closed) enc(sseFrame("The Firas AI vision engine is offline right now, so I can't view images. Please try again shortly."));
+          }
           else {
-            // RESCUE CHAIN for EVERY tier — never surface "busy" while any engine can answer:
-            // 1) the tier's Ollama fallback model (different hosted pool), 2) Gemini Flash (free),
-            // 3) OpenRouter free, 4) last-resort pollinations text fallback.
+            // RESCUE CHAIN — FAST providers first so a saturated Ollama pool doesn't slow the reply:
+            // 1) Gemini Flash (free, ~1s first token), 2) OpenRouter free, 3) the tier's Ollama
+            // fallback model (same slow pool — near-last), 4) last-resort pollinations.
             const fb = TIERS[tier] && TIERS[tier].fallbackModel;
-            let recovered = false;
-            if (fb) recovered = await streamOllamaInto(enc, ollamaMessages, tier, think, ac.signal, fb);
-            if (!recovered && !closed) recovered = await streamGeminiInto(enc, messages, ac.signal);
+            let recovered = await streamGeminiInto(enc, messages, ac.signal);
             if (!recovered && !closed) recovered = await streamOpenRouterInto(enc, messages, ac.signal);
+            if (!recovered && !closed && fb) recovered = await streamOllamaInto(enc, ollamaMessages, tier, think, ac.signal, fb);
             if (!recovered && !closed) await streamFallbackInto(enc, stripImages(messages), tier, think, ac.signal);
           }
         }
@@ -667,20 +673,26 @@ async function streamOllamaInto(enc, messages, tier, think, signal, modelOverrid
   const headers = { "content-type": "application/json" };
   if (OLLAMA_API_KEY) headers["Authorization"] = "Bearer " + OLLAMA_API_KEY;
   let upstream = null;
-  // 3 attempts with REAL backoff — a transient 429/503 (Ollama cloud briefly saturated) usually
-  // clears within a second or two. A 429 (per-minute rate limit, e.g. parallel agent steps) gets a
-  // LONGER wait — retrying it in 600ms just burns the Gemini fallback quota too.
-  const BACKOFF = [600, 1800];
-  const BACKOFF_429 = [4500, 9000];
+  // FAST-FAIL: 2 attempts with SHORT backoff + a 12s head-timeout per try. When the Ollama pool is
+  // saturated we abandon it in ~2-3s and let a fast provider (Gemini) answer, instead of making the
+  // user wait ~13s on a dead pool. A hung connection can no longer eat the 300s global timeout.
+  const BACKOFF = [400, 900];
+  const BACKOFF_429 = [1200, 2500];
   let was429 = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      upstream = await fetch(OLLAMA_CHAT_URL, { method: "POST", headers, body: reqBody, signal });
+      const hc = new AbortController();
+      const ht = setTimeout(() => { try { hc.abort(); } catch (_) {} }, 12000);
+      const onOuter = () => { try { hc.abort(); } catch (_) {} };
+      try { signal.addEventListener("abort", onOuter, { once: true }); } catch (_) {}
+      try {
+        upstream = await fetch(OLLAMA_CHAT_URL, { method: "POST", headers, body: reqBody, signal: hc.signal });
+      } finally { clearTimeout(ht); try { signal.removeEventListener("abort", onOuter); } catch (_) {} }
       if (upstream.ok && upstream.body) break;
       was429 = upstream.status === 429;
       upstream = null;
     } catch (e) { if (signal.aborted) return true; upstream = null; }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, (was429 ? BACKOFF_429 : BACKOFF)[attempt]));
+    if (attempt < 1) await new Promise((r) => setTimeout(r, (was429 ? BACKOFF_429 : BACKOFF)[attempt]));
   }
   if (!upstream) return false; // unreachable -> caller falls back
   const reader = upstream.body.getReader(); let buffer = "";
@@ -939,6 +951,54 @@ async function streamOpenRouterInto(enc, messages, signal) {
     }
     return any;
   } catch (e) { return signal.aborted ? true : any; }
+}
+
+/* Read attached images via a FREE OpenRouter vision model (image_url data-URL parts). Fallback for
+   when Gemini/Ollama vision are unavailable, so image support never fully dies. */
+async function streamOpenRouterVisionInto(enc, messages, signal) {
+  if (!OPENROUTER_API_KEY || !OPENROUTER_VISION_MODELS.length) return false;
+  let budget = MAX_IMAGES_PER_REQUEST;
+  const msgs = messages.filter((m) => m.role === "system" || m.role === "user" || m.role === "assistant").map((m) => {
+    const text = String((m && m.content) || "");
+    if (m && m.role === "user" && Array.isArray(m.images) && m.images.length && budget > 0) {
+      const parts = text ? [{ type: "text", text }] : [];
+      for (const raw of m.images) {
+        if (budget <= 0) break;
+        const norm = normalizeImage(raw);
+        if (norm) { parts.push({ type: "image_url", image_url: { url: "data:" + b64Mime(norm) + ";base64," + norm } }); budget--; }
+      }
+      if (parts.length) return { role: m.role, content: parts };
+    }
+    return { role: m.role, content: text };
+  });
+  if (!msgs.length) return false;
+  for (const model of OPENROUTER_VISION_MODELS) {
+    const reqBody = JSON.stringify({ model, messages: msgs, stream: true });
+    let upstream;
+    try { upstream = await fetch(OPENROUTER_URL, { method: "POST", headers: { "content-type": "application/json", "Authorization": "Bearer " + OPENROUTER_API_KEY, "HTTP-Referer": "https://firasai.netlify.app", "X-Title": "Firas AI" }, body: reqBody, signal }); }
+    catch (e) { if (signal.aborted) return true; continue; }
+    if (!upstream.ok || !upstream.body) { try { upstream && upstream.body && upstream.body.cancel(); } catch (_) {} continue; }
+    const reader = upstream.body.getReader(); let buffer = "", any = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        buffer += td.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          let line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let evt; try { evt = JSON.parse(payload); } catch { continue; }
+          const delta = evt.choices && evt.choices[0] && evt.choices[0].delta;
+          if (delta && delta.content) { const f = sseFrame(delta.content); if (f) enc(f); any = true; }
+        }
+      }
+      if (any) return true;
+    } catch (e) { if (signal.aborted) return true; }
+  }
+  return false;
 }
 
 /* ---------------- DuckDuckGo search (ported) ---------------- */

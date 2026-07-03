@@ -1332,9 +1332,9 @@ async function streamOllama(res, messages, tier, think, signal, modelOverride) {
   let upstream = null;
   let lastErr = null;
   let was429 = false;
-  const OLLAMA_BACKOFF = [600, 1800];
-  const OLLAMA_BACKOFF_429 = [4500, 9000];   // per-minute rate limit — a real wait beats burning the Gemini quota
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const OLLAMA_BACKOFF = [400, 900];
+  const OLLAMA_BACKOFF_429 = [1200, 2500];   // FAST-FAIL: abandon a saturated pool in ~2.5s so a fast provider answers
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       upstream = await fetch(OLLAMA_CHAT_URL, {
         method: "POST",
@@ -1355,7 +1355,7 @@ async function streamOllama(res, messages, tier, think, signal, modelOverride) {
       lastErr = e;
       upstream = null;
     }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, (was429 ? OLLAMA_BACKOFF_429 : OLLAMA_BACKOFF)[attempt]));
+    if (attempt < 1) await new Promise((r) => setTimeout(r, (was429 ? OLLAMA_BACKOFF_429 : OLLAMA_BACKOFF)[attempt]));
   }
 
   if (!upstream) {
