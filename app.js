@@ -2082,10 +2082,10 @@ function compilePlotExpr(src) {
   const VAR = (arguments[1] || "x").toLowerCase();   // free variable: x (default), theta (polar), t (parametric)
   let s = String(src).replace(/\s+/g, "").toLowerCase();
   if (!s) return null;
-  // Only normalize the power operator; implicit multiplication (2x, x(x+1), 2sin(x), )( …) is handled
+  // Only normalize powers; implicit multiplication (2x, x(x+1), 2sin(x), xsin(x), )( …) is handled
   // in the parser below — a regex that inserts `*` around the variable would corrupt function names
   // that CONTAIN the variable letter (exp→ex*p, and for t: tan/sqrt/atan…), breaking those graphs.
-  s = s.replace(/\*\*/g, "^");
+  s = s.replace(/²/g, "^2").replace(/³/g, "^3").replace(/\*\*/g, "^");
   let i = 0;
   function expr() { let a = term(); while (s[i] === "+" || s[i] === "-") { const o = s[i++], b = term(), A = a, B = b; a = o === "+" ? (x) => A(x) + B(x) : (x) => A(x) - B(x); } return a; }
   function term() {
@@ -2099,17 +2099,29 @@ function compilePlotExpr(src) {
   }
   function unary() { if (s[i] === "-") { i++; const A = unary(); return (x) => -A(x); } if (s[i] === "+") { i++; return unary(); } return power(); }
   function power() { const a = atom(); if (s[i] === "^") { i++; const b = unary(), A = a, B = b; return (x) => Math.pow(A(x), B(x)); } return a; }
+  const FNAMES = Object.keys(F).sort((a, b) => b.length - a.length);   // longest first: arcsin before sin
   function atom() {
     if (s[i] === "(") { i++; const e = expr(); if (s[i] !== ")") throw 0; i++; return e; }
     let m = /^[0-9]*\.?[0-9]+/.exec(s.slice(i));
     if (m) { i += m[0].length; const v = parseFloat(m[0]); return () => v; }
-    m = /^[a-z_][a-z0-9_]*/.exec(s.slice(i));
-    if (m) {
-      const n = m[0]; i += n.length;
-      if (n === VAR) return (x) => x;
-      if (Object.prototype.hasOwnProperty.call(C, n)) { const v = C[n]; return () => v; }
-      if (Object.prototype.hasOwnProperty.call(F, n)) { if (s[i] !== "(") throw 0; i++; const a = expr(); if (s[i] !== ")") throw 0; i++; const f = F[n], A = a; return (x) => f(A(x)); }
-      throw 0;
+    if (/[a-z_]/.test(s[i])) {
+      // CHAR-WISE identifiers: functions (with "(") win first, then the multi-letter var (theta),
+      // then tau/pi, then a single letter (the var, e, or an unknown constant → 2). This lets glued
+      // products like "xsin(x)" or "2xe" parse naturally instead of failing as one unknown word.
+      for (const fname of FNAMES) {
+        if (s.startsWith(fname, i) && s[i + fname.length] === "(") {
+          i += fname.length + 1; const a = expr(); if (s[i] !== ")") throw 0; i++;
+          const f = F[fname], A = a; return (x) => f(A(x));
+        }
+      }
+      if (VAR.length > 1 && s.startsWith(VAR, i)) { i += VAR.length; return (x) => x; }   // theta
+      for (const cname of ["tau", "pi"]) {
+        if (s.startsWith(cname, i)) { i += cname.length; const v = C[cname]; return () => v; }
+      }
+      const ch = s[i]; i++;
+      if (ch === VAR) return (x) => x;
+      if (ch === "e") return () => Math.E;
+      return () => 2;                          // unknown constant letter (a, b, k, r…) → 2
     }
     throw 0;
   }
@@ -2117,8 +2129,11 @@ function compilePlotExpr(src) {
   catch (_) { return null; }
 }
 
-/* Compile a TWO-variable expression z = f(x,y) → (x,y)=>value. Powers the 3D surface plot. */
-function compilePlot2(src) {
+/* Compile an N-variable expression → (x,y,z)=>value. vars = ["x","y"] (surfaces/implicit curves)
+   or ["x","y","z"] (implicit 3D). Unknown SINGLE-LETTER identifiers (r, a, b, k…) are treated as a
+   constant 2 — so a symbolic equation like x²+y²+z²=r² still draws (a radius-2 sphere) instead of
+   failing. Multi-letter unknowns still fail (typo protection). */
+function compilePlotN(src, vars) {
   const F = { sin: Math.sin, cos: Math.cos, tan: Math.tan, asin: Math.asin, acos: Math.acos, atan: Math.atan,
     arcsin: Math.asin, arccos: Math.acos, arctan: Math.atan, sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
     exp: Math.exp, ln: Math.log, log: (v) => Math.log(v) / Math.LN10, log2: (v) => Math.log(v) / Math.LN2,
@@ -2126,51 +2141,148 @@ function compilePlot2(src) {
   const C = { pi: Math.PI, e: Math.E, tau: 2 * Math.PI };
   let s = String(src).replace(/\s+/g, "").toLowerCase();
   if (!s) return null;
-  s = s.replace(/\*\*/g, "^");   // implicit multiplication handled in the parser (regex would corrupt exp/max…)
+  s = s.replace(/²/g, "^2").replace(/³/g, "^3").replace(/\*\*/g, "^");   // implicit multiplication handled in the parser
   let i = 0;
-  function expr() { let a = term(); while (s[i] === "+" || s[i] === "-") { const o = s[i++], b = term(), A = a, B = b; a = o === "+" ? (x, y) => A(x, y) + B(x, y) : (x, y) => A(x, y) - B(x, y); } return a; }
+  function expr() { let a = term(); while (s[i] === "+" || s[i] === "-") { const o = s[i++], b = term(), A = a, B = b; a = o === "+" ? (x, y, z) => A(x, y, z) + B(x, y, z) : (x, y, z) => A(x, y, z) - B(x, y, z); } return a; }
   function term() {
     let a = unary();
     while (i < s.length) {
-      if (s[i] === "*" || s[i] === "/") { const o = s[i++], b = unary(), A = a, B = b; a = o === "*" ? (x, y) => A(x, y) * B(x, y) : (x, y) => A(x, y) / B(x, y); }
-      else if (/[0-9.a-z(]/.test(s[i])) { const b = unary(), A = a, B = b; a = (x, y) => A(x, y) * B(x, y); }   // implicit multiplication
+      if (s[i] === "*" || s[i] === "/") { const o = s[i++], b = unary(), A = a, B = b; a = o === "*" ? (x, y, z) => A(x, y, z) * B(x, y, z) : (x, y, z) => A(x, y, z) / B(x, y, z); }
+      else if (/[0-9.a-z(]/.test(s[i])) { const b = unary(), A = a, B = b; a = (x, y, z) => A(x, y, z) * B(x, y, z); }   // implicit multiplication
       else break;
     }
     return a;
   }
-  function unary() { if (s[i] === "-") { i++; const A = unary(); return (x, y) => -A(x, y); } if (s[i] === "+") { i++; return unary(); } return power(); }
-  function power() { const a = atom(); if (s[i] === "^") { i++; const b = unary(), A = a, B = b; return (x, y) => Math.pow(A(x, y), B(x, y)); } return a; }
+  function unary() { if (s[i] === "-") { i++; const A = unary(); return (x, y, z) => -A(x, y, z); } if (s[i] === "+") { i++; return unary(); } return power(); }
+  function power() { const a = atom(); if (s[i] === "^") { i++; const b = unary(), A = a, B = b; return (x, y, z) => Math.pow(A(x, y, z), B(x, y, z)); } return a; }
+  const FNAMES = Object.keys(F).sort((a, b) => b.length - a.length);   // longest first: arcsin before sin
   function atom() {
     if (s[i] === "(") { i++; const e = expr(); if (s[i] !== ")") throw 0; i++; return e; }
     let m = /^[0-9]*\.?[0-9]+/.exec(s.slice(i));
     if (m) { i += m[0].length; const v = parseFloat(m[0]); return () => v; }
-    m = /^[a-z_][a-z0-9_]*/.exec(s.slice(i));
-    if (m) { const n = m[0]; i += n.length;
-      if (n === "x") return (x) => x;
-      if (n === "y") return (x, y) => y;
-      if (Object.prototype.hasOwnProperty.call(C, n)) { const v = C[n]; return () => v; }
-      if (Object.prototype.hasOwnProperty.call(F, n)) { if (s[i] !== "(") throw 0; i++; const a = expr(); if (s[i] !== ")") throw 0; i++; const f = F[n], A = a; return (x, y) => f(A(x, y)); }
-      throw 0;
+    if (/[a-z_]/.test(s[i])) {
+      // CHAR-WISE identifier reading so glued products parse naturally: "xy"→x·y, "xz"→x·z,
+      // "2xyz"→2·x·y·z, "xsin(x)"→x·sin(x). Functions (with their "(") win first, then pi/e/tau,
+      // then a variable letter; any leftover single letter is an unknown constant (→ 2).
+      for (const fname of FNAMES) {
+        if (s.startsWith(fname, i) && s[i + fname.length] === "(") {
+          i += fname.length + 1; const a = expr(); if (s[i] !== ")") throw 0; i++;
+          const f = F[fname], A = a; return (x, y, z) => f(A(x, y, z));
+        }
+      }
+      for (const cname of ["tau", "pi"]) {
+        if (s.startsWith(cname, i)) { i += cname.length; const v = C[cname]; return () => v; }
+      }
+      const ch = s[i]; i++;
+      const vi = vars.indexOf(ch);
+      if (vi === 0) return (x) => x;
+      if (vi === 1) return (x, y) => y;
+      if (vi === 2) return (x, y, z) => z;
+      if (ch === "e") return () => Math.E;
+      return () => 2;                          // unknown constant letter (r, a, b, k…) → 2
     }
     throw 0;
   }
-  try { const fn = expr(); if (i !== s.length) return null; const v = fn(0.4, 0.6); if (typeof v !== "number") return null; return fn; }
+  try { const fn = expr(); if (i !== s.length) return null; const v = fn(0.4, 0.6, 0.5); if (typeof v !== "number") return null; return fn; }
   catch (_) { return null; }
+}
+/* Compile a TWO-variable expression z = f(x,y) → (x,y)=>value. Powers the 3D surface plot. */
+function compilePlot2(src) { return compilePlotN(src, ["x", "y"]); }
+/* Compile a THREE-variable expression F(x,y,z) → value. Powers implicit 3D surfaces. */
+function compilePlot3(src) { return compilePlotN(src, ["x", "y", "z"]); }
+
+/* ── IMPLICIT 2D CURVE — marching squares over h(x,y)=0. Returns a points array (segment pairs
+   separated by NaN breaks) ready for the standard curve renderer, or null if nothing crosses. */
+function implicitCurvePoints(h, x0, x1, y0, y1) {
+  const N = 150, pts = [];
+  const V = [];
+  for (let i = 0; i <= N; i++) {
+    V[i] = [];
+    for (let j = 0; j <= N; j++) {
+      const x = x0 + (x1 - x0) * i / N, y = y0 + (y1 - y0) * j / N;
+      let v; try { v = h(x, y); } catch (_) { v = NaN; }
+      V[i][j] = isFinite(v) ? v : NaN;
+    }
+  }
+  const X = (i) => x0 + (x1 - x0) * i / N, Y = (j) => y0 + (y1 - y0) * j / N;
+  const lerp = (pa, va, pb, vb) => pa + (pb - pa) * (va / (va - vb));   // where the sign flips
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const v00 = V[i][j], v10 = V[i + 1][j], v11 = V[i + 1][j + 1], v01 = V[i][j + 1];
+    if (![v00, v10, v11, v01].every(isFinite)) continue;
+    const cross = [];
+    if ((v00 < 0) !== (v10 < 0)) cross.push([lerp(X(i), v00, X(i + 1), v10), Y(j)]);            // bottom
+    if ((v10 < 0) !== (v11 < 0)) cross.push([X(i + 1), lerp(Y(j), v10, Y(j + 1), v11)]);        // right
+    if ((v01 < 0) !== (v11 < 0)) cross.push([lerp(X(i), v01, X(i + 1), v11), Y(j + 1)]);        // top
+    if ((v00 < 0) !== (v01 < 0)) cross.push([X(i), lerp(Y(j), v00, Y(j + 1), v01)]);            // left
+    if (cross.length === 2) { pts.push(cross[0], cross[1], [NaN, NaN]); }
+    else if (cross.length === 4) {
+      // saddle cell — pair by the center sample so the two strands don't cross
+      const c = h((X(i) + X(i + 1)) / 2, (Y(j) + Y(j + 1)) / 2);
+      if ((c < 0) === (v00 < 0)) { pts.push(cross[0], cross[3], [NaN, NaN], cross[1], cross[2], [NaN, NaN]); }
+      else { pts.push(cross[0], cross[1], [NaN, NaN], cross[2], cross[3], [NaN, NaN]); }
+    }
+  }
+  return pts.length > 2 ? pts : null;
+}
+
+/* ── IMPLICIT 3D SURFACE — h(x,y,z)=0 rendered as z-root SHEETS through the normal surface mesh.
+   For each (x,y) the roots of h in z are found by scan + bisection; the lowest and highest roots
+   form two sheets (top/bottom of a sphere, both nappes of a cone…). Returns [fn] or [lo, hi]. */
+function implicitSurfaceSheets(h, xr, yr, zr) {
+  const K = 40;
+  const rootsAt = (x, y) => {
+    const out = [];
+    let pz = zr[0], pv;
+    try { pv = h(x, y, pz); } catch (_) { pv = NaN; }
+    for (let k = 1; k <= K; k++) {
+      const z = zr[0] + (zr[1] - zr[0]) * k / K;
+      let v; try { v = h(x, y, z); } catch (_) { v = NaN; }
+      if (isFinite(pv) && isFinite(v) && (pv * v < 0 || v === 0)) {   // strict sign change, or the right endpoint IS the root (counted once)
+        let a = pz, b = z, fa = pv;                        // bisect the bracket
+        for (let t = 0; t < 22; t++) { const m = (a + b) / 2; let fm; try { fm = h(x, y, m); } catch (_) { break; } if (!isFinite(fm)) break; if ((fa < 0) !== (fm < 0)) b = m; else { a = m; fa = fm; } }
+        out.push((a + b) / 2);
+      }
+      pv = v; pz = z;
+    }
+    return out;
+  };
+  // probe: does any (x,y) have 2+ roots? → two sheets
+  let multi = false, any = false;
+  for (let i = 0; i <= 8 && !multi; i++) for (let j = 0; j <= 8; j++) {
+    const r = rootsAt(xr[0] + (xr[1] - xr[0]) * i / 8, yr[0] + (yr[1] - yr[0]) * j / 8);
+    if (r.length) any = true;
+    if (r.length > 1) { multi = true; break; }
+  }
+  if (!any) return [];
+  const lo = (x, y) => { const r = rootsAt(x, y); return r.length ? r[0] : NaN; };
+  const hi = (x, y) => { const r = rootsAt(x, y); return r.length ? r[r.length - 1] : NaN; };
+  return multi ? [lo, hi] : [lo];
 }
 
 /* Render a 3D SURFACE z=f(x,y) as an isometric wireframe SVG — height-shaded quads, painter's
    depth sort, clean look. Self-contained (no engine) so it renders in chat AND PDF. */
 function plot3dSurfaceSvg(fn, xr, yr, label, view) {
   view = view || {};
+  const fns = Array.isArray(fn) ? fn : [fn];   // implicit surfaces render as MULTIPLE sheets (sphere = top+bottom)
   const az = view.az != null ? view.az : -0.85, el = view.el != null ? view.el : 0.52, zoom = view.zoom || 1;
-  const [x0, x1] = xr, [y0, y1] = yr, N = 34;
-  const P = []; let zmin = Infinity, zmax = -Infinity;
-  for (let i = 0; i <= N; i++) { P[i] = []; for (let j = 0; j <= N; j++) { const x = x0 + (x1 - x0) * i / N, y = y0 + (y1 - y0) * j / N; let z; try { z = fn(x, y); } catch (_) { z = NaN; } if (!isFinite(z)) z = NaN; P[i][j] = { x, y, z }; if (isFinite(z)) { if (z < zmin) zmin = z; if (z > zmax) zmax = z; } } }
+  const [x0, x1] = xr, [y0, y1] = yr, N = fns.length > 1 ? 56 : 34;   // finer mesh tightens a closed surface's rim seam
+  let zmin = Infinity, zmax = -Infinity;
+  const grids = fns.map((f) => {
+    const P = [];
+    for (let i = 0; i <= N; i++) { P[i] = []; for (let j = 0; j <= N; j++) { const x = x0 + (x1 - x0) * i / N, y = y0 + (y1 - y0) * j / N; let z; try { z = f(x, y); } catch (_) { z = NaN; } if (!isFinite(z)) z = NaN; P[i][j] = { x, y, z }; if (isFinite(z)) { if (z < zmin) zmin = z; if (z > zmax) zmax = z; } } }
+    return P;
+  });
+  // (Rim handling: NaN grid points stay NaN — 3-corner cells render as triangles and the finer
+  // multi-sheet mesh keeps the rim seam tight. A bisection "rim snap" was tried and REVERTED: the
+  // snapped points zig-zagged in xy — adjacent points snapped along different axes — painting
+  // sawtooth spikes around a sphere's equator.)
   if (!isFinite(zmin)) { zmin = -1; zmax = 1; }
   const zc = (zmax - zmin) || 1, span = Math.max(x1 - x0, y1 - y0) || 1;
-  const zEx = span / zc * 0.5;                                    // exaggerate z into world (xy) units
+  // z scale: TRUE aspect (1) whenever it fits — a sphere must look like a BALL, not a squashed bun;
+  // flat surfaces get exaggerated (up to 2.4×), tall ones squashed only as much as needed to fit.
+  const zEx = Math.min(Math.max(span * 0.6 / zc, 1), span * 0.85 / zc, 2.4);
   const W = 480, H = 360, cx = W / 2, cy = H * 0.54;
-  const scale = Math.min(W, H) * 0.34 / span * zoom;
+  const scale = Math.min(W, H) * 0.46 / span * zoom;              // fill the frame (0.34 rendered every surface small)
   const mx = (x0 + x1) / 2, my = (y0 + y1) / 2, mz = (zmin + zmax) / 2;
   const ca = Math.cos(az), sa = Math.sin(az), ce = Math.cos(el), se = Math.sin(el);
   const world = (x, y, z) => [x - mx, y - my, ((isFinite(z) ? z : mz) - mz) * zEx];
@@ -2180,18 +2292,32 @@ function plot3dSurfaceSvg(fn, xr, yr, label, view) {
   const L = [-0.32, -0.5, 0.8], LL = Math.hypot(L[0], L[1], L[2]); L[0] /= LL; L[1] /= LL; L[2] /= LL;
   const col = (z, shade) => { const t = isFinite(z) ? Math.max(0, Math.min(1, (z - zmin) / zc)) : 0.5; let r = 48 + t * 210, g = 46 + t * 150, b = 130 - t * 80; r *= shade; g *= shade; b *= shade; return "rgb(" + Math.round(Math.min(255, r)) + "," + Math.round(Math.min(255, g)) + "," + Math.round(Math.min(255, b)) + ")"; };
   const quads = [];
-  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
-    const a00 = P[i][j], a10 = P[i + 1][j], a11 = P[i + 1][j + 1], a01 = P[i][j + 1];
-    if (![a00, a10, a11, a01].every((p) => isFinite(p.z))) continue;
-    const w00 = world(a00.x, a00.y, a00.z), w10 = world(a10.x, a10.y, a10.z), w11 = world(a11.x, a11.y, a11.z), w01 = world(a01.x, a01.y, a01.z);
-    const ux = w11[0] - w00[0], uy = w11[1] - w00[1], uz = w11[2] - w00[2], vx = w01[0] - w10[0], vy = w01[1] - w10[1], vz = w01[2] - w10[2];
-    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const nl = Math.hypot(nx, ny, nz) || 1;
-    const rn = rot([nx / nl, ny / nl, nz / nl]); let dot = Math.abs(rn[0] * L[0] + rn[1] * L[1] + rn[2] * L[2]);
-    const shade = 0.52 + 0.48 * dot, zAvg = (a00.z + a10.z + a11.z + a01.z) / 4;
-    const p00 = proj(w00), p10 = proj(w10), p11 = proj(w11), p01 = proj(w01);
-    const depth = (p00[2] + p10[2] + p11[2] + p01[2]) / 4;
-    quads.push({ depth, d: "M" + [p00, p10, p11, p01].map((p) => p[0].toFixed(1) + " " + p[1].toFixed(1)).join("L") + "Z", fill: col(zAvg, shade) });
-  }
+  grids.forEach((P) => {
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      // Keep 3-corner cells too (triangle) — dropping them left a jagged gap along an implicit
+      // surface's rim (sphere equator). Perimeter order is preserved so the polygon stays valid.
+      const corners = [P[i][j], P[i + 1][j], P[i + 1][j + 1], P[i][j + 1]].filter((p) => isFinite(p.z));
+      if (corners.length < 3) continue;
+      // Discontinuity guard: a cell spanning a huge z-jump is a SHEET/BRANCH JUMP (lo→hi at the
+      // domain edge, or hopping between branches of an oscillatory implicit surface) — drawing it
+      // painted tall vertical "curtains"/spikes. Real steep flanks (cone, sphere rim) stay well under.
+      let zlo = Infinity, zhi = -Infinity;
+      corners.forEach((p) => { if (p.z < zlo) zlo = p.z; if (p.z > zhi) zhi = p.z; });
+      if (zhi - zlo > zc * 0.45) continue;   // 0.28 punched holes in a small sphere's rim; 0.55 kept oscillatory-branch spikes
+      const ws = corners.map((p) => world(p.x, p.y, p.z));
+      const ux = ws[2][0] - ws[0][0], uy = ws[2][1] - ws[0][1], uz = ws[2][2] - ws[0][2];
+      const vx = ws[1][0] - ws[0][0], vy = ws[1][1] - ws[0][1], vz = ws[1][2] - ws[0][2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const nl = Math.hypot(nx, ny, nz) || 1;
+      const rn = rot([nx / nl, ny / nl, nz / nl]); let dot = Math.abs(rn[0] * L[0] + rn[1] * L[1] + rn[2] * L[2]);
+      const shade = 0.52 + 0.48 * dot, zAvg = corners.reduce((a, p) => a + p.z, 0) / corners.length;
+      const ps = ws.map(proj);
+      const depth = ps.reduce((a, p) => a + p[2], 0) / ps.length;
+      quads.push({ depth, d: "M" + ps.map((p) => p[0].toFixed(1) + " " + p[1].toFixed(1)).join("L") + "Z", fill: col(zAvg, shade) });
+    }
+  });
+  // (An explicit rim "skirt" between the two sheets is unnecessary — RIM SNAP above closes the
+  // boundary with real surface quads — and it painted dark patches OVER the sphere when its
+  // depth sorted in front. Removed after visual testing.)
   quads.sort((p, q) => q.depth - p.depth);                        // painter's: farthest first
   const faces = quads.map((q) => '<path d="' + q.d + '" fill="' + q.fill + '" stroke="#ffffff" stroke-width="0.3" stroke-opacity="0.35"/>').join("");
   return '<svg viewBox="0 0 ' + W + " " + H + '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="3D surface" style="width:100%;height:auto;display:block">' +
@@ -2355,12 +2481,20 @@ function parsePlotSpec(spec) {
       return { mode: "geometry", shapes, fns: [], bounds: plotPointsBounds(pc.length ? pc : [[-1, -1], [1, 1]], true) };
     }
   }
-  let dom = null, ydom = null, pdom = null, polarSrc = null, px = null, py = null, surfSrc = null;
+  let dom = null, ydom = null, zdom = null, pdom = null, polarSrc = null, px = null, py = null, surfSrc = null, implicitSrc = null;
   const cart = [];
+  // Variable presence: strip function/constant NAMES first, then look for the bare letter — this way
+  // "sin(xz)" reveals its z (glued products), while the x inside "exp(" never false-positives.
+  const hasVar = (v, s) => String(s).toLowerCase().replace(/[²³]/g, "^")
+    .replace(/arcsin|arccos|arctan|asinh|acosh|atanh|sinh|cosh|tanh|asin|acos|atan|sin|cos|tan|sec|cosec|csc|cotan|cot|ctg|tg|exp|ln|log10|log2|log|lg|sqrt|cbrt|abs|sign|floor|ceil|round|theta|tau|pi/g, " ")
+    .includes(v);
   lines.forEach((ln) => {
+    // z-domain for implicit 3D ("z: -2..2")
+    let zm2 = /^z\s*:\s*(-?[0-9.]+)\s*(?:\.\.|,|to)\s*(-?[0-9.]+)\s*$/i.exec(ln);
+    if (zm2) { const a = parseFloat(zm2[1]), b = parseFloat(zm2[2]); if (isFinite(a) && isFinite(b) && a < b) zdom = [a, b]; return; }
     // 3D surface z = f(x,y)
     let sm = /^z\s*(?:\(\s*x\s*,\s*y\s*\))?\s*=\s*(.+)$/i.exec(ln);
-    if (sm && /[xy]/i.test(sm[1])) { surfSrc = sm[1].trim(); return; }
+    if (sm && /[xy]/i.test(sm[1]) && !hasVar("z", sm[1])) { surfSrc = sm[1].trim(); return; }
     // y-domain (for 3D)
     let ym2 = /^y\s*[:=]\s*(-?[0-9.]+)\s*(?:\.\.|,|to|:)\s*(-?[0-9.]+)\s*$/i.exec(ln);
     if (ym2 && surfSrc) { const a = parseFloat(ym2[1]), b = parseFloat(ym2[2]); if (isFinite(a) && isFinite(b) && a < b) ydom = [a, b]; return; }
@@ -2378,6 +2512,16 @@ function parsePlotSpec(spec) {
     let ym = /^y\s*(?:\(\s*t\s*\))?\s*=\s*(.+)$/i.exec(ln);
     if (xm && /\bt\b/i.test(xm[1])) { px = xm[1].trim(); return; }
     if (ym && /\bt\b/i.test(ym[1]) && px) { py = ym[1].trim(); return; }
+    // IMPLICIT equation — a full F = G line that is NOT a plain y=/r=/x(t)=/z= form:
+    // x^2+y^2=25 (circle), x^2/9+y^2/4=1 (ellipse), x*y=4, x^2+y^2+z^2=r^2 (sphere), z^2=x^2+y^2 (cone)…
+    if (!implicitSrc && ln.split("=").length === 2 && !/^[a-z]\s*(?:\(\s*[a-z ,]*\))?\s*=/i.test(ln)) {
+      const [L, R] = ln.split("=");
+      const is3d = hasVar("z", ln);
+      if (is3d ? (hasVar("x", ln) || hasVar("y", ln)) : (hasVar("x", ln) && hasVar("y", ln))) {
+        implicitSrc = { L: L.trim(), R: R.trim(), z: is3d, expr: ln.trim() };
+        return;
+      }
+    }
     // cartesian y=f(x)
     const e = ln.replace(/^[a-z]\s*\(\s*x\s*\)\s*=/i, "").replace(/^y\s*=/i, "").trim();
     const fn = compilePlotExpr(e, "x");
@@ -2387,6 +2531,47 @@ function parsePlotSpec(spec) {
   if (surfSrc) {
     const sf = compilePlot2(surfSrc);
     if (sf) return { fns: [{ surf: sf, expr: "z = " + surfSrc, color: PLOT_PAL[0] }], mode: "surface", xr: dom || [-3, 3], yr: ydom || dom || [-3, 3] };
+  }
+  // IMPLICIT equation F = G — 3D (sphere/cone/ellipsoid… via z-root sheets) or 2D (conics… via marching squares)
+  if (implicitSrc) {
+    const legend = implicitSrc.expr.replace(/\*\*/g, "^").replace(/\*/g, " \\cdot ");
+    if (implicitSrc.z) {
+      const Lf = compilePlot3(implicitSrc.L), Rf = compilePlot3(implicitSrc.R);
+      if (Lf && Rf) {
+        const h = (x, y, z) => Lf(x, y, z) - Rf(x, y, z);
+        const xr2 = dom || [-4, 4], yr2 = ydom || dom || [-4, 4];
+        const M = Math.max(Math.abs(xr2[0]), Math.abs(xr2[1]), Math.abs(yr2[0]), Math.abs(yr2[1]));
+        const zr2 = zdom || [-M * 1.08, M * 1.08];   // small margin so roots AT the boundary aren't missed (killed sheet-jump curtains)
+        let sheets = implicitSurfaceSheets(h, xr2, yr2, zr2), fxr = xr2, fyr = yr2;
+        // AUTO-FIT: a small surface (sphere of radius 2) in the default ±4 box rendered tiny —
+        // probe the surface's real extent and shrink the view to it (never grow; user domain wins).
+        if (sheets.length && !dom && !zdom) {
+          try {
+            let xlo = Infinity, xhi = -Infinity, ylo = Infinity, yhi = -Infinity, zlo = Infinity, zhi = -Infinity, found = 0;
+            const PB = 20;
+            for (let i = 0; i <= PB; i++) for (let j = 0; j <= PB; j++) {
+              const x = xr2[0] + (xr2[1] - xr2[0]) * i / PB, y = yr2[0] + (yr2[1] - yr2[0]) * j / PB;
+              for (const sf of sheets) { const z = sf(x, y); if (isFinite(z)) { found++; if (x < xlo) xlo = x; if (x > xhi) xhi = x; if (y < ylo) ylo = y; if (y > yhi) yhi = y; if (z < zlo) zlo = z; if (z > zhi) zhi = z; } }
+            }
+            if (found > 4 && isFinite(xlo) && (xhi - xlo) > 1e-6 && (xhi - xlo) < (xr2[1] - xr2[0]) * 0.85) {
+              const px = (xhi - xlo) * 0.10, py = (yhi - ylo) * 0.10 + 1e-6, pz = (zhi - zlo) * 0.10 + 1e-6;
+              const nx = [xlo - px, xhi + px], ny = [ylo - py, yhi + py], nz = [zlo - pz, zhi + pz];
+              const s2 = implicitSurfaceSheets(h, nx, ny, nz);
+              if (s2.length) { sheets = s2; fxr = nx; fyr = ny; }
+            }
+          } catch (_) {}
+        }
+        if (sheets.length) return { fns: sheets.map((sf) => ({ surf: sf, expr: legend, color: PLOT_PAL[0] })), mode: "surface", xr: fxr, yr: fyr };
+      }
+    } else {
+      const Lf = compilePlot2(implicitSrc.L), Rf = compilePlot2(implicitSrc.R);
+      if (Lf && Rf) {
+        const h = (x, y) => Lf(x, y) - Rf(x, y);
+        const d2 = dom || [-6, 6];
+        const pts = implicitCurvePoints(h, d2[0], d2[1], (ydom || d2)[0], (ydom || d2)[1]);
+        if (pts) return { fns: [{ points: pts, expr: legend, color: PLOT_PAL[0] }], mode: "implicit", bounds: plotPointsBounds(pts, true) };
+      }
+    }
   }
   // POLAR
   if (polarSrc) {
@@ -2575,7 +2760,7 @@ function plotHomeView(p) {
 /* Back-compat: render straight from a spec at the auto view. */
 function renderPlotSvg(spec) {
   const p = parsePlotSpec(spec); if (!p) return null;
-  if (p.mode === "surface") return plot3dSurfaceSvg(p.fns[0].surf, p.xr, p.yr, p.fns[0].expr);
+  if (p.mode === "surface") return plot3dSurfaceSvg(p.fns.map((f) => f.surf), p.xr, p.yr, p.fns[0].expr);
   return plotSvgString(p.fns, plotHomeView(p), { polar: p.mode === "polar" || p.mode === "parametric", shapes: p.shapes });
 }
 
@@ -2663,13 +2848,13 @@ function plotifyCodeBlock(code) {
   fig.className = "tikz-figure plot-figure plot-interactive" + (p.mode === "surface" ? " plot-figure--3d" : "");
   const home = p.mode === "surface" ? null : plotHomeView(p);
   const isPolar = p.mode === "polar" || p.mode === "parametric";
-  fig.innerHTML = p.mode === "surface" ? plot3dSurfaceSvg(p.fns[0].surf, p.xr, p.yr, p.fns[0].expr) : plotSvgString(p.fns, home, { polar: isPolar, shapes: p.shapes });
+  fig.innerHTML = p.mode === "surface" ? plot3dSurfaceSvg(p.fns.map((f) => f.surf), p.xr, p.yr, p.fns[0].expr) : plotSvgString(p.fns, home, { polar: isPolar, shapes: p.shapes });
   // Beautiful math legend (HTML + KaTeX overlay) — built once, stays fixed during pan/zoom.
   // Geometry has no function legend.
   if (p.mode !== "geometry" && p.fns.length) {
     const leg = document.createElement("div");
     leg.className = "plot-legend";
-    p.fns.forEach((f) => {
+    (p.mode === "surface" ? p.fns.slice(0, 1) : p.fns).forEach((f) => {   // sheets of one implicit surface = ONE legend row
       const row = document.createElement("div"); row.className = "plot-legend__row";
       const sw = document.createElement("span"); sw.className = "plot-legend__sw"; sw.style.background = f.color;
       const lb = document.createElement("span"); lb.className = "plot-legend__lb";
@@ -2683,7 +2868,7 @@ function plotifyCodeBlock(code) {
   }
   pre.replaceWith(fig);
   try {
-    if (p.mode === "surface") make3dInteractive(fig, p.fns[0].surf, p.xr, p.yr, p.fns[0].expr);   // drag-rotate + zoom
+    if (p.mode === "surface") make3dInteractive(fig, p.fns.map((f) => f.surf), p.xr, p.yr, p.fns[0].expr);   // drag-rotate + zoom
     else makePlotInteractive(fig, p.fns, home, { polar: isPolar, shapes: p.shapes });
   } catch (_) {}
   return true;
@@ -4481,8 +4666,25 @@ async function ensureExportFonts(isAr) {
       const want = isAr
         ? ["400 1em Tajawal", "500 1em Tajawal", "700 1em Tajawal", "800 1em Tajawal", "600 1em Cairo", "700 1em Cairo", "800 1em Cairo"]
         : ["400 1em Lora", "500 1em Lora", "700 1em Lora", "italic 400 1em Lora", "500 1em Inter", "600 1em Inter", "700 1em Inter"];
+      // KaTeX MATH faces too — on a cold cache the capture fell back to a different font whose
+      // metrics DROP glyphs below the baseline (the "5π with π sunk lower" PDF bug). Load each
+      // face against the real glyphs it renders so the .woff2 is actually fetched before capture.
+      const mathWant = [
+        ["400 1em KaTeX_Main", "5+=()[]"],
+        ["700 1em KaTeX_Main", "5+="],
+        ["italic 400 1em KaTeX_Math", "xyzπθαβφ"],
+        ["400 1em KaTeX_Size1", "()√"],
+        ["400 1em KaTeX_Size2", "()√"],
+        ["400 1em KaTeX_Size3", "()"],
+        ["400 1em KaTeX_Size4", "()"],
+        ["400 1em KaTeX_AMS", "ℝℕ"],
+        ["400 1em KaTeX_Caligraphic", "AB"],
+      ];
       await Promise.race([
-        Promise.all(want.map((f) => document.fonts.load(f, sample).catch(() => {}))).then(() => document.fonts.ready),
+        Promise.all([
+          ...want.map((f) => document.fonts.load(f, sample).catch(() => {})),
+          ...mathWant.map(([f, s]) => document.fonts.load(f, s).catch(() => {})),
+        ]).then(() => document.fonts.ready),
         new Promise((r) => setTimeout(r, 6000)),
       ]);
     }
@@ -6434,9 +6636,13 @@ const STEM_HARD_RULE =
   "multi-stage stoichiometry/equilibria…). NEVER routine textbook drills (∫x·sinh x dx by parts alone is a " +
   "FAILURE — too easy). Every problem must be NOVEL, UNIQUE and DISTINCTIVE: constructed by YOU with fresh " +
   "structures, functions, numbers and scenarios — never a known classic, a famous competition problem, or a " +
-  "lightly reworded book/net exercise. Make each exam varied (no two problems test the same single idea) and " +
-  "exam-worthy — while staying VALID, well-posed and cleanly solvable with exact answers (solve each one " +
-  "yourself first; discard anything you cannot solve cleanly).";
+  "lightly reworded book/net exercise, and NEVER a repeat of a problem you gave before in this chat. Style them " +
+  "like elite UNIVERSITY/college problem sets and competitive entrance exams (MIT/Cambridge-calibre problem " +
+  "sets, JEE-Advanced, physics/chemistry olympiads): rich scenarios, layered reasoning, fresh ideas every time. " +
+  "Make each exam varied (no two problems test the same single idea) and exam-worthy — while staying VALID, " +
+  "well-posed and cleanly solvable with exact answers (solve each one yourself PRIVATELY first — the reader sees " +
+  "only a finished, correct problem and its clean solution, never a broken attempt or a mid-solution correction; " +
+  "discard anything you cannot solve cleanly).";
 
 /** Build the messages array for the API from a tier + conversation slice. */
 function buildMessages(tier, conversation, replyLang) {
@@ -6533,9 +6739,13 @@ function buildMessages(tier, conversation, replyLang) {
     "CROSS-CHECK BY A SECOND METHOD: for any non-trivial result, confirm it a second, independent way (a different " +
     "method, a limiting/special case, or a sanity estimate); if the two disagree, find and fix the error internally " +
     "and show only the corrected final result. Do all of this verification WITHIN THIS SAME REPLY — never defer it to " +
-    "a later message. These correctness rules are ABSOLUTE and ENGINE-INDEPENDENT: apply the full plan → solve → " +
-    "verify → silently-correct discipline on EVERY answer, and never let quality drop because a lighter/backup model " +
-    "happens to be generating.";
+    "a later message. NEVER NARRATE A CORRECTION (hard rule): the reader must NEVER see 'مهلا', 'هناك خطأ', 'عفوًا', " +
+    "'wait', 'oops', 'actually, that's wrong', 'let me redo this', a crossed-out attempt, or ANY visible self-correction — " +
+    "ALL checking happens PRIVATELY BEFORE the words are written, and if you notice a slip mid-write you silently rewrite " +
+    "that part correctly instead of mentioning it. The presented solution must read as ONE clean, confident, correct " +
+    "derivation from its first line to its final answer. These correctness rules are ABSOLUTE and ENGINE-INDEPENDENT: " +
+    "apply the full plan → solve → verify → silently-correct discipline on EVERY answer, and never let quality drop " +
+    "because a lighter/backup model happens to be generating.";
   // In PLAN MODE, do NOT send buildRule/engineerRule — they push the model to emit the
   // full code/deliverable, which contradicts planSystem and caused the plan itself to be
   // written as a code block (then the Start pill was suppressed). planSystem alone governs.
@@ -6562,6 +6772,13 @@ function buildMessages(tier, conversation, replyLang) {
     " When MULTIPLE images are attached, examine EVERY image carefully and INDIVIDUALLY (one by one), " +
     "and use ALL of them to answer fully — never skip, merge, or ignore any attached image.";
   const tikzRule =
+    " YOU CAN DRAW — HARD RULE: you have a BUILT-IN graph renderer (the fenced `plot` block below). NEVER say " +
+    "'I cannot draw/plot/visualize' or 'as an AI I cannot create images' — that is FALSE here. Any request to draw, " +
+    "plot, sketch or visualize ANY equation — explicit y=f(x), implicit 2D or 3D (spheres, ln(xy)=sin(xz), anything), " +
+    "polar, parametric, 3D surfaces, geometry — MUST be answered with a fenced `plot` block containing the equation, " +
+    "which renders as a real interactive figure. NEVER answer a drawing request with a prose description instead, and " +
+    "NEVER with Python/matplotlib/Mathematica/Wolfram code (code only if the user EXPLICITLY asks for code). A short " +
+    "explanation may accompany the figure — but the `plot` block itself is mandatory." +
     " GRAPHING (ALWAYS USE `plot`, NEVER tikz): for ANY function/curve graph — cartesian (y=f(x)), POLAR " +
     "(r=f(theta), rose/spiral/cardioid…), or PARAMETRIC (x=f(t),y=g(t)) — you MUST output a fenced `plot` block, " +
     "NOT tikz. tikz graphs break in downloaded files; the `plot` block renders as a real graph everywhere " +
@@ -6573,6 +6790,9 @@ function buildMessages(tier, conversation, replyLang) {
     "POLAR: write `r = <expr in theta>` (e.g. `r = 1 + cos(theta)`) with an optional `theta: 0..2*pi`. " +
     "PARAMETRIC: write BOTH `x = <expr in t>` and `y = <expr in t>` (e.g. `x = cos(t)` / `y = sin(2*t)`) with an optional `t: 0..2*pi`. " +
     "3D SURFACE: write `z = <expr in x,y>` (e.g. `z = sin(x)*cos(y)` or `z = x^2 - y^2`) with optional `x: -3..3` and `y: -3..3` — renders as an interactive isometric 3D surface. " +
+    "IMPLICIT EQUATIONS (any equation, 2D or 3D — nothing is off-limits): write the equation DIRECTLY on one line and it renders: " +
+    "`x^2 + y^2 = 25` (circle), `x^2/9 + y^2/4 = 1` (ellipse), `x^2 - y^2 = 1` (hyperbola), `x*y = 4`, `(x^2+y^2)^2 = 8*(x^2-y^2)` (lemniscate) — 2D curves; " +
+    "`x^2 + y^2 + z^2 = 9` (sphere), `z^2 = x^2 + y^2` (cone), `x^2/4 + y^2/9 + z^2 = 1` (ellipsoid) — interactive 3D. Prefer NUMERIC constants (write 9, not r^2). " +
     "GEOMETRY / DIAGRAMS (triangles, circles, vectors, points, angles, polygons — NOT function graphs): ALSO use the SAME fenced `plot` block, " +
     "NEVER tikz. Put one shape command per line — coordinates are `(x,y)`; options: `r=<radius>`, `color=<#hex>`, `dashed`, `fill`, and a \"label\" in quotes. Commands:\n" +
     "`point (x,y) \"A\"` · `text (x,y) \"note\"` · `segment (x1,y1) (x2,y2)` · `line (x1,y1) (x2,y2)` (infinite) · `vector (x1,y1) (x2,y2)` (arrow) · " +
@@ -6779,6 +6999,7 @@ function authorSys(fmt, lang) {
       "POLAR (rose/cardioid/spiral): `r = <expr in theta>` (e.g. `r = 5*sin(6*theta)`) + optional `theta: 0..2*pi`. " +
       "PARAMETRIC: BOTH `x = <expr in t>` and `y = <expr in t>` + optional `t: 0..2*pi`. " +
       "3D SURFACE: `z = <expr in x,y>` (e.g. `z = sin(x)*cos(y)`) + optional `x: -3..3` / `y: -3..3`. " +
+      "IMPLICIT EQUATIONS (2D or 3D) render DIRECTLY — write the equation as its own line inside ```plot: `x^2 + y^2 = 25`, `x^2/9 + y^2/4 = 1`, `x*y = 4` (2D curves); `x^2 + y^2 + z^2 = 9`, `z^2 = x^2 + y^2` (3D). Use numeric constants. " +
       "GEOMETRY FIGURES (triangle, circle, vectors, points, angles, polygons, number lines): ALSO use a fenced ```plot block with shape commands — NEVER tikz for these. " +
       "One shape per line, coords `(x,y)`, options `r=`, `color=#hex`, `dashed`, `fill`, \"label\". Commands: " +
       "`point (x,y) \"A\"` · `segment (x1,y1) (x2,y2)` · `line …` · `vector (x1,y1) (x2,y2) \"v\"` · `circle (cx,cy) r=R` · `ellipse (cx,cy) rx=A ry=B` · " +
@@ -10567,7 +10788,7 @@ async function buildClarifyingQuestions(task, lang, signal) {
 const AGENT_QUALITY =
   " You are a world-class domain expert for THIS task — a tenured professor for math/physics/chemistry/science, a published author for Arabic/English writing, a principal engineer for code. Work at that level, always." +
   " DEPTH: every step's output is a COMPLETE specialist section — full coverage of its subtopic, correct terminology, concrete worked examples, precise reasoning, clean structure with clear headings. Never an outline, a summary of what you 'would' write, or a stub." +
-  " CORRECTNESS: solve everything end-to-end and VERIFY before stating a result — differentiate an antiderivative back to the integrand, substitute values into an identity/equation, check every endpoint, singularity, unit and edge case, and re-derive any number you are unsure of. Never assert an unverified result. Give EXACT closed forms (fractions, radicals, π, e, symbolic) unless a decimal is requested. For any problem/exercise/question you GENERATE, first solve it fully as a hidden answer key; if your own solution is not clean, is ambiguous, or has no exact closed-form answer, DISCARD it and produce a different valid one — never publish a problem you could not cleanly solve. Confirm every non-trivial result a SECOND way (a different method or a special/limiting case). These correctness rules hold on EVERY engine — quality must not drop on a lighter/backup model." +
+  " CORRECTNESS: solve everything end-to-end and VERIFY before stating a result — differentiate an antiderivative back to the integrand, substitute values into an identity/equation, check every endpoint, singularity, unit and edge case, and re-derive any number you are unsure of. Never assert an unverified result. Give EXACT closed forms (fractions, radicals, π, e, symbolic) unless a decimal is requested. For any problem/exercise/question you GENERATE, first solve it fully as a hidden answer key; if your own solution is not clean, is ambiguous, or has no exact closed-form answer, DISCARD it and produce a different valid one — never publish a problem you could not cleanly solve. Confirm every non-trivial result a SECOND way (a different method or a special/limiting case). NEVER NARRATE A CORRECTION: the reader must never see 'مهلا/هناك خطأ/wait/oops/let me redo' or any visible self-correction — all checking is PRIVATE and the delivered text reads as one clean, correct derivation from the first line. These correctness rules hold on EVERY engine — quality must not drop on a lighter/backup model." +
   " SELF-CONSISTENCY: honour every definition, symbol, notation and claim established in earlier steps; contradict nothing already written." +
   " REAL CONTENT ONLY (absolute): never output 'TODO', 'lorem', '...', '(details omitted)', '(similar to above)', 'left as an exercise', placeholder names, or any promise of content instead of the content itself. If a part is long, write all of it." +
   " FORMATTING: ALL math in valid, BALANCED KaTeX ($…$ inline, $$…$$ for standalone equations only), units and words inside \\text{} with thin spaces (e.g. $9.8\\,\\text{m/s}^2$). Function graphs as a fenced ```plot block (lines `y = <expr>` with explicit operators + optional `domain: a..b`; also polar `r=f(theta)`, parametric `x=f(t)`/`y=g(t)`, 3D `z=f(x,y)`). GEOMETRY figures (triangles, circles, vectors, points, angles, polygons) ALSO as a fenced ```plot block with shape commands — `circle (cx,cy) r=R`, `triangle (x1,y1) (x2,y2) (x3,y3)`, `vector (x1,y1) (x2,y2)`, `point (x,y) \"A\"`, `angle (a) (v) (b) \"θ\"`, `segment`/`line`/`rectangle`/`polygon`/`arc`/`ellipse` — NEVER tikz for geometry. Reserve ```tikz ONLY for electric circuits / complex physics schematics. Code in fenced blocks with the language tag." +

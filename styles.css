@@ -985,7 +985,9 @@ h1, h2, h3 { margin: 0; font-family: var(--font-serif); font-weight: var(--weigh
   [dir="rtl"] .agent-step__out { margin: 8px 12px 6px 0; }
 }
 .plot-figure .plot-bg { fill: var(--color-bg-subtle, #fff); stroke: var(--color-border-hairline, #e5e7eb); stroke-width: 1; }
-.plot-figure .plot-grid { stroke: var(--color-border-hairline, #e5e7eb); opacity: .5; stroke-width: 1; }
+/* Grid = graph-paper lines: keyed to text-muted (NOT the hairline border) so they stay clearly
+   visible in the LIGHT theme too (hairline #E6E4DA at .5 was invisible on the white paper). */
+.plot-figure .plot-grid { stroke: var(--color-text-muted, #6b7280); opacity: .34; stroke-width: 1; }
 .plot-figure .plot-axis { stroke: var(--color-text-secondary, #4b5563); stroke-width: 1.4; }
 .plot-figure .plot-arrow { fill: var(--color-text-secondary, #4b5563); }
 .plot-figure .plot-tick { fill: var(--color-text-muted, #6b7280); font-size: 9px; }
