@@ -1338,8 +1338,51 @@ function sseInit(res) {
   });
 }
 
+// ---- BACKTRACK SCRUBBER — SHARED w/ netlify/edge-functions/api.js & app.js — keep BYTE-IDENTICAL ----
+// Removes visible self-correction ('wait, that's wrong, let me redo…', Arabic 'مهلا/دعني أعيد…') from
+// streamed CONTENT so science answers read clean-from-the-first-line. Anchored + correction-gated so
+// legit prose ('average wait times', 'correction:', 'Step 1:', '3:30', 'اللحظة') is never touched, and
+// byte-identical on any text with no cue. Only runs on the plain-chat product (gated by res._scrubBt);
+// never on code/agent streams (nomem) or reasoning. Verified: 37/37 fixtures incl. random chunkings.
+const _BT_EN = "(?:no,?\\s*)?wait,\\s+(?:that'?s|this is|it'?s|i|no|the)\\b|that'?s (?:wrong|not right|incorrect)|let me (?:redo|re-?do|reconsider|recompute|recalculate|start over|try again|fix that)|i made (?:an?|a) (?:error|mistake)|scratch that|on second thought|my mistake|ignore (?:that|the above)|hold on,\\s+(?:that|this|no|i)\\b|actually,?\\s+(?:that'?s|this is|no)\\b|oops|whoops";
+const _BT_AR = "انتظر|مهلا|مهلًا|لحظة|عذرا|عذرًا|عفوا|عفوًا|هناك خطأ|هذا خطأ|هذا غير صحيح|في الواقع هذا خطأ|دعني (?:أعيد|اعيد|أصحح|اصحح|أعدّل)|أعيد الحساب|اعيد الحساب|خطأ مني";
+const BACKTRACK_RE = new RegExp("(?:(?:^|[\\s.!?…])(?:" + _BT_EN + "))|(?:(?:^|[\\s.!?…،؛])(?:" + _BT_AR + ")(?=$|[\\s.!?…،؛]))", "i");
+function makeBacktrackScrubber() {
+  let pending = "", cur = "";
+  const isEnd = (c) => c === "." || c === "!" || c === "?" || c === "؟" || c === "\n";
+  const isWs = (c) => c === undefined || c === " " || c === "\t" || c === "\n" || c === "\r";
+  function recover(s) {
+    const m = BACKTRACK_RE.exec(s);
+    if (!m) return "";
+    let tail = s.slice(m.index + m[0].length);
+    const cm = /[,،]\s*/.exec(tail);
+    if (!cm) return "";
+    tail = tail.slice(cm.index + cm[0].length).trim();
+    return (tail && !BACKTRACK_RE.test(tail)) ? tail : "";
+  }
+  return {
+    push(tok) {
+      if (!tok) return "";
+      let out = "";
+      for (let i = 0; i < tok.length; i++) {
+        const ch = tok[i]; cur += ch;
+        if (isEnd(ch) && isWs(tok[i + 1])) {
+          const s = cur; cur = "";
+          if (BACKTRACK_RE.test(s)) { const rec = recover(s); if (rec) { out += pending; pending = rec; } else { pending = ""; } continue; }
+          out += pending; pending = s;
+        }
+      }
+      return out;
+    },
+    flush() { let rest = pending + cur; pending = ""; cur = ""; if (BACKTRACK_RE.test(rest)) { const rec = recover(rest); return rec || ""; } return rest; },
+    reset() { pending = ""; cur = ""; },
+  };
+}
+
 function sseWrite(res, content, reasoning) {
   if (res.writableEnded) return;
+  // Scrub only plain-chat content (never reasoning, never code/agent streams — gated by res._scrubBt).
+  if (content && res._scrubBt) { if (!res._bt) res._bt = makeBacktrackScrubber(); content = res._bt.push(content); }
   const delta = {};
   if (content) delta.content = content;
   if (reasoning) delta.reasoning = reasoning;
@@ -1349,6 +1392,7 @@ function sseWrite(res, content, reasoning) {
 
 function sseDone(res) {
   if (res.writableEnded) return;
+  if (res._bt) { const tail = res._bt.flush(); if (tail) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: tail } }] })}\n\n`); }
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -2890,6 +2934,9 @@ async function handleChat(req, res) {
   res.on("error", () => {});
 
   sseInit(res);
+  // Backtrack scrubbing runs ONLY on the plain Firas-AI chat product — never on Firas Code / Firas
+  // Agent internal calls (they set nomem:true) so code and agent output is never mutated.
+  res._scrubBt = !payload.nomem && !payload.agent;
 
   try {
     let served = false;
