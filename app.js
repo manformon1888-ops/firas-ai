@@ -9941,6 +9941,7 @@ async function loadFirebase() {
     signInWithPopup: authMod.signInWithPopup,
     signInWithRedirect: authMod.signInWithRedirect,
     getRedirectResult: authMod.getRedirectResult,
+    signInWithCredential: authMod.signInWithCredential,
     signInWithEmailAndPassword: authMod.signInWithEmailAndPassword,
     createUserWithEmailAndPassword: authMod.createUserWithEmailAndPassword,
     updateProfile: authMod.updateProfile,
@@ -10000,6 +10001,12 @@ async function completeFirebaseSignIn(result) {
   await bootApp(user);
 }
 const LS_GOOGLE_REDIRECT = "firas_google_redirect";
+/** The Capacitor bridge is injected into this page inside the .exe-less native shells; absent in a browser. */
+function nativeGoogleAuthPlugin() {
+  const cap = window.Capacitor;
+  if (!cap || typeof cap.isNativePlatform !== "function" || !cap.isNativePlatform()) return null;
+  return (cap.Plugins && cap.Plugins.FirebaseAuthentication) || null;
+}
 async function handleGoogleSignIn() {
   if (!hasFirebaseConfig() || authEls.google.disabled) return;
   hideAuthError();
@@ -10009,6 +10016,18 @@ async function handleGoogleSignIn() {
     const m = await loadFirebase();
     const auth = await ensureFirebaseAuth();
     let result;
+    // Inside the native apps, Google forbids OAuth in an embedded webview ("Access blocked"), and the
+    // redirect fallback leaves for Safari with no way back. The OS plugin runs the consent screen in the
+    // system browser and hands us the Google idToken, which we trade for the same Firebase credential.
+    const nativeAuth = nativeGoogleAuthPlugin();
+    if (nativeAuth) {
+      const native = await nativeAuth.signInWithGoogle();
+      const googleIdToken = native && native.credential && native.credential.idToken;
+      if (!googleIdToken) throw new Error("native google sign-in returned no idToken");
+      result = await m.signInWithCredential(auth, m.GoogleAuthProvider.credential(googleIdToken));
+      await completeFirebaseSignIn(result);
+      return;
+    }
     try {
       result = await m.signInWithPopup(auth, new m.GoogleAuthProvider());
     } catch (err) {
@@ -10026,6 +10045,8 @@ async function handleGoogleSignIn() {
     }
     await completeFirebaseSignIn(result);
   } catch (err) {
+    // The native sheet reports a dismissal as a plain error, not an auth/* code — treat it like the popup case.
+    if (/cancel+ed|dismiss/i.test((err && err.message) || "")) return;
     if (err && typeof err.status === "number") {
       showAuthError((err.data && (err.data.message || err.data.error)) || t().authGoogleError);
     } else {
@@ -13872,3 +13893,123 @@ if (document.readyState === "loading") {
 } else {
   init();
 }
+
+/* ════════════════════════════════════════════════════════════════
+   NATIVE SHELL bootstrap — appended. Remote-page safe: uses only
+   window.Capacitor.Plugins.* and the WINDOW keyboard events the injected
+   native bridge re-fires (no npm wrapper import). Feature-gated: a plain
+   browser runs the harmless haptic listener as a no-op and returns early.
+   ════════════════════════════════════════════════════════════════ */
+(function initFirasNativeShell(){
+  "use strict";
+  var Cap = window.Capacitor;
+  var isNative = !!(Cap && Cap.isNativePlatform && Cap.isNativePlatform());
+  var P = (Cap && Cap.Plugins) || {};
+  var platform = (Cap && Cap.getPlatform && Cap.getPlatform()) || "web";
+  var root = document.documentElement;
+
+  /* ---- Haptics (silent no-op on the web) ---- */
+  function haptic(kind){
+    var H = P.Haptics; if(!H) return;
+    try{
+      switch(kind){
+        case "medium":  H.impact({style:"MEDIUM"}); break;
+        case "heavy":   H.impact({style:"HEAVY"});  break;
+        case "success": H.notification({type:"SUCCESS"}); break;
+        case "error":   H.notification({type:"ERROR"});   break;
+        default:        H.impact({style:"LIGHT"});
+      }
+    }catch(e){}
+  }
+  window.firasHaptic = haptic;
+  document.addEventListener("click", function(e){
+    var el = e.target && e.target.closest && e.target.closest(
+      "[data-haptic], .composer__send, .composer__attach, .icon-btn, .btn-newchat, .tier-switch button");
+    if(!el) return;
+    haptic(el.getAttribute("data-haptic") || (el.classList.contains("composer__send") ? "medium" : "light"));
+  }, true);
+
+  if(!isNative) return; /* ------------ native-only below ------------ */
+
+  root.classList.add("native-shell");
+  root.classList.add(platform === "ios" ? "native-ios" : "native-android");
+
+  /* ---- Status bar: white icons on the dark chrome ("DARK" style == light glyphs) ---- */
+  try{ if(P.StatusBar && P.StatusBar.setStyle) P.StatusBar.setStyle({ style:"DARK" }); }catch(e){}
+  /* Do NOT call StatusBar.setOverlaysWebView — edge-to-edge is already established
+     natively (launch theme + decorFitsSystemWindows(false)); re-toggling it jumps content. */
+
+  /* ---- SplashScreen: hide once real content has painted (native autoHide is the backstop) ---- */
+  (function hideSplashWhenReady(){
+    var Splash = P.SplashScreen; if(!Splash || !Splash.hide) return;
+    var start = (window.performance && performance.now) ? performance.now() : 0;
+    function elapsed(){ return ((window.performance && performance.now) ? performance.now() : 0) - start; }
+    function contentReady(){
+      var m = document.querySelector(".chat-scroll, .auth, .landing, .main");
+      return !!(m && m.childElementCount > 0);
+    }
+    function tick(){
+      if(contentReady() || elapsed() > 2500){
+        requestAnimationFrame(function(){ requestAnimationFrame(function(){
+          try{ Splash.hide({ fadeOutDuration:200 }); }catch(e){}
+        });});
+        return;
+      }
+      requestAnimationFrame(tick);
+    }
+    if(document.readyState === "loading")
+      document.addEventListener("DOMContentLoaded", function(){ requestAnimationFrame(tick); });
+    else requestAnimationFrame(tick);
+  })();
+
+  /* ---- iOS keyboard lockstep (Android is driven by MainActivity's --kb-inset) ---- */
+  if(platform === "ios"){
+    var MIN_KB = 120; // below this = a hardware-keyboard accessory bar (~44px) or a floating iPad keyboard → no lift
+    var Kb = P.Keyboard;
+    if(Kb && typeof Kb.setAccessoryBarVisible === "function"){ // iPad-only; absent/no-op on iPhone
+      try{ Kb.setAccessoryBarVisible({ isVisible:false }); }catch(e){}
+    }
+    function setKb(px, instant){
+      var val = (px > 0 ? Math.round(px) : 0);
+      if(instant){
+        root.classList.add("kb-instant");
+        root.style.setProperty("--kb", val + "px");
+        void root.offsetHeight; // flush the un-animated write
+        requestAnimationFrame(function(){ root.classList.remove("kb-instant"); });
+      }else{
+        root.style.setProperty("--kb", val + "px");
+      }
+    }
+    function heightOf(e){
+      var h = e && (e.keyboardHeight != null ? e.keyboardHeight : (e.detail && e.detail.keyboardHeight));
+      return Number(h) || 0;
+    }
+    function keepBottomPinned(){
+      var sc = document.querySelector(".chat-scroll"); if(!sc) return;
+      if((sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 140)
+        requestAnimationFrame(function(){ sc.scrollTop = sc.scrollHeight; });
+    }
+    /* WKWebView tries to "scroll the caret into view"; our lift is a compositor transform it
+       can't see, so on focus it may shove the document by ~keyboardHeight. We never scroll the
+       document, so pin it back to 0. */
+    var docEl = document.scrollingElement || root;
+    function pinDocScroll(){ if(docEl && docEl.scrollTop) docEl.scrollTop = 0; if(window.scrollY) window.scrollTo(0,0); }
+    document.addEventListener("focusin", function(e){
+      var tEl = e.target;
+      if(tEl && tEl.classList && tEl.classList.contains("composer__textarea")){
+        pinDocScroll(); requestAnimationFrame(pinDocScroll); setTimeout(pinDocScroll, 300);
+      }
+    });
+    window.addEventListener("keyboardWillShow", function(e){
+      var h = heightOf(e); if(h < MIN_KB) return;
+      root.classList.add("kb-open"); setKb(h, false); keepBottomPinned();
+    });
+    window.addEventListener("keyboardWillHide", function(){
+      root.classList.remove("kb-open"); setKb(0, false);
+    });
+    window.addEventListener("keyboardDidShow", function(e){
+      var h = heightOf(e); if(h < MIN_KB) return;
+      setKb(h, true); keepBottomPinned(); // snap to the exact final height (iOS-26 drift fix)
+    });
+  }
+})();
