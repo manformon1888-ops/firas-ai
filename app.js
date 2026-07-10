@@ -10001,11 +10001,21 @@ async function completeFirebaseSignIn(result) {
   await bootApp(user);
 }
 const LS_GOOGLE_REDIRECT = "firas_google_redirect";
-/** The Capacitor bridge is injected into this page inside the .exe-less native shells; absent in a browser. */
+/** True inside the native shells (Capacitor bridge injected into this remote page); false in a browser. */
+function isNativeApp() {
+  const cap = window.Capacitor;
+  return !!(cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform());
+}
+/** Get the native Google-auth plugin. On a REMOTE page the JS wrapper isn't imported, so
+ *  Capacitor.Plugins.FirebaseAuthentication can be undefined — registerPlugin() builds the bridge proxy by name. */
 function nativeGoogleAuthPlugin() {
   const cap = window.Capacitor;
-  if (!cap || typeof cap.isNativePlatform !== "function" || !cap.isNativePlatform()) return null;
-  return (cap.Plugins && cap.Plugins.FirebaseAuthentication) || null;
+  if (!cap || !isNativeApp()) return null;
+  let p = (cap.Plugins && cap.Plugins.FirebaseAuthentication) || null;
+  if (!p && typeof cap.registerPlugin === "function") {
+    try { p = cap.registerPlugin("FirebaseAuthentication"); } catch (_) { p = null; }
+  }
+  return p;
 }
 async function handleGoogleSignIn() {
   if (!hasFirebaseConfig() || authEls.google.disabled) return;
@@ -10019,8 +10029,14 @@ async function handleGoogleSignIn() {
     // Inside the native apps, Google forbids OAuth in an embedded webview ("Access blocked"), and the
     // redirect fallback leaves for Safari with no way back. The OS plugin runs the consent screen in the
     // system browser and hands us the Google idToken, which we trade for the same Firebase credential.
-    const nativeAuth = nativeGoogleAuthPlugin();
-    if (nativeAuth) {
+    // In a native shell we NEVER fall back to the popup/redirect — that path is exactly what Google blocks,
+    // so a missing plugin surfaces a clear message instead of the confusing 403.
+    if (isNativeApp()) {
+      const nativeAuth = nativeGoogleAuthPlugin();
+      if (!nativeAuth) {
+        showAuthError("تعذّر تشغيل تسجيل جوجل داخل التطبيق. حدّث التطبيق إلى أحدث نسخة وأعد فتحه.");
+        return;
+      }
       const native = await nativeAuth.signInWithGoogle();
       const googleIdToken = native && native.credential && native.credential.idToken;
       if (!googleIdToken) throw new Error("native google sign-in returned no idToken");
