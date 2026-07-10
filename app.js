@@ -10034,7 +10034,13 @@ async function handleGoogleSignIn() {
     if (isNativeApp()) {
       const nativeAuth = nativeGoogleAuthPlugin();
       if (!nativeAuth) {
-        showAuthError("تعذّر تشغيل تسجيل جوجل داخل التطبيق. حدّث التطبيق إلى أحدث نسخة وأعد فتحه.");
+        let dbg;
+        try {
+          const c = window.Capacitor || {};
+          const keys = c.Plugins ? Object.keys(c.Plugins) : [];
+          dbg = "P:[" + keys.join(",") + "] reg:" + (typeof c.registerPlugin) + " plat:" + (c.getPlatform ? c.getPlatform() : "?");
+        } catch (e) { dbg = "err:" + (e && e.message); }
+        showAuthError("تشخيص — صوّر هذا وأرسله: " + dbg);
         return;
       }
       const native = await nativeAuth.signInWithGoogle();
