@@ -10006,22 +10006,154 @@ function isNativeApp() {
   const cap = window.Capacitor;
   return !!(cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform());
 }
-/** Get the native Google-auth plugin handle. On a REMOTE page the JS wrapper isn't imported and
- *  registerPlugin doesn't exist on the injected bridge; Capacitor injects Plugins.FirebaseAuthentication
- *  itself, once per NATIVELY-registered plugin, at documentStart. Poll briefly for the injection race,
- *  then fall back to the low-level nativePromise the proxy itself uses. */
-async function nativeGoogleAuthPlugin(timeoutMs) {
+/* ----------------------------------------------------------------------------
+   NATIVE Google sign-in (iOS Capacitor shell) — system-browser OAuth 2.0.
+   We abandoned @capacitor-firebase/authentication (its static_framework+subspec
+   won't link in the unsigned CI build). Instead:
+     @capacitor/browser (SFSafariViewController) opens Google consent in the
+     SYSTEM browser (no disallowed_useragent / 403), Google 302s back to our
+     reversed-client-id custom scheme (already a CFBundleURLScheme), and
+     @capacitor/app 'appUrlOpen' catches the deep link. We exchange the code
+     with PKCE (iOS client => NO client_secret) for a Google OIDC id_token, then
+     feed it to the SAME GoogleAuthProvider.credential(idToken) ->
+     signInWithCredential -> /api/auth/firebase path used on the web.
+   Both plugins auto-register on this remote page via the injected Capacitor
+   bridge — no JS wrapper import needed.
+---------------------------------------------------------------------------- */
+const GOOGLE_IOS_CLIENT_ID =
+  "237562309958-p0njbmb5imqcfd6fk728ccr6lhesq03e.apps.googleusercontent.com";
+// SINGLE slash after the colon. Must be byte-identical in authorize + token calls.
+const GOOGLE_IOS_REDIRECT =
+  "com.googleusercontent.apps.237562309958-p0njbmb5imqcfd6fk728ccr6lhesq03e:/oauth2redirect";
+
+function _b64url(bytes) {
+  const a = new Uint8Array(bytes);
+  let s = "";
+  for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function _randUrlSafe(nBytes) {
+  const a = new Uint8Array(nBytes);
+  crypto.getRandomValues(a);
+  return _b64url(a);
+}
+async function _sha256b64url(str) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return _b64url(digest);
+}
+
+/** Poll briefly for the Capacitor Browser + App plugins injected on the remote page. */
+async function nativeOAuthPlugins(timeoutMs) {
   const cap = window.Capacitor;
   if (!cap || !isNativeApp()) return null;
   const t0 = Date.now();
-  // Capacitor injects Plugins.FirebaseAuthentication only for a NATIVELY-registered plugin, at
-  // documentStart; poll briefly for the injection race.
-  while (!(cap.Plugins && cap.Plugins.FirebaseAuthentication && cap.Plugins.FirebaseAuthentication.signInWithGoogle)) {
+  while (!(cap.Plugins && cap.Plugins.Browser && cap.Plugins.App &&
+           cap.Plugins.Browser.open && cap.Plugins.App.addListener)) {
     if (Date.now() - t0 > (timeoutMs || 4000)) break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  const P = cap.Plugins && cap.Plugins.FirebaseAuthentication;
-  return (P && P.signInWithGoogle) ? P : null;
+  const P = cap.Plugins;
+  return (P && P.Browser && P.App && P.Browser.open && P.App.addListener) ? P : null;
+}
+
+/** Run the system-browser PKCE OAuth dance; resolve to a Google OIDC id_token.
+ *  Rejects with { _cancel:true } when the user dismisses the sheet. */
+async function nativeGoogleIdToken() {
+  const plugins = await nativeOAuthPlugins();
+  if (!plugins) {
+    let keys = "?";
+    try { keys = Object.keys((window.Capacitor && window.Capacitor.Plugins) || {}).join(","); } catch (e) {}
+    throw new Error("Capacitor Browser/App not registered [" + keys + "]");
+  }
+  const { Browser, App } = plugins;
+
+  const verifier  = _randUrlSafe(48);            // 64-char base64url PKCE verifier
+  const challenge = await _sha256b64url(verifier);
+  const stateTok  = _randUrlSafe(12);
+
+  const authUrl =
+    "https://accounts.google.com/o/oauth2/v2/auth" +
+    "?client_id=" + encodeURIComponent(GOOGLE_IOS_CLIENT_ID) +
+    "&redirect_uri=" + encodeURIComponent(GOOGLE_IOS_REDIRECT) +
+    "&response_type=code" +
+    "&scope=" + encodeURIComponent("openid email profile") +   // 'openid' is REQUIRED for an id_token
+    "&code_challenge=" + challenge +
+    "&code_challenge_method=S256" +
+    "&state=" + stateTok +
+    "&prompt=select_account";
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let urlHandle = null;
+    let finHandle = null;
+    const cleanup = () => {
+      try { urlHandle && urlHandle.remove(); } catch (_) {}
+      try { finHandle && finHandle.remove(); } catch (_) {}
+    };
+
+    (async () => {
+      // 1) Register the deep-link listener BEFORE opening the browser (avoid a fast-return race).
+      urlHandle = await App.addListener("appUrlOpen", async (ev) => {
+        const url = ev && ev.url;
+        if (!url || url.indexOf("com.googleusercontent.apps.") !== 0) return; // not our callback
+        if (settled) return;
+        settled = true;
+        try { await Browser.close(); } catch (_) {}   // SFSafariViewController won't self-dismiss
+        cleanup();
+        try {
+          // Custom-scheme-safe parse: take everything after the first '?'. Do NOT use new URL().
+          const q = new URLSearchParams(url.split("?")[1] || "");
+          if (q.get("state") !== stateTok) return reject(new Error("state mismatch"));
+          const err = q.get("error");
+          if (err) return reject(new Error(err));
+          const code = q.get("code");
+          if (!code) return reject(new Error("no authorization code"));
+
+          // 2) Exchange code -> id_token. iOS client => NO client_secret; PKCE verifier authenticates.
+          //    Google's token endpoint reflects CORS origin, so this fetch runs directly from the
+          //    remote WKWebView page. To route through our backend instead, POST { code, code_verifier }
+          //    to "/api/oauth/google/exchange" and read { id_token } — see server.mjs handler.
+          const resp = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: GOOGLE_IOS_CLIENT_ID,
+              code: code,
+              code_verifier: verifier,
+              redirect_uri: GOOGLE_IOS_REDIRECT,
+              grant_type: "authorization_code",
+            }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || !data.id_token) {
+            return reject(new Error(data.error_description || data.error || "token exchange failed"));
+          }
+          resolve(data.id_token);
+        } catch (e) {
+          reject(e);
+        }
+      });
+
+      // 3) A user dismiss (Done/swipe) fires browserFinished. Treat as cancel ONLY if no redirect
+      //    is in flight — order vs appUrlOpen isn't guaranteed, so wait a beat before deciding.
+      finHandle = await Browser.addListener("browserFinished", () => {
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(Object.assign(new Error("cancelled"), { _cancel: true }));
+          }
+        }, 1200);
+      });
+
+      // 4) Open the SYSTEM browser (NOT the WKWebView) so Google shows consent without a 403.
+      try {
+        await Browser.open({ url: authUrl, presentationStyle: "fullscreen" });
+      } catch (e) {
+        if (!settled) { settled = true; cleanup(); reject(e); }
+      }
+    })().catch((e) => { if (!settled) { settled = true; cleanup(); reject(e); } });
+  });
 }
 async function handleGoogleSignIn() {
   if (!hasFirebaseConfig() || authEls.google.disabled) return;
@@ -10038,16 +10170,13 @@ async function handleGoogleSignIn() {
     // In a native shell we NEVER fall back to the popup/redirect — that path is exactly what Google blocks,
     // so a missing plugin surfaces a clear message instead of the confusing 403.
     if (isNativeApp()) {
-      const nativeAuth = await nativeGoogleAuthPlugin();
-      if (!nativeAuth) {
-        let keys = "?";
-        try { keys = Object.keys((window.Capacitor && window.Capacitor.Plugins) || {}).join(","); } catch (e) {}
-        showAuthError("لم تُسجَّل إضافة جوجل بعد. صوّر وأرسل: [" + keys + "]");
-        return;
+      let googleIdToken;
+      try {
+        googleIdToken = await nativeGoogleIdToken();
+      } catch (e) {
+        if (e && e._cancel) return;               // user dismissed the sheet — no error UI
+        throw e;
       }
-      const native = await nativeAuth.signInWithGoogle();
-      const googleIdToken = native && native.credential && native.credential.idToken;
-      if (!googleIdToken) throw new Error("native google sign-in returned no idToken");
       result = await m.signInWithCredential(auth, m.GoogleAuthProvider.credential(googleIdToken));
       await completeFirebaseSignIn(result);
       return;

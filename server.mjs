@@ -3046,6 +3046,49 @@ async function serveStatic(req, res) {
 /* ===========================================================================
    Router
    =========================================================================== */
+// POST /api/oauth/google/exchange — OPTIONAL server-side PKCE code exchange for
+// the native (iOS) system-browser sign-in. The iOS OAuth client has NO client
+// secret; the PKCE code_verifier authenticates the public client. We forward
+// code+verifier to Google and return { id_token }. Google's token endpoint is
+// CORS-open so the app CAN fetch it directly; this handler is a durable
+// alternative that keeps the flow off undocumented CORS behavior. Nothing secret
+// lives here — there is no iOS client secret to protect.
+const GOOGLE_IOS_CLIENT_ID = "237562309958-p0njbmb5imqcfd6fk728ccr6lhesq03e.apps.googleusercontent.com";
+const GOOGLE_IOS_REDIRECT  = "com.googleusercontent.apps.237562309958-p0njbmb5imqcfd6fk728ccr6lhesq03e:/oauth2redirect";
+async function handleGoogleOAuthExchange(req, res) {
+  if (rateLimited("auth:" + clientIp(req), 12, 60_000)) {
+    return sendJson(res, 429, { error: "too many attempts, please wait a minute" });
+  }
+  const body = await readJson(req, 20_000);
+  if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
+  const code = typeof body.code === "string" ? body.code : "";
+  const verifier = typeof body.code_verifier === "string" ? body.code_verifier : "";
+  if (!code || !verifier) return sendJson(res, 400, { error: "missing code or code_verifier" });
+
+  let data = null;
+  try {
+    const r = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: GOOGLE_IOS_CLIENT_ID,
+        code,
+        code_verifier: verifier,
+        redirect_uri: GOOGLE_IOS_REDIRECT,   // must exactly match the authorize request
+        grant_type: "authorization_code",
+        // NO client_secret — not applicable to iOS OAuth clients.
+      }),
+    });
+    data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.id_token) {
+      return sendJson(res, 401, { error: data.error_description || data.error || "exchange failed" });
+    }
+  } catch {
+    return sendJson(res, 502, { error: "token endpoint unreachable" });
+  }
+  return sendJson(res, 200, { id_token: data.id_token });
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const route = req.url.split("?")[0];
@@ -3105,6 +3148,7 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/auth/resend-code" && method === "POST") return await handleResendCode(req, res);
     if (route === "/api/auth/login" && method === "POST") return await handleLogin(req, res);
     if (route === "/api/auth/firebase" && method === "POST") return await handleFirebaseAuth(req, res);
+    if (route === "/api/oauth/google/exchange" && method === "POST") return await handleGoogleOAuthExchange(req, res);
     if (route === "/api/auth/forgot" && method === "POST") return await handleForgot(req, res);
     if (route === "/api/auth/reset" && method === "POST") return await handleReset(req, res);
     if (route === "/api/auth/change-password" && method === "POST") return await handleChangePassword(req, res);
