@@ -3584,6 +3584,17 @@ h1, h2, h3 { margin: 0; font-family: var(--font-serif); font-weight: var(--weigh
 .cw-proj__del:hover{background:#c0392b1a;color:#c0392b}
 .cw-home__empty{grid-column:1/-1;padding:26px;text-align:center;color:var(--color-text-muted);font:400 13px var(--font-sans);border:1px dashed var(--color-border);border-radius:12px}
 [dir="rtl"] .cw-home__empty{font-family:var(--font-arabic)}
+/* starter-templates gallery on the Code home */
+.cw-home__tplrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.cw-tpl{display:flex;align-items:center;gap:10px;padding:12px 13px;border:1px solid var(--color-border-hairline);border-radius:12px;background:var(--color-surface);cursor:pointer;text-align:start;transition:.15s;position:relative}
+.cw-tpl:hover{border-color:var(--color-accent);transform:translateY(-1px);box-shadow:0 6px 18px color-mix(in srgb,var(--color-text-primary) 8%,transparent)}
+.cw-tpl__ic{flex:0 0 auto;width:34px;height:34px;display:grid;place-items:center;border-radius:9px;background:var(--color-accent-soft);font-size:17px}
+.cw-tpl__meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.cw-tpl__meta strong{font:600 13.5px var(--font-sans);color:var(--color-text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+[dir="rtl"] .cw-tpl__meta strong{font-family:var(--font-arabic)}
+.cw-tpl__meta small{font:400 11px var(--font-sans);color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+[dir="rtl"] .cw-tpl__meta small{font-family:var(--font-arabic)}
+.cw-tpl__badge{flex:0 0 auto;padding:2px 8px;border-radius:999px;font:700 10px var(--font-mono);color:var(--tplc,#888);background:color-mix(in srgb,var(--tplc,#888) 14%,transparent);border:1px solid color-mix(in srgb,var(--tplc,#888) 35%,transparent)}
 /* AI command bar: keep the INNER input+button centered to a comfortable measure, but the bar
    itself stays FULL-WIDTH at the bottom of the IDE (a narrow centered bar floated over the editor). */
 .cw-ai{max-width:none;margin-inline:0}

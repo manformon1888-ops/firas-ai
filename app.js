@@ -32,8 +32,12 @@ const MODELS = {
       "You are Firas Mini, a sharp, fast expert. Answer concisely and directly with " +
       "minimal fluff, but never sacrifice correctness. You are genuinely strong at " +
       "mathematics, physics and the sciences: give correct results and wrap ALL math " +
-      "in LaTeX (inline $...$, display $$...$$). For programming, give clean, correct, " +
-      "runnable code. Prefer short, accurate answers over long explanations.",
+      "in LaTeX (inline $...$, display $...$). You are equally reliable across ALL " +
+      "school subjects — Arabic grammar (النحو والإعراب والبلاغة), English, history, geography, " +
+      "Islamic education, philosophy, economics: exact terms, dates and quotations only; " +
+      "never invent a fact, date, verse or hadith — if unsure, say so briefly. For " +
+      "programming, give clean, correct, runnable code. Prefer short, accurate answers " +
+      "over long explanations.",
   },
   pro: {
     key: "pro",
@@ -49,7 +53,12 @@ const MODELS = {
       "You are Firas Pro, a top-tier expert assistant. Be helpful, well-structured and " +
       "thorough but efficient. You are exceptionally strong at MATHEMATICS, PHYSICS and " +
       "the SCIENCES: reason rigorously, show correct step-by-step working, and WRAP ALL " +
-      "math in LaTeX (inline $...$, display $$...$$). For PROGRAMMING, write clean, " +
+      "math in LaTeX (inline $...$, display $...$). You are EQUALLY expert across ALL " +
+      "school subjects (المواد الدراسية): Arabic language and grammar (النحو والصرف والبلاغة والأدب), " +
+      "English, history, geography, Islamic education (letter-perfect Quran and hadith " +
+      "quotation — never invented), philosophy, economics and computer science — give " +
+      "curriculum-grade answers with exact terms, dates, rules and quotations, and never " +
+      "fabricate a fact, verse or reference. For PROGRAMMING, write clean, " +
       "correct, complete and runnable code with a brief explanation. When asked for a " +
       "website/page/UI, output a COMPLETE, polished, self-contained single-file HTML " +
       "document in ONE html code block. Use clear formatting (headings, lists, code) " +
@@ -136,7 +145,7 @@ const STR = {
     previous7: "آخر ٧ أيام",
     previous30: "آخر ٣٠ يومًا",
     older: "أقدم",
-    emptyHistory: "لا توجد محادثات بعد.",
+    emptyHistory: "لا توجد محادثات بعد — اضغط «محادثة جديدة» للبدء.",
     noResults: "لا توجد نتائج.",
     thinking: "التفكير",
     copy: "نسخ",
@@ -198,11 +207,11 @@ const STR = {
     landingFeaturesSub: "منصّة ذكاء اصطناعي متكاملة، تتحدّث العربية والإنجليزية بطلاقة — كل ما تحتاجه في مكان واحد.",
     landingFeatures: [
       { icon: "spark", title: "أربعة نماذج ذكية", desc: "«ميني» للسرعة، و«برو» للمهام اليومية، و«أولترا» للأسئلة الصعبة والبرمجة، و«ماكس» الأقوى للأسئلة الصعبة والتحليل العميق في كل المجالات." },
-      { icon: "code", title: "كتابة الكود مباشرةً", desc: "يكتب صفحات HTML/CSS/JS كاملة داخل نافذة محرّر حيّة، مع معاينة فورية وزر تحميل." },
+      { icon: "code", title: "فِراس Code — برمجة كاملة بالمتصفح", desc: "بيئة تطوير حقيقية داخل التطبيق: مشاريع متعددة الملفات، معاينة حيّة، وقوالب ألعاب جاهزة — صِف فكرتك ويبنيها فِراس." },
+      { icon: "devices", title: "فِراس Agent — وكيل المهام الكبيرة", desc: "يخطّط وينفّذ خطوة بخطوة ويراجع عمله بنفسه، ثم يسلّمك ملفات ومشاريع كاملة جاهزة للتسليم." },
+      { icon: "file", title: "ملفات وامتحانات جاهزة", desc: "يولّد PDF وWord وExcel وPowerPoint بخطوط عربية أنيقة — وأسئلة مع حلولها بتنسيق ورقة امتحان حقيقية." },
       { icon: "search", title: "بحث الويب المباشر", desc: "يجلب معلومات حديثة من الإنترنت ويجيبك مع ذكر المصادر القابلة للنقر." },
       { icon: "bulb", title: "وضع التفكير", desc: "تحليل أعمق ودقّة أعلى عند تفعيله — مثالي للأسئلة المعقّدة والمسائل المنطقية." },
-      { icon: "image", title: "توليد الصور (تجريبي)", desc: "حوّل وصفك إلى صورة فنية — اكتب «اصنع لي صورة…» وشاهدها تُولَّد أمامك." },
-      { icon: "devices", title: "يعمل في كل مكان", desc: "تصميم متجاوب أنيق على الهاتف واللوحي والحاسوب — مجانًا وبلا تسجيل معقّد." },
     ],
     landingImageBadge: "تجريبي",
     landingImageTitle: "ميزة توليد الصور",
@@ -299,7 +308,7 @@ const STR = {
     previous7: "Previous 7 days",
     previous30: "Previous 30 days",
     older: "Older",
-    emptyHistory: "No conversations yet.",
+    emptyHistory: "No conversations yet — press “New chat” to begin.",
     noResults: "No results.",
     thinking: "Thinking",
     copy: "Copy",
@@ -361,11 +370,11 @@ const STR = {
     landingFeaturesSub: "A complete AI platform — fluent in Arabic and English, with everything you need in one place.",
     landingFeatures: [
       { icon: "spark", title: "Four smart models", desc: "“Mini” for speed, “Pro” for everyday tasks, “Ultra” for hard questions & coding, and “Max” — the strongest for hard questions & deep analysis across every field." },
-      { icon: "code", title: "Writes code live", desc: "Builds complete HTML/CSS/JS pages inside a live editor window, with instant preview and a download button." },
+      { icon: "code", title: "Firas Code — a full in-browser IDE", desc: "A real dev environment inside the app: multi-file projects, live preview, and ready game templates — describe your idea and Firas builds it." },
+      { icon: "devices", title: "Firas Agent — for big tasks", desc: "Plans, executes step by step, reviews its own work, then hands you complete, ready-to-submit files and projects." },
+      { icon: "file", title: "Ready files & exam papers", desc: "Generates PDF, Word, Excel and PowerPoint with elegant Arabic fonts — plus questions with solutions in a real exam-paper layout." },
       { icon: "search", title: "Live web search", desc: "Pulls fresh information from the internet and answers with clickable sources." },
       { icon: "bulb", title: "Thinking mode", desc: "Deeper analysis and higher accuracy when enabled — ideal for complex, logical problems." },
-      { icon: "image", title: "Image generation (beta)", desc: "Turn your description into artwork — type “create an image of…” and watch it generate." },
-      { icon: "devices", title: "Works everywhere", desc: "A polished, responsive design on phone, tablet and desktop — free, with no complicated sign-up." },
     ],
     landingImageBadge: "Beta",
     landingImageTitle: "Image generation",
@@ -592,7 +601,7 @@ function detectLang(text) {
    Arabic + English. Checks pptx/xlsx/docx BEFORE the generic pdf fallback.
 ---------------------------------------------------------------------------- */
 const FILE_REQUEST_VERBS =
-  /\b(make|create|generate|build|produce|export|give\s*me|turn\s*(?:it|this)?\s*into|convert|save|download|send\s*me|write(?:\s*me)?|draft|compose|author|prepare|put\s*(?:it|this)?\s*(?:in|into))\b|اصنع|إصنع|أنشئ|انشئ|سوّ?ي|اعمل|إعمل|اعملي|حوّ?ل|صدّ?ر|أعطني|اعطني|نزّ?ل|ابعت|إبعت|جهّ?ز|اكتب(?:\s*لي)?|خرّ?ج|طلّ?علي|طلّ?ع\s*لي|دزّ?\s*لي|دزلي|طبعلي|طبع\s*لي|جيب\s*لي|جبلي/i;
+  /\b(make|create|generate|build|produce|export|give\s*me|turn\s*(?:it|this)?\s*into|convert|save|download|send\s*me|write(?:\s*me)?|draft|compose|author|prepare|put\s*(?:it|this)?\s*(?:in|into)|i\s+(?:want|need|would\s+like))\b|اصنع|إصنع|أنشئ|انشئ|سوّ?ي|اعمل|إعمل|اعملي|حوّ?ل|صدّ?ر|أعطني|اعطني|أعطيني|اعطيني|انطيني|نزّ?ل|ابعت|إبعت|جهّ?ز|اكتب(?:\s*لي)?|خرّ?ج|طلّ?علي|طلّ?ع\s*لي|دزّ?\s*لي|دزلي|طبعلي|طبع\s*لي|اطبع|إطبع|جيب\s*لي|جبلي|هات\s*لي|هاتلي|صمّ?م|أريد|اريد|أبغى|ابغى|أبي\s|ابي\s|بدي|بغيت|أحتاج|احتاج|محتاج|عايز|عاوز/i;
 
 /* ----------------------------------------------------------------------------
    CODE requests — "make me a single-file HTML site", "اكتب لي كود", "vanilla JS
@@ -683,7 +692,7 @@ function detectCodeRequest(text) {
 // these are imperative verbs ("edit", "add", "make it…"), not the code NOUN, so a
 // fresh request still needs detectCodeRequest above.
 const CODE_FOLLOWUP =
-  /عدّل|عدل|تعديل|عدّله|عدله|غيّر|غير|بدّل|بدل|أضف|اضف|اضيف|ضيف|احذف|أصلح|اصلح|صحّح|صحح|كمّل|كمل|كمّله|كمله|أكمل|اكمل|استمر|واصل|زِد|زد|حسّن|حسن|طوّر|طور|اجعل|اجعله|خلّي|خلي|أعد|اعد\s*كتابة|نفس\s*الكود|edit|modif|chang|updat|\badd\b|remov|delet|\bfix\b|continu|improv|refactor|append|extend|rewrit|make\s+it|same\s+code|keep\s+going/i;
+  /عدّل|عدل|تعديل|عدّله|عدله|غيّر|غير|بدّل|بدل|أضف|اضف|اضيف|ضيف|احذف|أصلح|اصلح|صحّح|صحح|كمّل|كمل|كمّله|كمله|أكمل|اكمل|استمر|واصل|زِد|زد|حسّن|حسن|طوّر|طور|اجعل|اجعله|خلّي|خلي|أعد|اعد\s*كتابة|نفس\s*الكود|لا\s*يعمل|ما\s*يعمل|لا\s*يشتغل|ما\s*يشتغل|مايشتغل|مو\s*شغال|مش\s*شغال|معطّ?ل|خربان|توقف|يعلق|علق|فيه?\s*(?:خطأ|مشكلة|باگ|باق)|خطأ|مشكلة|edit|modif|chang|updat|\badd\b|remov|delet|\bfix\b|continu|improv|refactor|append|extend|rewrit|make\s+it|same\s+code|keep\s+going|\bbug\b|\berror\b|broken|crash(?:es|ed)?|doesn'?t\s+work|does\s+not\s+work|not\s+work(?:ing)?|won'?t\s+(?:work|run|start|open|load)|nothing\s+happens|stopped\s+working|\bstuck\b/i;
 
 /** When the most recent assistant turn was a code deliverable, treat a follow-up
     edit/continue/iterate request as code too — so it streams into the SAME code box
@@ -941,14 +950,19 @@ async function fetchChats() {
     }));
     state.chatsLoaded = true;
   } catch (err) {
-    state.chats = [];
+    // A transient refresh failure must NOT wipe an already-loaded sidebar — the
+    // user's history would visually vanish. Keep what we have; only start empty
+    // when this is the very first (failed) load.
+    if (!state.chatsLoaded) state.chats = [];
     state.chatsLoaded = true;
     showToast(t().chatsLoadError);
   }
   renderHistory();
 }
 
-/** Persist the active chat (title + messages). Optimistic; toast on failure. */
+/** Persist the active chat (title + messages). Optimistic; retries transient
+    failures quietly (with backoff) before toasting, so a brief network blip on a
+    phone never silently loses a just-finished answer. */
 async function persistChat(chat) {
   if (!chat) return;
   // If a create POST is already in flight for this new chat, wait for it first —
@@ -956,22 +970,32 @@ async function persistChat(chat) {
   // conversation in history (the create is the only place serverId gets set).
   if (!chat.serverId && chat._creating) { try { await chat._creating; } catch (_) {} }
   const payload = { title: chat.title, messages: serializeMessages(chat.messages), pinned: !!chat.pinned, agent: !!chat.agent, codeProj: !!chat.codeProj };
-  try {
-    if (chat.serverId) {
-      await apiJson("/api/chats/" + encodeURIComponent(chat.serverId), {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-    } else {
-      const create = apiJson("/api/chats", { method: "POST", body: JSON.stringify(payload) });
-      chat._creating = create; // guard: concurrent callers await this instead of re-POSTing
-      const created = await create;
-      if (created && created.id) chat.serverId = created.id;
+  // Supersede guard: if a NEWER persist for this chat starts while this one is
+  // retrying, the stale payload must never overwrite the newer save.
+  const seq = chat._persistSeq = (chat._persistSeq || 0) + 1;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (chat._persistSeq !== seq) return; // a newer save superseded this one
+    try {
+      if (chat.serverId) {
+        await apiJson("/api/chats/" + encodeURIComponent(chat.serverId), {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+      } else {
+        const create = apiJson("/api/chats", { method: "POST", body: JSON.stringify(payload) });
+        chat._creating = create; // guard: concurrent callers await this instead of re-POSTing
+        const created = await create;
+        if (created && created.id) chat.serverId = created.id;
+        chat._creating = null;
+      }
+      return;
+    } catch (err) {
       chat._creating = null;
+      // A dead session can't be fixed by retrying (apiJson already re-auths on 401);
+      // anything else gets 2 quiet retries with backoff before surfacing the toast.
+      if ((err && err.status === 401) || attempt === 2) { showToast(t().chatsSaveError); return; }
+      await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
     }
-  } catch (err) {
-    chat._creating = null;
-    showToast(t().chatsSaveError);
   }
 }
 
@@ -3698,11 +3722,16 @@ function renderWelcome() {
   const w = els.welcome;
   w.classList.remove("hidden");
   if (state.product === "agent") {
-    // Firas Agent home: its own identity + task starters — a different environment.
+    // Firas Agent home: its own identity + a one-line pitch so first-time users
+    // instantly understand what Agent does (styled by the existing .agent-welcome__sub rule).
+    const agentSub = state.lang === "ar"
+      ? "وكيل ذكي للمهام الكبيرة: يخطّط، ينفّذ خطوة بخطوة، يراجع عمله بنفسه، ثم يسلّمك ملفات ومشاريع جاهزة."
+      : "An autonomous agent for big tasks: it plans, executes step by step, reviews its own work, then delivers ready files and projects.";
     w.innerHTML = `
       <div class="welcome agent-welcome">
         <span class="nib welcome__mark" data-size="lg" aria-hidden="true"><span class="glyph">F</span></span>
         <h1 class="welcome__title">Firas <span class="agent-welcome__grad">Agent</span></h1>
+        <p class="agent-welcome__sub">${escapeHtml(agentSub)}</p>
       </div>`;
     injectBrandMarks(w);
     return;
@@ -4755,10 +4784,12 @@ function templateCss(tpl, th, isAr, scope) {
    exam looks ministerial, a thesis academic, a business report corporate, an article editorial). */
 function docTemplateFor(task) {
   const t = String(task || "");
-  if (/امتحان|اختبار|كويز|ورقة\s*(امتحان|أسئلة)|نموذج\s*امتحان|\bexam\b|\bquiz\b|\btest\s*paper\b/i.test(t)) return "ministry";
+  if (/امتحان|اختبار|كويز|ورقة\s*(امتحان|أسئلة|عمل)|نموذج\s*امتحان|بنك\s*(?:ال)?[أا]سئلة|\bexam\b|\bquiz\b|\btest\s*paper\b|worksheet|question\s*bank/i.test(t)) return "ministry";
   if (/بحث|أطروحة|اطروحة|رسالة\s*(ماجستير|دكتوراه)|أكاديم|اكاديم|thesis|dissertation|research\s*paper|academic/i.test(t)) return "academic";
   if (/تقرير\s*(عمل|شركة|أعمال|إداري)|خطة\s*عمل|دراسة\s*جدوى|business\s*(report|plan)|corporate|executive\s*(summary|report)|\bkpi\b/i.test(t)) return "corporate";
   if (/مقال|article|magazine|مجلة|editorial|blog\s*post|نشرة/i.test(t)) return "magazine";
+  // A plain "N questions/problems (مع الحل)" request is an exam-style paper too → official ministry look.
+  if (/[\d٠-٩]{1,4}\s*(?:[A-Za-z؀-ۿ'’,-]+\s+){0,4}?(?:سؤال|أسئلة|اسئلة|مسأل[ةه]|فقر[ةه]|questions?|problems?)/i.test(t)) return "ministry";
   return "";
 }
 /* ① Split a very large document body into VOLUMES on chapter boundaries (## / #), each ≤ maxLen, so a
@@ -4983,10 +5014,13 @@ function buildExportHtml(mdNode, lang, meta) {
   const isAr = lang === "ar";
   const dir = isAr ? "rtl" : "ltr";
   const { cover, body } = exportBody(mdNode, lang, meta);
+  // Contents page for multi-section Word docs (buildDocToc self-skips short docs);
+  // exam papers ('ministry') never get one — a real exam has no table of contents.
+  const toc = String(meta.template || "").toLowerCase().trim() === "ministry" ? "" : buildDocToc(mdNode, isAr, th);
   return (
     '<!doctype html><html dir="' + dir + '" lang="' + (isAr ? "ar" : "en") + '">' +
     '<head><meta charset="utf-8"><style>' + exportCss(th, isAr, "", meta.template) + "</style></head><body>" +
-    cover + "<div class='doc'>" + body + "</div></body></html>"
+    cover + toc + "<div class='doc'>" + body + "</div></body></html>"
   );
 }
 
@@ -5511,6 +5545,9 @@ async function exportExcel(turn, lang, msg) {
     };
 
     const wb = XLSX.utils.book_new();
+    // Arabic workbooks open in RIGHT-TO-LEFT sheet view (column A on the right),
+    // matching how Arabic Excel/Google-Sheets users read tables.
+    if (isAr) wb.Workbook = { Views: [{ RTL: true }] };
     const tables = extractTablesNamed(mdNode);
     const used = {};
     const uniqName = (base) => {
@@ -6240,9 +6277,9 @@ function exportControlEl(msg, index) {
   wrap.appendChild(btn);
 
   const items = [
-    { icon: ICONS.filePdf, label: t().downloadPdf, run: (turn) => exportPdf(turn, msg.lang) },
-    { icon: ICONS.fileDoc, label: t().downloadWord, run: (turn) => exportWord(turn, msg.lang) },
-    { icon: ICONS.fileXls, label: t().downloadExcel, run: (turn) => exportExcel(turn, msg.lang) },
+    { icon: ICONS.filePdf, label: t().downloadPdf, run: (turn) => exportPdf(turn, msg.lang, msg) },
+    { icon: ICONS.fileDoc, label: t().downloadWord, run: (turn) => exportWord(turn, msg.lang, msg) },
+    { icon: ICONS.fileXls, label: t().downloadExcel, run: (turn) => exportExcel(turn, msg.lang, msg) },
     { icon: ICONS.filePpt, label: t().downloadPpt, run: (turn) => exportPpt(turn, msg.lang, msg) },
   ];
 
@@ -6717,7 +6754,13 @@ const SCIENCE_RIGOR =
   " PHYSICS — treat UNITS, DIMENSIONS and SIGNIFICANT FIGURES as part of the correct answer: name the governing law or principle first, derive the result SYMBOLICALLY, then substitute numbers with their units attached, carrying units through every line and cancelling them explicitly (a naked number is incomplete). The final expression's units MUST reduce to the units the quantity should have (a force to $\\text{kg}\\cdot\\text{m/s}^2=\\text{N}$, an energy to $\\text{J}$) — treat this dimensional check as a required gate the answer passes before you write it. Prefer SI, converting first unless the user requests other units. Report the numeric answer to the correct SIGNIFICANT FIGURES — no more precision than the least-precise given value (for $+$/$-$ align by decimal place, for $\\times$/$\\div$ keep the fewest significant figures), carry one guard digit through intermediate steps, round only at the end, and always attach the unit inside \\text{} (e.g. $9.8\\,\\text{m/s}^2$). State the assumptions and regime explicitly (frictionless, ideal gas, small-angle, non-relativistic…), and close with a one-line physical-plausibility note (right order of magnitude, correct sign or direction, sensible limiting cases)." +
   " CHEMISTRY — BALANCE, STOICHIOMETRY and SIGNIFICANT DIGITS: write every reaction as a BALANCED equation whose atom counts for each element match on both sides, and whose net charge matches on both sides for ionic or redox equations (balance electrons via half-reactions); an equation only appears once it is balanced. Include the correct physical states $(s,l,g,aq)$ and correct formulae, charges and oxidation states. Use mhchem $\\ce{...}$ for species and reactions (e.g. $\\ce{2H2 + O2 -> 2H2O}$) and $\\pu{...}$ for physical quantities. For any quantitative problem work through MOLES explicitly (mass → moles via molar mass → mole ratio from the balanced coefficients → target), identify the LIMITING REAGENT before computing a yield, keep units ($\\text{mol}$, $\\text{g}$, $\\text{mol/L}$) on every quantity, and give the final answer to the correct significant figures with its unit. For a mechanism, describe electron flow (nucleophile toward electrophile), name each intermediate and the rate-determining step, and account for every step rather than skipping one." +
   " BIOLOGY — PRECISE MECHANISM and TERMINOLOGY: use exact, correct scientific terms (name the specific molecules, enzymes, organelles, cell types, phases, pathways, ion channels or taxa) and never a vague paraphrase where a precise term exists, and never conflate near terms (mitosis vs meiosis, transcription vs translation, allele vs gene, antigen vs antibody, artery vs vein). Present a mechanism as an ordered CAUSAL CHAIN — what binds, activates or inhibits what, in which direction, producing what result — not a loose list of facts, and state where in the cell or organism it happens and what regulates it. Respect directionality and quantitative facts exactly (transcription $5'\\to3'$; $\\text{DNA}\\to\\text{RNA}\\to\\text{protein}$; correct Punnett ratios; correct chromosome and base-pair counts), give correct units for any biological quantity, and distinguish an established mechanism from a hypothesis." +
-  " MATHEMATICS — DOMAIN, VALIDITY and EXTRANEOUS ROOTS: state the domain and validity conditions before manipulating (dividing by a possibly-zero quantity, squaring both sides, taking a log of a non-positive, or differentiating/integrating across a discontinuity), substitute every candidate solution back into the ORIGINAL equation and DISCARD extraneous roots, verify convergence before summing a series or exchanging a limit and an integral, and keep exact closed forms (fractions, radicals, $\\pi$) unless a decimal is asked — an unchecked root or an ignored domain restriction is a WRONG answer. ACROSS ALL SUBJECTS (mathematics, physics, chemistry, biology…): if the subject is ambiguous, infer it and apply that subject's rigor. (These are additional per-subject requirements; the general rule about verifying privately and presenting one clean solution already governs how you write — do not restate it.)";
+  " MATHEMATICS — DOMAIN, VALIDITY and EXTRANEOUS ROOTS: state the domain and validity conditions before manipulating (dividing by a possibly-zero quantity, squaring both sides, taking a log of a non-positive, or differentiating/integrating across a discontinuity), substitute every candidate solution back into the ORIGINAL equation and DISCARD extraneous roots, verify convergence before summing a series or exchanging a limit and an integral, and keep exact closed forms (fractions, radicals, $\\pi$) unless a decimal is asked — an unchecked root or an ignored domain restriction is a WRONG answer. ACROSS ALL SUBJECTS (mathematics, physics, chemistry, biology…): if the subject is ambiguous, infer it and apply that subject's rigor. (These are additional per-subject requirements; the general rule about verifying privately and presenting one clean solution already governs how you write — do not restate it.)" +
+  " HUMANITIES & LANGUAGE RIGOR (same force as the rules above; applies the moment a question is Arabic language, English, history, geography, Islamic education, philosophy or economics; every tier, every engine)." +
+  " ARABIC LANGUAGE (النحو والصرف والبلاغة والأدب) — answer in flawless فصحى with التشكيل wherever it decides meaning or is requested. For الإعراب: analyze word by word — الكلمة، نوعها، إعرابها بعلامته الإعرابية وسبب الحكم، ثم إعراب الجمل وأشباه الجمل وبيان محلّها (في محل رفع/نصب/جر أو لا محل لها). For البلاغة: name the exact device (تشبيه/استعارة/كناية/مجاز/طباق/جناس/مقابلة)، فكّكه إلى أركانه، وبيّن أثره وسرّ جماله. For الصرف: give الجذر والوزن الصرفي correctly. For الأدب والنصوص: quote poetry and prose EXACTLY as written and attribute them to the correct poet/author and العصر الأدبي — NEVER invent a بيت شعر, a شاهد, or an attribution; if you do not recall the exact wording, say so instead of approximating a quotation." +
+  " ISLAMIC EDUCATION (التربية الإسلامية) — ABSOLUTE ACCURACY WITH SACRED TEXTS: quote القرآن الكريم letter-perfect with اسم السورة ورقم الآية; NEVER paraphrase a verse while presenting it as a quotation, and NEVER invent one. Cite a حديث only when confident of its wording and source (البخاري، مسلم…), noting its grading where known; if unsure, convey the meaning explicitly as narrated-in-meaning without quotation marks. Clearly separate قرآن، حديث، وأقوال العلماء; where فقه rulings differ between المذاهب, present the difference honestly rather than one view as the only one." +
+  " HISTORY & GEOGRAPHY — every date, name, place, treaty, battle and statistic must be exact; NEVER invent a specific detail — an honest 'لست متأكدًا' beats a confident wrong date. Present history as causal chains (الأسباب ← الأحداث ← النتائج) anchored to precise dates and actors, distinguishing established fact from interpretation. Geography: precise terminology, real figures with units (كم²، مم، نسمة), and keep الجغرافيا الطبيعية and البشرية distinct." +
+  " PHILOSOPHY & ECONOMICS — define every term before arguing with it; attribute each position to the correct thinker/school and never misattribute a quotation; structure arguments as premises → conclusion and present the strongest objection fairly. Economics: exact definitions, correct supply/demand logic (a SHIFT of a curve vs a MOVEMENT along it), every formula with its symbols defined, and worked calculations carrying units and currency." +
+  " ENGLISH (as a school subject) — use correct grammatical terminology (tenses, parts of speech, clause types); when correcting an error, quote it, give the correction, and state the governing rule; essays follow a clear thesis → developed body paragraphs → conclusion.";
 
 // ---- BACKTRACK SCRUBBER (client net) — SHARED w/ server.mjs & netlify/edge-functions/api.js — keep BYTE-IDENTICAL ----
 // Whole-string mirror of the server's streaming scrubber: strips visible self-correction ('wait, that's wrong,
@@ -6784,7 +6827,7 @@ function buildMessages(tier, conversation, replyLang) {
     "inline math as $...$ and display math as $$...$$ — never write raw unformatted formulas. " +
     "Use ONLY valid, KaTeX-renderable LaTeX: correct commands (\\frac, \\sqrt, \\int, \\lim, \\sum, \\vec, " +
     "subscripts/superscripts), and put units and words that appear inside math in \\text{} with thin spaces " +
-    "(e.g. $9.8\\,\\text{m/s}^2$, $3\\,\\text{N}\\cdot\\text{m}$, chemical formulas like $\\text{H}_2\\text{O}$). " +
+    "(e.g. $9.8\\,\\text{m/s}^2$, $3\\,\\text{N}\\cdot\\text{m}$). CHEMISTRY NOTATION: write chemical formulae, ions, isotopes and reactions with mhchem inside math delimiters — $\\ce{H2O}$, $\\ce{SO4^2-}$, $\\ce{2H2 + O2 -> 2H2O}$ — it renders natively here; use $\\pu{...}$ for physical quantities (e.g. $\\pu{2.5 mol/L}$), and never write a reaction as plain-text arrows. " +
     "Never emit broken or glued commands (e.g. \\cdotp with no space) that would fail to render. " +
     "Use $ … $ ONLY for mathematics: write money as a number plus its currency word (\"50 دولار\", \"USD 50\"), NEVER a bare \"$50\", and never leave a LaTeX command outside $ … $ — so a dollar sign in ordinary prose is never mistaken for a math delimiter. " +
     "MATH RIGOR: solve step by step, carry out every algebraic and arithmetic step exactly, and " +
@@ -7060,17 +7103,28 @@ function fileGuidance(fmt) {
     return base +
       "\nSTEP 2 — CONTENT: structure as slides. Use a single '# Deck Title', then each slide as a " +
       "'## Slide Title' followed by 3-6 short, punchy bullets (- point) — one idea per bullet, no " +
-      "paragraphs. Use a Markdown table on a slide to compare data. Give it a logical flow " +
-      "(intro -> key points -> conclusion) and keep it visual and presentation-ready.";
+      "paragraphs, and NO Markdown tables (they don't render on slides — use a chart or bullets instead). " +
+      "SPEAKER NOTES: after each slide's bullets add ONE line exactly like 'Notes: <2-3 spoken presenter sentences " +
+      "in the user's language>' — it becomes that slide's real PowerPoint presenter notes, never a visible bullet. " +
+      "CHARTS: when a slide's point is NUMBERS (comparison, growth, percentages, totals), add ONE line " +
+      "'Chart: {\"type\":\"bar\",\"title\":\"…\",\"labels\":[\"…\"],\"data\":[1,2,3]}' (valid JSON on a single line; " +
+      "type is bar, line or doughnut; max 8 labels) — it becomes a native editable chart on that slide. " +
+      "A '## Section Title' line with NO bullets under it becomes a full-screen section divider. Give the deck a " +
+      "logical flow (intro -> sections -> key points -> conclusion) and keep it visual and presentation-ready.";
   }
   // pdf / docx
   return base +
     "\nCONTENT: produce a COMPLETE, professionally structured document. Open with a strong '# Title' " +
     "(same as the metadata title), then logical '##'/'###' sections, well-written paragraphs, bullet/numbered " +
     "lists, Markdown tables for tabular data, and blockquotes (>) for key takeaways. Render every equation as " +
-    "a $$ … $$ display block (e.g. $$\\int_0^1 x^2\\,dx = \\tfrac{1}{3}$$) — if asked for N equations, output " +
+    "a $ … $ display block (e.g. $\\int_0^1 x^2\\,dx = \\tfrac{1}{3}$) — if asked for N equations, output " +
     "exactly N rendered equations, each with a short label/explanation. Be thorough, accurate and self-contained " +
-    "— a finished report. If the user described a specific look, layout, sections or order, follow it precisely.";
+    "— a finished report. If the user described a specific look, layout, sections or order, follow it precisely. " +
+    "EXAM / QUIZ PAPERS (template 'ministry'): make it look like a REAL official exam — right after the '# Title', " +
+    "put a Markdown info table (المادة | الصف | الزمن | الدرجة الكلية, with a row: اسم الطالب: $\\underline{\\hspace{4cm}}$); " +
+    "group questions into numbered sections ('## السؤال الأول: …', '## السؤال الثاني: …') and write each question's mark " +
+    "in parentheses at its end (e.g. (5 درجات)) with the marks summing to the stated total; then END with a complete " +
+    "answer key under its own '# نموذج الإجابة' heading (English exams: '# Answer Key') with a worked answer for every question.";
 }
 
 /* ============================================================================
@@ -7109,7 +7163,7 @@ function plannerSys(fmt, lang) {
     "\"subtitle\":\"one concise line or empty\",\"theme\":\"<one theme key>\",\"accent\":\"\",\"template\":\"\"}\n```\n" +
     "ACCENT: if the user named a SPECIFIC colour/style (وردي، أزرق سماوي، ذهبي فخم، بألوان جامعتي #1E90FF…), set \"accent\" " +
     "to the best matching 6-digit hex (NO #) so the whole design adapts; otherwise leave it empty. " +
-    "TEMPLATE (document LAYOUT identity): set \"template\" to EXACTLY one of — 'ministry' for an exam/امتحان/وزاري paper, " +
+    "TEMPLATE (document LAYOUT identity): set \"template\" to EXACTLY one of — 'ministry' for an exam/quiz/امتحان/اختبار/وزاري paper, a worksheet/ورقة عمل/ورقة أسئلة, a question bank/بنك أسئلة, or ANY set of numbered questions or problems with or without solutions (e.g. '20 سؤال مع الحل' → ministry), " +
     "'academic' for a بحث/thesis/university report, 'corporate' for a business/تقرير عمل report, 'magazine' for an " +
     "article/مقال/editorial; leave \"\" for anything else. " +
     "Then a blank line, then FIRST a single brief line exactly like " +
@@ -7199,7 +7253,7 @@ function authorSys(fmt, lang) {
     "than requested is a FAILED task. SOLUTIONS INLINE (hard rule): when the request asks for solutions, put each item's " +
     "COMPLETE worked step-by-step solution IMMEDIATELY after that item (problem 1 → its solution → problem 2 → its " +
     "solution …, e.g. '**الحل:**' / '**Solution:**'), ending in an exact verified final answer — NEVER defer solutions " +
-    "to a separate section at the end." + " VERIFY BEFORE YOU WRITE (accuracy gate — the reader sees ONE clean correct answer): for EVERY numeric, algebraic or symbolic result in the document, re-derive it a SECOND independent way BEFORE you write it — back-substitute the solution into the original equation, differentiate an antiderivative back to the integrand, re-check units and dimensions, or test a limiting/special case; commit a value ONLY once both routes agree, and present each final answer exactly once (boxed as $\\boxed{…}$, or alone after 'الإجابة النهائية:' / 'Final answer:'). NEVER show a wrong first attempt, a crossed-out line, or ANY visible self-correction ('مهلا' / 'انتظر' / 'wait' / 'let me redo' …) — all checking is silent and private, and each solution reads clean from its first line to its last. DO NOT FABRICATE SCIENTIFIC DATA: never invent a specific statistic, physical constant, reaction/thermodynamic value, date, measurement or citation you are not confident of — give a correct standard value or state it qualitatively rather than manufacture a precise-looking but wrong figure." + STEM_HARD_RULE + SCIENCE_RIGOR + " DEPTH & COMPLETENESS — never shallow: develop each section with real substance (well-developed paragraphs and/or a full worked list or table, not one thin line), use a clean NESTED heading hierarchy (## for main sections, ### for their sub-parts) without skipping levels, and make sure the document has a genuine introduction, at least three substantive body sections, and a real closing — a bullet-only skeleton is a FAILED document. ORGANIZATION — make it VERY tidy and easy to scan: a consistent heading hierarchy, related content " +
+    "to a separate section at the end. EXAM-PAPER EXCEPTION & CONVENTIONS (امتحان/اختبار/كويز/ورقة أسئلة — or any request for a set of numbered questions presented as a paper): produce a REAL official exam paper, not a plain list — (1) HEADER: an Arabic paper opens with 'بسم الله الرحمن الرحيم' centered on its own line, then a small bordered info table the teacher can fill (المدرسة / المادة / الصف / الزمن / الدرجة الكلية — use the user's values when given, else a writable blank like $\\underline{\\hspace{3cm}}$), then ONE instructions line (e.g. 'أجب عن جميع الأسئلة'); an English paper uses School / Subject / Grade / Time / Total Marks. (2) VARIETY: unless the user fixed the question types, MIX formats across the paper — multiple-choice with four options (أ/ب/ج/د or A-D), true/false (صح أم خطأ), fill-in-the-blank, short answer, and multi-step problems/essay — grouped into PART sections labelled by type ('أولاً: اختر الإجابة الصحيحة' …), while numbering the questions themselves CONTINUOUSLY 1..N across the WHOLE paper (never restarting per section) and keeping the total count EXACTLY as requested. (3) MARKS: end EVERY question with its mark in parentheses ('(٥ درجات)' / '(5 marks)') and make all marks SUM EXACTLY to the stated total. (4) DIFFICULTY GRADING: order from accessible to hard — roughly 30% easy, 40% medium, 30% challenging — so the paper genuinely discriminates. (5) Close the questions with a centered '— انتهت الأسئلة —' / '— End of Questions —' line. (6) ANSWER-KEY OVERRIDE (exam papers only — this overrides the inline-solutions rule): do NOT put solutions between the questions; AFTER the end-of-questions line add ONE separate section '## نموذج الإجابة' / '## Answer Key' giving, for EVERY question in order, a clearly labelled worked solution ('حل السؤال 1' / 'Solution 1') with the reasoning and the exact verified final answer (for multiple-choice: the correct letter AND a one-line justification)." + " VERIFY BEFORE YOU WRITE (accuracy gate — the reader sees ONE clean correct answer): for EVERY numeric, algebraic or symbolic result in the document, re-derive it a SECOND independent way BEFORE you write it — back-substitute the solution into the original equation, differentiate an antiderivative back to the integrand, re-check units and dimensions, or test a limiting/special case; commit a value ONLY once both routes agree, and present each final answer exactly once (boxed as $\\boxed{…}$, or alone after 'الإجابة النهائية:' / 'Final answer:'). NEVER show a wrong first attempt, a crossed-out line, or ANY visible self-correction ('مهلا' / 'انتظر' / 'wait' / 'let me redo' …) — all checking is silent and private, and each solution reads clean from its first line to its last. DO NOT FABRICATE SCIENTIFIC DATA: never invent a specific statistic, physical constant, reaction/thermodynamic value, date, measurement or citation you are not confident of — give a correct standard value or state it qualitatively rather than manufacture a precise-looking but wrong figure." + STEM_HARD_RULE + SCIENCE_RIGOR + " DEPTH & COMPLETENESS — never shallow: develop each section with real substance (well-developed paragraphs and/or a full worked list or table, not one thin line), use a clean NESTED heading hierarchy (## for main sections, ### for their sub-parts) without skipping levels, and make sure the document has a genuine introduction, at least three substantive body sections, and a real closing — a bullet-only skeleton is a FAILED document. ORGANIZATION — make it VERY tidy and easy to scan: a consistent heading hierarchy, related content " +
     "grouped together, uniform spacing (NO orphan lines, NO stray punctuation on its own line), and — for an exam/worksheet — " +
     "clean question numbering with its parts (A/B/C…) and marks, each figure placed right beside the item it belongs to. " +
     "IMAGES: when the task provides REAL IMAGE URLS, embed EACH one at a contextually fitting spot as ![short description](URL) " +
@@ -7687,7 +7741,7 @@ function tightenInlineMath(md) {
 /* The item count the user asked for ("10 integrals", "عشرة تكاملات", "ten hard questions") → N, or 0. */
 function parseRequestedItemCount(text) {
   let s = String(text || "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
-  const NOUN = "(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|اسئلة|سؤال|سوال|تمارين|تمرين|معادلات?|معادلة|انتيكرل|انتقرل)";
+  const NOUN = "(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|اسئلة|سؤال|سوال|فقرات|فقر[ةه]|تمارين|تمرين|معادلات?|معادلة|انتيكرل|انتقرل)";
   // digits with a few adjectives allowed between: "10 challenging novel questions"
   const dm = new RegExp("(\\d{1,4})\\s*(?:[A-Za-z؀-ۿ'’,-]+\\s+){0,6}?" + NOUN, "i").exec(s);
   if (dm) { const n = parseInt(dm[1], 10); if (n >= 2 && n <= 2000) return n; }
@@ -7725,9 +7779,11 @@ function countDocItems(md) {
   return heads ? heads.length : 0;
 }
 
-/* Did the user explicitly ask for SOLUTIONS with their items? */
+/* Did the user explicitly ask for SOLUTIONS/ANSWERS with their items? Covers the common Arabic
+   phrasings (مع الحل/مع حلولها/وحلها/والحل/محلولة/مع الإجابات/بالإجابات/نموذج الإجابة) and English
+   "with answers" / "answer key" — any of these must trigger the solutions-enforcement pass. */
 function requestWantsSolutions(text) {
-  return /مع\s*الحلول|بالحلول|مع\s*الحل|وحلول(?:ها)?|with\s+(?:full\s+|complete\s+|worked\s+|step[\s-]*by[\s-]*step\s+)?solutions?|and\s+solutions?|solved\b/i.test(String(text || ""));
+  return /مع\s*(?:ال)?حلول(?:ها)?|بالحل(?:ول)?|مع\s*(?:ال)?حل|والحل(?:ول)?|وحلول(?:ها)?|وحل(?:ها|ه)|محلول[ةه]|مع\s*(?:ال)?[إا]جاب(?:ات(?:ها)?|ة)|بال[إا]جابات|مع\s*(?:ال)?[أا]جوبة|نموذج\s*(?:ال)?[إا]جاب|with\s+(?:full\s+|complete\s+|worked\s+|step[\s-]*by[\s-]*step\s+)?solutions?|and\s+solutions?|with\s+(?:the\s+|model\s+|final\s+)?answers?\b|answer\s*keys?|\bsolved\b/i.test(String(text || ""));
 }
 /* How many worked-solution blocks the doc contains ("## الحل", "**Solution 3:**", "حل المسألة ٤"…). */
 function countDocSolutions(md) {
@@ -8596,7 +8652,7 @@ async function streamAnswer(aiMsg, aiNode, chat, convoOverride) {
     finalized = true;
     if (retryBusy) { /* transient engine-busy — retried below after cleanup; no error UI */ }
     else {
-    const aborted = signal.aborted && controller.reason !== "timeout";
+    const aborted = signal.aborted && signal.reason !== "timeout";
     if (aborted) {
       const hasCode = codeReq && (answer || "").trim();
       if (!hasCode && !(answer || "").trim() && !(reasoning || "").trim()) {
@@ -11126,6 +11182,7 @@ const AGENT_QUALITY =
   " DEPTH: every step's output is a COMPLETE specialist section — full coverage of its subtopic, correct terminology, concrete worked examples, precise reasoning, clean structure with clear headings. Never an outline, a summary of what you 'would' write, or a stub." +
   " CORRECTNESS: solve everything end-to-end and VERIFY before stating a result — differentiate an antiderivative back to the integrand, substitute values into an identity/equation, check every endpoint, singularity, unit and edge case, and re-derive any number you are unsure of. Never assert an unverified result. Give EXACT closed forms (fractions, radicals, π, e, symbolic) unless a decimal is requested. For any problem/exercise/question you GENERATE, first solve it fully as a hidden answer key; if your own solution is not clean, is ambiguous, or has no exact closed-form answer, DISCARD it and produce a different valid one — never publish a problem you could not cleanly solve. Confirm every non-trivial result a SECOND way (a different method or a special/limiting case). NEVER NARRATE A CORRECTION: the reader must never see 'مهلا/هناك خطأ/wait/oops/let me redo' or any visible self-correction — all checking is PRIVATE and the delivered text reads as one clean, correct derivation from the first line. These correctness rules hold on EVERY engine — quality must not drop on a lighter/backup model." +
   " SELF-CONSISTENCY: honour every definition, symbol, notation and claim established in earlier steps; contradict nothing already written." +
+  " ARABIC EXCELLENCE: when the deliverable is in Arabic, write native, publication-grade فصحى — correct hamza forms (أ/إ/آ/ء/ئ/ؤ), correct التاء المربوطة vs الهاء and الألف المقصورة vs الياء, sound grammar and idiomatic phrasing (NEVER literal machine-translated English structures). Use ONE digit style consistently throughout (Western 0-9 recommended for math/science), keep technical terms in Arabic with the English term in parentheses on first mention when it aids students, and keep tables/lists RTL-coherent. Sloppy Arabic is a defect on par with a wrong answer." +
   " REAL CONTENT ONLY (absolute): never output 'TODO', 'lorem', '...', '(details omitted)', '(similar to above)', 'left as an exercise', placeholder names, or any promise of content instead of the content itself. If a part is long, write all of it." +
   " FORMATTING: ALL math in valid, BALANCED KaTeX ($…$ inline, $$…$$ for standalone equations only), units and words inside \\text{} with thin spaces (e.g. $9.8\\,\\text{m/s}^2$). Function graphs as a fenced ```plot block (lines `y = <expr>` with explicit operators + optional `domain: a..b`; also polar `r=f(theta)`, parametric `x=f(t)`/`y=g(t)`, 3D `z=f(x,y)`). GEOMETRY figures (triangles, circles, vectors, points, angles, polygons) ALSO as a fenced ```plot block with shape commands — `circle (cx,cy) r=R`, `triangle (x1,y1) (x2,y2) (x3,y3)`, `vector (x1,y1) (x2,y2)`, `point (x,y) \"A\"`, `angle (a) (v) (b) \"θ\"`, `segment`/`line`/`rectangle`/`polygon`/`arc`/`ellipse` — NEVER tikz for geometry. Reserve ```tikz ONLY for electric circuits / complex physics schematics. Code in fenced blocks with the language tag." +
   " Deliver the work itself — polished and final, no meta commentary or apologies.";
@@ -11134,8 +11191,10 @@ const DOMAIN_GUIDE = {
   math: " MATH MODE: state given/goal, then a rigorous step-by-step derivation where EVERY line follows from the previous with the rule named (no skipped algebra). Define notation, note domain/edge cases, verify the result (substitute back or sanity-check units/limits). Include at least one fully worked example and, where useful, a second method as a cross-check. Give the final answer boxed as $\\boxed{...}$.",
   science: " PHYSICS/CHEM/SCIENCE MODE: name the governing law/principle first, then derive symbolically BEFORE plugging numbers. Carry UNITS through every step and check dimensional consistency; give the answer to correct significant figures with units. State assumptions and regimes of validity. Chemistry: balanced equations, correct states/charges, mechanisms with electron-flow described. Draw the setup/free-body/energy diagram as a SIMPLE ```tikz block. Add a short 'why this makes physical sense' check.",
   writing: " WRITING MODE (essays/literature/language, EN or AR): open with a clear thesis, develop it across well-structured paragraphs each with a topic sentence + evidence + analysis, and close with a synthesis (not a restatement). Use precise, varied, register-appropriate vocabulary and real examples/quotations. Arabic: فصحى سليمة مع ضبط ما يلزم وترابط منطقي. Aim for genuine depth, never a thin outline.",
-  exam: " EXAM MODE: DEFAULT DIFFICULTY — when the subject is math/physics/chemistry (or any quantitative science) and the user did NOT explicitly ask for an easy/basic level, the set must be GENUINELY HARD overall (strong competition / JEE-Advanced calibre): multi-concept, multi-step, tricky ideas, no routine textbook drills — and every problem NOVEL, UNIQUE and DISTINCTIVE (fresh structures/numbers/scenarios you construct yourself, never known classics or reworded book problems). Produce a real question SET (label each with difficulty and marks). Mix formats (MCQ, short-answer, problem, proof/essay) as fits the subject, keep questions unambiguous and non-repetitive, then give a COMPLETE separate ANSWER KEY with full worked solutions/rationale — not just final letters. NOVELTY: when the user asks for NEW/novel/original problems, CONSTRUCT each one yourself (fresh functions, numbers, structures and scenarios — never textbook classics or famous competition problems restated), and make each problem combine 2-3 distinct ideas/techniques so it cannot be pattern-matched. DIFFICULTY CALIBRATION: honour the requested level exactly (olympiad/JEE-advanced means genuinely hard multi-step problems, not routine drills) while staying SOLVABLE with the allowed tools — verify each problem end-to-end yourself before including it (if your own worked solution is not clean and exact, REPLACE that problem with one you can solve cleanly), and respect every exclusion the user states (no complex analysis, no non-elementary integrals…).",
-  knowledge: " KNOWLEDGE MODE: lead with the direct, correct answer, then explain the why with concrete facts, mechanisms, dates/figures, and a short example or analogy. Distinguish established fact from interpretation; if a claim is uncertain, say so. Structure with clear headings/lists so it is scannable."
+  exam: " EXAM MODE: DEFAULT DIFFICULTY — when the subject is math/physics/chemistry (or any quantitative science) and the user did NOT explicitly ask for an easy/basic level, the set must be GENUINELY HARD overall (strong competition / JEE-Advanced calibre): multi-concept, multi-step, tricky ideas, no routine textbook drills — and every problem NOVEL, UNIQUE and DISTINCTIVE (fresh structures/numbers/scenarios you construct yourself, never known classics or reworded book problems). Produce a real question SET (label each with difficulty and marks). Mix formats (MCQ, short-answer, problem, proof/essay) as fits the subject, keep questions unambiguous and non-repetitive, then give a COMPLETE separate ANSWER KEY with full worked solutions/rationale — not just final letters. NOVELTY: when the user asks for NEW/novel/original problems, CONSTRUCT each one yourself (fresh functions, numbers, structures and scenarios — never textbook classics or famous competition problems restated), and make each problem combine 2-3 distinct ideas/techniques so it cannot be pattern-matched. DIFFICULTY CALIBRATION: honour the requested level exactly (olympiad/JEE-advanced means genuinely hard multi-step problems, not routine drills) while staying SOLVABLE with the allowed tools — verify each problem end-to-end yourself before including it (if your own worked solution is not clean and exact, REPLACE that problem with one you can solve cleanly), and respect every exclusion the user states (no complex analysis, no non-elementary integrals…). COUNT — HARD RULE: when the user asked for N questions the finished set contains EXACTLY N — number them CONTINUOUSLY 1..N across the whole paper (never restarting per section) and COUNT them before finishing; fewer than requested is a FAILED deliverable. PAPER CONVENTIONS (when the deliverable is an exam paper, especially Arabic): open with 'بسم الله الرحمن الرحيم' centered, then an info table (المدرسة / المادة / الصف / الزمن / الدرجة الكلية — writable blanks where unknown) and one instructions line; end EVERY question with its mark in parentheses (e.g. '(٥ درجات)') with all marks summing EXACTLY to the paper's stated total; order questions from accessible to hard (≈30% easy / 40% medium / 30% challenging); close the questions with a centered '— انتهت الأسئلة —' line, and put the full answer key AFTER it under '## نموذج الإجابة', each solution labelled to its question ('حل السؤال 3') with reasoning and the exact verified final answer.",
+  knowledge: " KNOWLEDGE MODE: lead with the direct, correct answer, then explain the why with concrete facts, mechanisms, dates/figures, and a short example or analogy. Distinguish established fact from interpretation; if a claim is uncertain, say so. Structure with clear headings/lists so it is scannable.",
+  arabic: " ARABIC LANGUAGE MODE (نحو/صرف/بلاغة/أدب/نصوص): flawless فصحى with التشكيل wherever it decides meaning. إعراب: word by word — الكلمة، نوعها، إعرابها بعلامته الإعرابية وسبب الحكم، ثم إعراب الجمل وأشباه الجمل وبيان محلّها — with the governing rule named. بلاغة: name the exact device (تشبيه/استعارة/كناية/مجاز/طباق/جناس/مقابلة)، فكّكه إلى أركانه وبيّن أثره وسرّ جماله. صرف: الجذر والوزن الصرفي بدقة. أدب/نصوص: quote الشواهد EXACTLY, attribute them correctly (الشاعر، العصر، المدرسة الأدبية), and analyze الفكرة والعاطفة والأسلوب مع الشواهد — NEVER invent a بيت شعر, a شاهد نحوي, or an attribution; if unsure of exact wording, say so.",
+  humanities: " HUMANITIES MODE (history/geography/Islamic education/philosophy/economics): every date, name, place, figure, verse and quotation EXACT — never fabricated; if unsure of a specific detail, say so plainly. History: causal chains (الأسباب ← الأحداث ← النتائج) with precise dates and actors, fact separated from interpretation. Geography: precise terminology, real figures with units (كم²، مم، نسمة), physical vs human distinguished; add a simple map/diagram as a ```plot block where it helps. Islamic education: quote القرآن letter-perfect with اسم السورة ورقم الآية, cite الحديث with its source and grading, and clearly separate قرآن/حديث/أقوال العلماء — noting differences between المذاهب where relevant. Philosophy: define terms first, attribute positions to the correct thinker/school, argue premises → conclusion with the main objection addressed. Economics: exact definitions, correct curve logic (a SHIFT vs a MOVEMENT along a curve), formulas with every symbol defined, worked calculations with units and currency."
 };
 const DEPTH_MANDATE = " DEPTH MANDATE: this step must be genuinely thorough and self-contained — full coverage of its topic with derivations/examples/evidence, not a summary. Never abbreviate with 'and so on' or 'similar for the rest'; write every part out in full.";
 /* Hard visual rules for generated web UIs — these directly prevent the classic failures: broken
@@ -11173,9 +11232,11 @@ const ENGINEERING_BRAIN =
 const domainOf = (t) => {
   const s = (t || "").toLowerCase();
   if (/امتحان|اختبار|أسئلة|اسئلة|بنك أسئلة|quiz|exam|test|worksheet|mcq|questions?/.test(s)) return "exam";
+  if (/إعراب|اعراب|أعرب(?!\s*عن)|اعرب(?!\s*عن)|(?:قواعد|درس|علم)\s*النحو|النحو والصرف|البلاغة|بلاغة|الميزان الصرفي|علم الصرف|العروض|الأدب العربي|نص أدبي|النصوص الأدبية|قواعد اللغة|شاهد نحوي/.test(s)) return "arabic";
   if (/فيزياء|كيمياء|أحياء|physics|chem|biolog|reaction|force|voltage|mole|circuit|thermo/.test(s)) return "science";
   if (/رياضيات|جبر|تفاضل|تكامل|هندسة|معادلة|math|algebra|calculus|integral|derivative|equation|geometry|proof|theorem/.test(s)) return "math";
   if (/مقال|قصيدة|تعبير|essay|paragraph|literature|poem|write about|story|letter|رسالة|شعر/.test(s)) return "writing";
+  if (/تاريخ|جغرافي|التربية الإسلامية|تربية إسلامية|التربية الاسلامية|فقه|تفسير|سيرة نبوية|حديث شريف|الحديث النبوي|عقيدة|فلسفة|منطق|اقتصاد|histor|geograph|islamic|philosoph|econom/.test(s)) return "humanities";
   return "knowledge";
 };
 async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx, resume) {
@@ -11190,7 +11251,7 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
   // string (UI labels, titles, headings, captions, chart/table labels, filenames). Only code
   // keywords/APIs stay English. This applies to files, websites, docs, decks — everything.
   const langRule = ar
-    ? " LANGUAGE — ABSOLUTE RULE: the user wrote in ARABIC, so EVERYTHING you produce is in Arabic (فصحى واضحة): all prose and content; ALL user-facing text in any website/app (buttons, nav, labels, headings, placeholders, messages); every document/section title and heading; all table and chart labels; captions. Programming keywords and APIs stay English, but every human-readable string is Arabic. NEVER switch to English for the content."
+    ? " LANGUAGE — ABSOLUTE RULE: the user wrote in ARABIC, so EVERYTHING you produce is in Arabic (فصحى واضحة): all prose and content; ALL user-facing text in any website/app (buttons, nav, labels, headings, placeholders, messages); every document/section title and heading; all table and chart labels; captions. Programming keywords and APIs stay English, but every human-readable string is Arabic. NEVER switch to English for the content. ARABIC WEB BUILDS: any website/app you build MUST be native-RTL, never a mirrored LTR page — set <html lang=\"ar\" dir=\"rtl\">, load a premium Arabic Google Font (Cairo, Tajawal, or IBM Plex Sans Arabic) as the primary UI font (a heavier weight of it for headings), use CSS LOGICAL properties (margin-inline/padding-inline/inset-inline-start, text-align:start) so every layout mirrors correctly, keep numerals one consistent style (Western 0-9), and make sure directional icons/arrows/carets/carousels point the RTL-correct way."
     : " LANGUAGE — ABSOLUTE RULE: the user wrote in ENGLISH, so EVERYTHING you produce is in English: all prose and content; ALL user-facing text in any website/app (buttons, nav, labels, headings, placeholders, messages); every document/section title and heading; all table and chart labels; captions. NEVER switch to Arabic or any other language for the content.";
   const run = { task, title: "", phase: "plan", lang: replyLang, steps: [], final: "", mode: "answer", stats: { startedAt: Date.now(), files: 0, lines: 0, fixes: 0, visual: 0, searches: 0, images: 0, checks: 0 } };
   // DELIVERABLE MODE: doc (PDF/Word…) · codefile (ONE complete code file — user asked "بكود واحد")
@@ -11257,7 +11318,7 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
       ? "You are Firas Agent's ARCHITECT planning ONE COMPLETE single-file build, produced in SECTIONS that MERGE into a final file far larger and richer than any one-shot answer. SCALE the section count to the ambition: a small widget = 3-4 sections; a normal single-page app = 5-8 sections; a large, feature-rich single file = 9-12 sections. Order them: foundation & document skeleton → shared design tokens/base styles → EACH major section or feature as its own step → full styling/responsive polish → ALL JavaScript interactivity & state (split JS into 2-3 steps when the app is large). Never collapse a rich app into a few sections. Return ONLY valid JSON, titles in the user's language: {\"title\":\"…\",\"steps\":[{\"title\":\"…\",\"kind\":\"code\"}]}"
       : run._deck
       ? "You are Firas Agent's KEYNOTE DIRECTOR planning a PRESENTATION (a slide deck the user downloads as PowerPoint). Structure the talk as 3-6 STEPS, each a coherent SECTION of the presentation (e.g. 'المقدمة والسياق', 'المفهوم الأساسي', 'التطبيقات', 'الخلاصة والتوصيات') that will each produce several slides. Order it as a compelling narrative: hook/agenda → build-up sections → takeaways/close. Every step kind is 'write'. Return ONLY valid JSON, titles in the user's language: {\"title\":\"deck title\",\"steps\":[{\"title\":\"…\",\"kind\":\"write\"}]}"
-      : "You are Firas Agent's MASTER PLANNER for a rich non-code deliverable (course, booklet, chapter set, research report, exam/worksheet, essay, study guide, or answer to a hard question). First silently identify the SUBJECT (math | physics/chem/science | writing EN/AR | exam/quiz | general knowledge). SIZE the task: a small ask = 3-4 steps; a normal deliverable = 5-9 steps; a LARGE one (a full course/booklet/multi-topic report, or an exam with many questions) = 10-16 steps — scale to the real scope, NEVER cram a big syllabus into a few steps. Design a COHERENT ARCHITECTURE before content: a course/booklet is ordered pedagogically (concept & theory → fully worked examples → practice problems → a dedicated ANSWER KEY / solutions step); an exam/worksheet makes question groups their own steps PLUS a separate detailed model-answer step; research is ordered (scope & key questions → evidence-gathering research steps → analysis → synthesis with citations). Every step = ONE substantial chunk of REAL content (a specific chapter, a named set of worked examples, questions 1-10) — never a vague activity like 'introduction' or 'explain the topic'. Choose each step's kind to match the work: research (needs fresh web facts) | solve (math/quantitative derivation) | draw (a figure/graph/diagram) | write (prose/answers/explanation) | code. Prefer 'solve' for anything with equations and 'draw' for anything that benefits from a figure. If this is an exam/worksheet/quiz, the FINAL step MUST be a complete ANSWER KEY with worked solutions. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short task title\",\"steps\":[{\"title\":\"…\",\"kind\":\"…\"}]}";
+      : "You are Firas Agent's MASTER PLANNER for a rich non-code deliverable (course, booklet, chapter set, research report, exam/worksheet, essay, study guide, or answer to a hard question). First silently identify the SUBJECT (math | physics/chem/science | writing EN/AR | exam/quiz | general knowledge). SIZE the task: a small ask = 3-4 steps; a normal deliverable = 5-9 steps; a LARGE one (a full course/booklet/multi-topic report, or an exam with many questions) = 10-16 steps — scale to the real scope, NEVER cram a big syllabus into a few steps. Design a COHERENT ARCHITECTURE before content: a course/booklet is ordered pedagogically (concept & theory → fully worked examples → practice problems → a dedicated ANSWER KEY / solutions step); an exam/worksheet makes question groups their own steps PLUS a separate detailed model-answer step; an EXAM BANK (بنك أسئلة) is organized by TOPIC — each topic step contains its questions in graded difficulty tiers (سهل/متوسط/صعب with marks) — plus ONE final complete answer-key step covering every question; a STUDY PLAN (خطة دراسة/جدول مذاكرة) is ordered (goals & scope diagnosis → a full week-by-week AND day-by-day schedule as a real TABLE with subjects, durations and concrete tasks → per-phase steps with specific study techniques and resources → a final progress-tracking & revision-strategy step); a RESEARCH PAPER/REPORT is ordered (scope & key questions → evidence-gathering research steps → analysis → synthesis with inline citations [1][2] → a FINAL references step titled 'المصادر والمراجع'/'References' listing ONLY real sources actually found in the research steps, never invented ones). Every step = ONE substantial chunk of REAL content (a specific chapter, a named set of worked examples, questions 1-10) — never a vague activity like 'introduction' or 'explain the topic'. Choose each step's kind to match the work: research (needs fresh web facts) | solve (math/quantitative derivation) | draw (a figure/graph/diagram) | write (prose/answers/explanation) | code. Prefer 'solve' for anything with equations and 'draw' for anything that benefits from a figure. If this is an exam/worksheet/quiz, the FINAL step MUST be a complete ANSWER KEY with worked solutions. Return ONLY valid JSON, step titles in the user's language: {\"title\":\"short task title\",\"steps\":[{\"title\":\"…\",\"kind\":\"…\"}]}";
   let plan = null;
   try {
     const raw = await agentCall([
@@ -11342,7 +11403,13 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
       st.dom = dom;
       const MEGA_MANDATE = run._mega ? " MEGA-BOOK CHAPTER: this is one chapter of a very large reference book — write it EXTREMELY long and complete (aim for 3500-5000+ words of real content: full explanations, many worked examples, tables, subsections). Never compress; length is a requirement." : "";
       sysTxt = "You are Firas Agent EXECUTING ONE STEP of a bigger plan. Produce the COMPLETE, final content for THIS step only — it will be assembled with the other steps into the deliverable." + AGENT_QUALITY + DEPTH_MANDATE + MEGA_MANDATE + (DOMAIN_GUIDE[dom] || "") + langRule;
-      usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + "\n\nFULL PLAN:\n" + planList + (prevOutline() ? "\n\nALREADY COMPLETED (context — do not repeat):\n" + prevOutline() : "") + (searchCtx ? "\n\nFRESH WEB RESULTS (cite [1][2] where used):\n" + searchCtx : "") + "\n\nEXECUTE STEP " + (i + 1) + " NOW: " + st.title;
+      // ANSWER-KEY / solutions / conclusion steps must SEE the FULL text of the earlier steps —
+      // the 1400-char-per-step outline silently dropped questions and produced incomplete keys.
+      const KEYSTEP = /answer\s*key|model\s*answers?|solutions?|مفتاح|الحلول|حلول\s|إجابات|الأجوبة|أجوبة|الخلاصة|خاتمة|conclusion|synthesis/i.test(st.title || "");
+      const prevCtx = KEYSTEP
+        ? run.steps.filter((s) => s.s === "done" && s !== st && s.kind !== "design").map((s) => "— " + s.title + ":\n" + s.out.slice(0, 12000)).join("\n\n").slice(0, 60000)
+        : prevOutline();
+      usrTxt = "THE TASK:\n" + taskCtx.slice(0, 4500) + "\n\nFULL PLAN:\n" + planList + (prevCtx ? (KEYSTEP ? "\n\nTHE COMPLETED STEPS IN FULL — your step must cover EVERY item below, matching its exact numbering, skipping NOTHING:\n" : "\n\nALREADY COMPLETED (context — do not repeat):\n") + prevCtx : "") + (searchCtx ? "\n\nFRESH WEB RESULTS (cite [1][2] where used):\n" + searchCtx : "") + "\n\nEXECUTE STEP " + (i + 1) + " NOW: " + st.title;
     }
     try {
       st.out = await agentCall([
@@ -11429,7 +11496,7 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     run.phase = "verify"; sync(false);
     try {
       const rev = await agentCall([
-        { role: "system", content: "You are Firas Agent's strict REVIEWER. Judge the step outputs against the task on TWO axes. (1) CORRECTNESS: spot-check the key derivation steps and the final result — is the math right? Are units, significant figures and dimensional analysis correct? Do chemical equations balance and physical laws apply correctly? For an exam/quiz, is every question answerable and is a COMPLETE answer key present? (2) COMPLETENESS & VALIDITY: flag any step that is incomplete, lazy, stubbed, off-task, or has unbalanced/invalid KaTeX or a broken ```plot/```tikz block. Return ONLY JSON: {\"ok\":true} or {\"redo\":[stepNumbers],\"notes\":\"precise, specific fixes incl. any wrong values\"}." },
+        { role: "system", content: "You are Firas Agent's strict REVIEWER. Judge the step outputs against the task on THREE axes. (1) CORRECTNESS: spot-check the key derivation steps and the final result — is the math right? Are units, significant figures and dimensional analysis correct? Do chemical equations balance and physical laws apply correctly? For an exam/quiz, is every question answerable and is a COMPLETE answer key present? (2) COMPLETENESS & VALIDITY: flag any step that is incomplete, lazy, stubbed, off-task, or has unbalanced/invalid KaTeX or a broken ```plot/```tikz block. (3) LANGUAGE & COVERAGE: every step must be written in the user's language — a step that drifts into the wrong language is a defect to flag; if the task requests a specific COUNT of items (e.g. '20 سؤال', '10 chapters'), verify the steps together deliver ALL of them; if an answer key exists, its numbering must match the questions one-to-one — flag any missing or misnumbered solution. Return ONLY JSON: {\"ok\":true} or {\"redo\":[stepNumbers],\"notes\":\"precise, specific fixes incl. any wrong values\"}." },
         { role: "user", content: "TASK:\n" + task.slice(0, 1500) + "\n\n" + run.steps.map((s, i) => "STEP " + (i + 1) + " (" + s.title + "):\n" + s.out.slice(0, 2500)).join("\n\n---\n\n") },
       ], "max", signal);
       const jm = rev.match(/\{[\s\S]*\}/);
@@ -11460,8 +11527,8 @@ async function runAgentTask(chat, aiMsg, task, replyLang, signal, onUpdate, ctx,
     st.s = "run"; sync(false);
     try {
       st.out = await agentCall([
-        { role: "system", content: "You are Firas Agent." + AGENT_QUALITY + (DOMAIN_GUIDE[st.dom] || "") + langRule },
-        { role: "user", content: "TASK:\n" + task.slice(0, 3000) + "\n\nEXECUTE THIS PART COMPLETELY: " + st.title },
+        { role: "system", content: "You are Firas Agent EXECUTING ONE STEP of a bigger plan (a first attempt failed — deliver this step COMPLETE now)." + AGENT_QUALITY + DEPTH_MANDATE + (DOMAIN_GUIDE[st.dom] || "") + langRule },
+        { role: "user", content: "TASK:\n" + task.slice(0, 3000) + "\n\nFULL PLAN:\n" + planList + (prevOutline() ? "\n\nALREADY COMPLETED (stay consistent — do not repeat):\n" + prevOutline() : "") + "\n\nEXECUTE STEP " + (i + 1) + " COMPLETELY NOW: " + st.title },
       ], "max", signal);
       st.s = "done";
     } catch (_) { st.s = "fail"; }
@@ -12431,6 +12498,20 @@ function renderCodeHome(root) {
           '<button type="button" class="cw-home__create">' + (ar ? "ابنِ بالذكاء" : "Build with AI") + " ✨</button>" +
         "</div>" +
       "</div>" +
+      '<div class="cw-home__tpls">' +
+        '<div class="cw-home__recent-h">' + (ar ? "ابدأ من قالب جاهز" : "Start from a template") + "</div>" +
+        '<div class="cw-home__tplrow">' +
+          Object.keys(CW_TEMPLATES).filter((k) => k !== "blank").map((k) => {
+            const t = CW_TEMPLATES[k], m = (typeof CW_TPL_META !== "undefined" && CW_TPL_META[k]) || {};
+            return '<button type="button" class="cw-tpl" data-tpl="' + escapeHtml(k) + '">' +
+              '<span class="cw-tpl__ic">' + (m.ic || "📦") + "</span>" +
+              '<span class="cw-tpl__meta"><strong>' + escapeHtml(ar ? t.ar : t.en) + "</strong>" +
+              (m.desc ? "<small>" + escapeHtml(ar ? m.desc.ar : m.desc.en) + "</small>" : "") + "</span>" +
+              (m.badge ? '<span class="cw-tpl__badge" style="--tplc:' + escapeHtml(m.badgeColor || "#888") + '">' + escapeHtml(m.badge) + "</span>" : "") +
+              "</button>";
+          }).join("") +
+        "</div>" +
+      "</div>" +
       '<div class="cw-home__recent">' +
         '<div class="cw-home__recent-h">' + (ar ? "مشاريعك" : "Your projects") + "</div>" +
         '<div class="cw-home__grid">' + recentHtml + "</div>" +
@@ -12439,6 +12520,15 @@ function renderCodeHome(root) {
   const nameOf = () => root.querySelector(".cw-home__name").value.trim() || (ar ? "مشروع جديد" : "new-project");
   const openBlank = () => { createCodeProject(nameOf(), CW_BLANK_FILES.map((f) => ({ path: f.path, content: f.content }))); cwState.file = 0; cwState.renderedChat = ""; renderAll(); };
   root.querySelector(".cw-home__blank").addEventListener("click", openBlank);
+  // Starter templates: one click → a real, working project opens in the IDE instantly.
+  root.querySelectorAll(".cw-tpl").forEach((b) => b.addEventListener("click", () => {
+    const t = CW_TEMPLATES[b.getAttribute("data-tpl")];
+    if (!t || !Array.isArray(t.files)) return;
+    const nm = root.querySelector(".cw-home__name").value.trim() || (ar ? t.ar : t.en);
+    createCodeProject(nm, t.files.map((f) => ({ path: f.path, content: f.content })));
+    cwState.file = 0; cwState.renderedChat = "";
+    renderAll();
+  }));
   root.querySelector(".cw-home__create").addEventListener("click", async () => {
     const desc = (root.querySelector(".cw-home__desc").value || "").trim();
     if (!desc) { openBlank(); return; }                       // no description → just open a blank project directly
@@ -12509,7 +12599,23 @@ function cwBrain(isWeb, reqText) {
     ((!isWeb && !cwIsGameRequest(reqText)) ? ENGINEERING_BRAIN : "") +
     ((isWeb && cwIsGameRequest(reqText)) ? (cwGameBrain() + (cwIs3DRequest(reqText) ? cwGame3DBrain() : "") + cwGameGenreRecipe(reqText)) :
       " GAMES / INTERACTIVE CANVAS: if the request is a game or animated/interactive app, build a GENUINELY PLAYABLE, polished one — a <canvas> with a real requestAnimationFrame loop (delta-time based), responsive keyboard + touch + mouse controls, collision detection, score/lives, win/lose + restart, sound-free juice (particles, easing, screen shake where fitting), a start screen and HUD, and it must scale to fit the screen. No stub loop, no 'coming soon' — a complete game.") +
+    ((isWeb && !cwIsGameRequest(reqText)) ? cwAppRecipe(reqText) : "") +
     " SELF-REVIEW BEFORE OUTPUT (private, never narrated): mentally EXECUTE the code end-to-end — every control is wired to a real handler, every id/class/selector it references actually exists in the files you output, state that should survive a refresh uses localStorage, all links/paths resolve, and the markup is syntactically valid and complete. Fix every defect you find SILENTLY; the delivered code must read as correct from the first line — no visible self-correction, no meta.";
+}
+/* Per-category APP recipes for NON-GAME web apps — the app-side twin of cwGameGenreRecipe.
+   Detects the most common student/user app categories and injects a concrete, testable
+   feature contract so the first build ships complete, not a hollow shell. Returns "" when
+   no category fits (the generic brain already covers everything else). */
+function cwAppRecipe(text) {
+  const s = String(text || "").toLowerCase();
+  if (!s) return "";
+  if (/(\bquiz\b|\bexam\b|\btrivia\b|\bmcq\b|flash\s*cards?|اختبار|كويز|امتحان|أسئلة\s*واختيارات|اختيار\s*من\s*متعدد|بطاقات\s*(تعليمية|مراجعة))/i.test(s)) return " ▶ APP RECIPE — QUIZ/EXAM APP (MANDATORY FEATURES): a REAL question bank of AT LEAST 10 substantive questions hard-coded as an array of {q, options[4], answerIndex, explain} on the requested topic (accurate content, no lorem); shuffle questions AND options each run; show ONE question at a time with a progress bar (3/10) and running score; on answer, instantly color the chosen option right/wrong, reveal the correct one, and show the explanation before Next; a results screen with percentage, grade word, per-question review list, and a working Restart that reshuffles; persist best score in localStorage and show it. Every button wired; keyboard 1-4 also answers.";
+  if (/(dashboard|admin\s*panel|analytics|لوحة\s*(تحكم|معلومات|بيانات)|إحصائيات|احصائيات|تقارير\s*تفاعلية)/i.test(s)) return " ▶ APP RECIPE — DASHBOARD (MANDATORY FEATURES): seed realistic sample data as arrays at the top of the script (12+ rows, believable names/numbers on the requested domain); a sidebar or top nav with 3+ sections; 4 stat cards computed FROM the data (totals, averages, growth) — never hard-coded strings that disagree with the table; at least TWO hand-rolled charts (bar + line or donut) drawn with <canvas> or inline SVG from those SAME arrays — no external chart libraries; a data table with working column sorting, a live search filter, and a status/category filter; numbers formatted with locale separators; a light/dark toggle persisted to localStorage. Filtering the table must also update the stat cards.";
+  if (/(\bstore\b|\bshop\b|e-?commerce|\bcart\b|متجر|سوق\s*إلكتروني|سلة\s*(تسوق|شراء)|منتجات\s*للبيع)/i.test(s)) return " ▶ APP RECIPE — STORE (MANDATORY FEATURES): seed 8+ products as an array {id, name, price, category, emoji-or-CSS-art image}; a responsive product grid with category filter chips AND a live search box that actually filter the grid; a WORKING cart: add-to-cart on every card, a cart drawer/panel listing items with quantity +/- steppers, per-line totals, remove, and a grand total that recomputes on every change; cart persisted to localStorage and restored on load; a checkout summary step with a simple validated form (name/phone) and a success state; a cart-count badge on the cart icon kept in sync. Prices formatted consistently; empty-cart and no-results states designed, not blank.";
+  if (/(to-?do|task\s*(list|manager)|habit|planner|study\s*(plan|schedule)|notes?\s*app|مهام|قائمة\s*مهام|جدول\s*(مذاكرة|دراسة|مهام)|مخطط|ملاحظات|عادات)/i.test(s)) return " ▶ APP RECIPE — TODO/PLANNER (MANDATORY FEATURES): full CRUD — add (Enter or button), inline edit on double-click, toggle done, delete with a subtle confirm; filters All/Active/Done plus a live counter (X remaining); optional priority or due-date field rendered as a colored chip and sortable; EVERYTHING persisted to localStorage and restored on load (test the refresh mentally); a designed empty state; clear-completed action; smooth add/remove transitions. For a study planner: days as columns or sections, subjects as colored blocks, and a progress bar of completed sessions.";
+  if (/(calculator|converter|\bgpa\b|آلة\s*حاسبة|حاسبة|محوّ?ل\s*(وحدات|عملات)|حساب\s*المعدل|المعدل\s*التراكمي)/i.test(s)) return " ▶ APP RECIPE — CALCULATOR/CONVERTER (MANDATORY FEATURES): a real button grid AND full keyboard support (digits, operators, Enter==, Backspace, Escape C); correct operator precedence and chained operations (2+3*4 → 14), decimal point guarded against doubles, divide-by-zero shows a friendly message not NaN/Infinity; a live expression line above the result; a scrollable history of past calculations (click to reuse) persisted to localStorage. For converters/GPA: conversion happens live on input, both directions, with the formula/weights visible and results rounded sensibly (4 decimals max).";
+  if (/(portfolio|personal\s*(site|website)|landing\s*page|\bcv\b\s*(site|page)|restaurant|مطعم|موقع\s*(شخصي|تعريفي|مدرست|مدرسة|شركة)|صفحة\s*هبوط|سيرة\s*ذاتية\s*(موقع|صفحة))/i.test(s)) return " ▶ APP RECIPE — PORTFOLIO/LANDING (MANDATORY FEATURES): a single polished page with 5+ real sections (hero with a strong headline, about, features/work/menu cards, testimonials or stats, contact) filled with plausible on-topic content — never lorem ipsum; a sticky nav whose links smooth-scroll to the sections and highlight the active one on scroll; a contact form with client-side validation (required, email shape) and an inline success state — never a dead submit; subtle scroll-reveal animations (IntersectionObserver); fully responsive with a working mobile menu button; consistent spacing scale, one accent color, and real hover/focus states throughout.";
+  return "";
 }
 /* ═══ FIRAS CODE — GAMES THAT ACTUALLY WORK (detection → hard canvas contract →
    run + color-variance/two-snapshot pixel probe → targeted ≤2-round fix). Additive,
@@ -13477,7 +13583,7 @@ async function renderCodeIDE(root, chat) {
           "</div>" +
           '<div class="cw-prevwrap">' +
             '<div class="cw-prevchrome"><span class="cw-prevdots"><i></i><i></i><i></i></span><span class="cw-prevaddr">' + L.preview + " · localhost</span></div>" +
-            '<iframe class="cw-preview" sandbox="allow-scripts allow-modals allow-pointer-lock allow-popups" title="preview"></iframe>' +
+            '<iframe class="cw-preview" sandbox="allow-scripts allow-modals allow-pointer-lock allow-popups allow-forms allow-downloads" title="preview"></iframe>' +
           "</div>" +
           '<div class="cw-console" hidden><div class="cw-console__list"></div></div>' +
           '<div class="cw-thread" hidden><div class="cw-thread__list" aria-live="polite"></div></div>' +
@@ -13593,10 +13699,20 @@ async function renderCodeIDE(root, chat) {
     if (cwState.tab === "console") b.classList.remove("has-errors");
   }));
   root.querySelector(".cw-conclear").addEventListener("click", () => { const l = root.querySelector(".cw-console__list"); if (l) l.innerHTML = ""; });
-  // Ctrl/Cmd+S → save + refresh ; Ctrl+K / Ctrl+Shift+P → command palette
+  // Ctrl/Cmd+S → save + refresh ; Ctrl+Enter → run ; Ctrl+K / Ctrl+P / Ctrl+Shift+P → command palette ;
+  // Alt+↑/↓ → previous / next file (fast switching without touching the tree).
   root.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) { e.preventDefault(); cwCommitEdit(root, chat, true); showToast(L.saved); return; }
-    if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K" || (e.shiftKey && (e.key === "p" || e.key === "P")))) { e.preventDefault(); cwOpenPalette(root, chat); }
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); cwCommitEdit(root, chat, true); return; }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K" || e.key === "p" || e.key === "P")) { e.preventDefault(); cwOpenPalette(root, chat); return; }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const n = codeFilesOf(chat).files.length;
+      if (n < 2) return;
+      cwCommitEdit(root, chat, false);
+      cwSelectFile(root, chat, (cwState.file + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
+      return;
+    }
   });
   // AI command bar
   root.querySelector(".cw-ai").addEventListener("submit", async (e) => {

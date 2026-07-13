@@ -338,6 +338,7 @@ async function fbAccessToken() {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + encodeURIComponent(jwt),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!r.ok) throw new Error("firebase token " + r.status + ": " + (await r.text()).slice(0, 160));
   const j = await r.json();
@@ -347,16 +348,20 @@ async function fbAccessToken() {
 }
 async function fbLoad() {
   const token = await fbAccessToken();
-  const r = await fetch(FB_DB_URL + "/" + FB_KEY + ".json", { headers: { Authorization: "Bearer " + token } });
+  const r = await fetch(FB_DB_URL + "/" + FB_KEY + ".json", { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(45_000) });
   if (!r.ok) throw new Error("firebase load " + r.status);
   return await r.json(); // null when the key doesn't exist yet (fresh DB)
 }
 async function fbSave(db) {
   const token = await fbAccessToken();
+  // Bounded: persist() serializes every DB write behind writeChain — a single hung
+  // PUT with no timeout would silently freeze ALL persistence (accounts, chats,
+  // memory) until a restart. Timing out lets the next queued write proceed.
   const r = await fetch(FB_DB_URL + "/" + FB_KEY + ".json", {
     method: "PUT",
     headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify(db),
+    signal: AbortSignal.timeout(60_000),
   });
   if (!r.ok) throw new Error("firebase save " + r.status + ": " + (await r.text()).slice(0, 160));
 }
@@ -1183,21 +1188,24 @@ async function handleFirebaseAuth(req, res) {
     email.split("@")[0];
 
   // Link to an existing account by email, or create a Firebase-backed one.
+  const verified = payload.email_verified === true;
   let user = DB.users.find((u) => u.email === email);
   if (user) {
     // ACCOUNT-TAKEOVER GUARD: Firebase email/password tokens carry
-    // email_verified=false, so anyone could mint a token for a victim's email.
-    // Only auto-link into an EXISTING account when the email is actually
-    // verified (Google sign-in) OR the existing account is itself a social
-    // account. Never let an unverified token take over a local PASSWORD account.
-    const verified = payload.email_verified === true;
-    const existingIsLocal = !!user.passHash; // password account
-    if (existingIsLocal && !verified) {
+    // email_verified=false, so anyone could mint a token for a victim's email
+    // (including the admin's) using the PUBLIC web apiKey. Only a VERIFIED token
+    // (e.g. Google sign-in) may auto-link into an EXISTING account — this now
+    // protects BOTH local password accounts AND existing social/admin accounts.
+    if (!verified) {
       return sendJson(res, 409, {
         error: "An account with this email already exists. Please sign in with your password, or verify your email first.",
       });
     }
   } else {
+    // Never let an UNVERIFIED token CREATE an admin-privileged account.
+    if (!verified && isAdmin({ email })) {
+      return sendJson(res, 403, { error: "email verification required for this account" });
+    }
     user = {
       id: crypto.randomUUID(),
       name,
@@ -2016,6 +2024,24 @@ async function handleImage(req, res) {
   }
 }
 
+// Lite-mirror parser (lite.duckduckgo.com) — same {title,url,snippet} shape as parseDuckDuckGo.
+// The html endpoint intermittently blocks datacenter IPs (403 / anomaly page); the lite mirror
+// usually still answers, so search keeps feeding live facts into answers.
+function parseDdgLite(html) {
+  const out = [];
+  const linkRe = /<a[^>]*class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>|<a[^>]*href=['"]([^'"]+)['"][^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = linkRe.exec(html)) && out.length < 8) {
+    const url = decodeDdgUrl(m[1] || m[3] || "");
+    const title = stripTags(m[2] || m[4] || "");
+    if (!title || !/^https?:\/\//i.test(url)) continue;
+    // Snippet lives in the following <td class="result-snippet"> — bounded slice like the html parser.
+    const after = html.slice(linkRe.lastIndex, linkRe.lastIndex + 1200);
+    const sm = after.match(/<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/i);
+    out.push({ title, url, snippet: sm ? stripTags(sm[1]) : "" });
+  }
+  return out;
+}
 async function handleWebSearch(req, res) {
   res.setHeader("Content-Type", "application/json");
   // Auth + rate limit so the DuckDuckGo proxy isn't an open anonymous scraper.
@@ -2027,11 +2053,28 @@ async function handleWebSearch(req, res) {
   if (!q) { res.writeHead(400); return res.end(JSON.stringify({ results: [] })); }
   let results = [];
   try {
-    const r = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(q), {
-      headers: { "User-Agent": SEARCH_UA, "Accept-Language": "ar,en-US;q=0.8,en;q=0.6", "Accept": "text/html" },
-    });
-    if (r.ok) results = parseDuckDuckGo(await r.text()).slice(0, 6);
-  } catch (_) { /* return empty on failure — the AI answers without search */ }
+    // Bounded: a hung DDG socket must degrade to "answer without search" fast,
+    // never stall the whole chat turn (this call sits inline before the reply).
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 8_000);
+    try {
+      const r = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(q), {
+        headers: { "User-Agent": SEARCH_UA, "Accept-Language": "ar,en-US;q=0.8,en;q=0.6", "Accept": "text/html" },
+        signal: ac.signal,
+      });
+      if (r.ok) results = parseDuckDuckGo(await r.text()).slice(0, 6);
+    } finally { clearTimeout(to); }
+  } catch (_) { /* fall through to the lite mirror below */ }
+  if (!results.length) {
+    // Primary endpoint blocked or empty → retry on the lite mirror so answers still get live facts.
+    try {
+      const r2 = await fetch("https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(q), {
+        headers: { "User-Agent": SEARCH_UA, "Accept-Language": "ar,en-US;q=0.8,en;q=0.6", "Accept": "text/html" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r2.ok) results = parseDdgLite(await r2.text()).slice(0, 6);
+    } catch (_) { /* return empty on failure — the AI answers without search */ }
+  }
   res.writeHead(200);
   res.end(JSON.stringify({ q, results }));
 }
@@ -2480,13 +2523,13 @@ async function streamFallback(res, messages, tier, think, signal) {
     });
   } catch (e) {
     if (signal.aborted) return;
-    sseWrite(res, "The Firas AI engine is unavailable right now. Please try again.");
+    sseWrite(res, "تعذّر الوصول إلى محرك Firas AI حالياً — يرجى المحاولة مرة أخرى بعد لحظات.\n\nThe Firas AI engine is unavailable right now. Please try again.");
     sseDone(res);
     return;
   }
 
   if (!upstream.ok || !upstream.body) {
-    sseWrite(res, "The Firas AI engine is busy right now. Please try again.");
+    sseWrite(res, "محرك Firas AI مشغول حالياً — يرجى المحاولة مرة أخرى بعد لحظات.\n\nThe Firas AI engine is busy right now. Please try again.");
     sseDone(res);
     return;
   }
@@ -2776,10 +2819,13 @@ function kbSearch(query, maxChunks) {
     for (let i = 0; i < chunks.length; i++) {
       const ct = toks[i];
       if (!ct || !ct.length) continue;
-      let hits = 0; for (const t of ct) if (qset.has(t)) hits++;
+      let hits = 0; const matched = new Set();
+      for (const t of ct) if (qset.has(t)) { hits++; matched.add(t); }
       if (!hits) continue;
-      const cov = (new Set(ct.filter((t) => qset.has(t)))).size / qset.size;
-      scored.push({ score: cov * 2 + hits / Math.sqrt(ct.length + 5), text: chunks[i] });
+      // Rank by DISTINCT query-term coverage; raw repeats are only log-dampened so a chunk
+      // spamming one common word 20x can no longer outrank a chunk matching several terms.
+      const cov = matched.size / qset.size;
+      scored.push({ score: cov * 2 + (matched.size + Math.log(1 + hits)) / Math.sqrt(ct.length + 5), text: chunks[i] });
     }
   }
   scored.sort((a, b) => b.score - a.score);
@@ -2867,6 +2913,14 @@ async function handleChat(req, res) {
     return sendJson(res, 401, { error: "authentication required" });
   }
 
+  // Per-user rate limit: the AI stream is by far the most expensive endpoint (it
+  // burns upstream Ollama/Gemini/Claude credits on every call). Auth alone is not
+  // enough — one logged-in account could hammer it and drain quota/bills. The cap
+  // is generous so the Firas Agent multi-step pipeline still flows normally.
+  if (rateLimited("chat:" + user.id, 120, 60_000)) {
+    return sendJson(res, 429, { error: "too many requests, please slow down" });
+  }
+
   let payload;
   try {
     // Raise the body limit for /api/chat ONLY so image payloads fit.
@@ -2952,11 +3006,19 @@ async function handleChat(req, res) {
     if (tier === "max" && !vision && !served) {
       // Max = Qwen3.5 397B (free Ollama) FIRST — strongest tier, zero credit. External engines fall back.
       served = await streamOllama(res, ollamaMessages, tier, think, ac.signal);   // Qwen3.5 397B
+      // DeepSeek V4 Pro via NVIDIA NIM (free, credit-guarded per day) — frontier-class
+      // reasoning+coding rescue so Max stays genuinely the strongest tier.
+      if (!served && !res.writableEnded && NVIDIA_API_KEY && nvidiaUnderCap()) {
+        served = await streamDeepSeek(res, messages, ac.signal);
+        if (served) nvidiaCharge();
+      }
       if (!served && !res.writableEnded) served = await streamGemini(res, messages, ac.signal);
       if (!served && !res.writableEnded) served = await streamAnthropic(res, messages, ac.signal);
       if (!served && !res.writableEnded) served = await streamOpenRouter(res, messages, ac.signal);
     }
-    let ok = served ? true : await streamOllama(res, ollamaMessages, tier, think, ac.signal, modelOverride);
+    // Max (non-vision) already exhausted its Ollama attempt in the premium chain above —
+    // don't burn seconds retrying the same dead pool before the rescue chain answers.
+    let ok = served ? true : ((tier === "max" && !vision) ? false : await streamOllama(res, ollamaMessages, tier, think, ac.signal, modelOverride));
     if (!ok && vision && !res.writableEnded) {
       // The vision model can fail on a COLD START (it has to load into VRAM first) — the
       // first request times out/errors, the model loads, and a retry then succeeds. streamOllama
@@ -2966,10 +3028,27 @@ async function handleChat(req, res) {
     }
     if (!ok && !res.writableEnded) {
       if (vision) {
-        // Pollinations fallback is text-only; it cannot see images. Tell the
-        // user clearly and finish — never hang.
-        sseWrite(res, "The Firas AI vision engine is offline right now, so I can't view images. Please try again shortly.");
-        sseDone(res);
+        // LAST-RESORT VISION: the keyless fallback engine accepts OpenAI-style image_url
+        // parts, so instead of a dead-end apology we convert the attached images to data
+        // URLs and let it actually answer. streamFallback shows its own message if even
+        // this fails — the user always gets a reply, never a hang.
+        let vBudget = 3; // keep the JSON body small enough for the free engine
+        const oaiVision = messages
+          .filter((m) => m && (m.role === "system" || m.role === "user" || m.role === "assistant"))
+          .map((m) => {
+            const text = String((m && m.content) || "");
+            if (m.role === "user" && Array.isArray(m.images) && m.images.length && vBudget > 0) {
+              const parts = text ? [{ type: "text", text }] : [];
+              for (const raw of m.images) {
+                if (vBudget <= 0) break;
+                const norm = normalizeImage(raw);
+                if (norm) { parts.push({ type: "image_url", image_url: { url: "data:" + b64Mime(norm) + ";base64," + norm } }); vBudget--; }
+              }
+              if (parts.length) return { role: m.role, content: parts };
+            }
+            return { role: m.role, content: text };
+          });
+        await streamFallback(res, oaiVision, tier, think, ac.signal);
       } else {
         // RESCUE CHAIN for EVERY tier — never surface "busy" while any engine can answer:
         // 1) the tier's Ollama fallback model (different hosted pool), 2) Gemini Flash (free),

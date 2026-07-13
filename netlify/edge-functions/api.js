@@ -1332,6 +1332,9 @@ export default async (request, context) => {
       if (method !== "POST") return new Response("method not allowed", { status: 405 });
       const user = await currentUser(context);
       if (!user) return json({ error: "authentication required" }, 401);
+      // Per-user rate limit on the most expensive endpoint (burns upstream AI credits).
+      // Generous cap so the Firas Agent multi-step pipeline still flows normally.
+      if (rateLimited("chat:" + user.id, 120, 60000)) return json({ error: "too many requests, please slow down" }, 429);
       let payload; try { payload = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
       const messages = Array.isArray(payload.messages) ? payload.messages : [];
       const tier = TIERS[payload.tier] ? payload.tier : "pro";
@@ -1572,11 +1575,16 @@ export default async (request, context) => {
       if (!payload) return json({ error: "invalid token" }, 401);
       const email = String(payload.email).trim().toLowerCase();
       const name = (typeof payload.name === "string" && payload.name.trim() && payload.name.trim().slice(0, 80)) || (typeof b.name === "string" && b.name.trim() && b.name.trim().slice(0, 80)) || email.split("@")[0];
+      const verified = payload.email_verified === true;
       let user = await getUserByEmail(email);
       if (user) {
-        const verified = payload.email_verified === true;
-        if (!!user.passHash && !verified) return json({ error: "An account with this email already exists. Please sign in with your password, or verify your email first." }, 409);
+        // Only a VERIFIED token (Google sign-in) may auto-link into an EXISTING account —
+        // an unverified Firebase email/password token can be minted for any victim's address
+        // (including a social/admin account) via the public web apiKey, so never let it link in.
+        if (!verified) return json({ error: "An account with this email already exists. Please sign in with your password, or verify your email first." }, 409);
       } else {
+        // Never let an UNVERIFIED token CREATE an admin-privileged account.
+        if (!verified && isAdmin({ email })) return json({ error: "email verification required for this account" }, 403);
         user = { id: crypto.randomUUID(), name, email, provider: "firebase", createdAt: new Date().toISOString() };
         await saveUser(user);
       }
