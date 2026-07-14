@@ -2325,17 +2325,19 @@ async function handleTts(req, res) {
   if (!text) { res.writeHead(400); return res.end(); }
   const raw = String(body.lang || "").toLowerCase();
   const lang = raw.startsWith("ar") ? "ar" : (/^[a-z]{2}(-[a-z]{2})?$/.test(raw) ? raw.slice(0, 2) : "en");
-  // 1) PRIMARY: Gemini EXPRESSIVE TTS — a generative voice that PERFORMS the
-  //    line with real feeling and natural intonation (ChatGPT-style), directed
-  //    by an acting instruction. Needs GEMINI_API_KEY; quota/errors trip a
-  //    breaker so calls fall to Edge instantly instead of waiting.
-  try {
-    const gem = await geminiSynthesize(text, raw || lang);
-    if (gem && gem.length) {
-      res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "Content-Length": gem.length, "X-TTS-Engine": "gemini" });
-      return res.end(gem);
-    }
-  } catch (_) { /* no key / quota / error → Edge neural below */ }
+  // 1) PRIMARY (ARABIC ONLY): Gemini EXPRESSIVE TTS — the generative, emotional
+  //    voice. We reserve it for ARABIC — that's where the expressive delivery
+  //    matters most and it keeps the limited Gemini quota for Arabic. Every OTHER
+  //    language skips straight to Edge neural, whose native accents are excellent.
+  if (lang === "ar") {
+    try {
+      const gem = await geminiSynthesize(text, raw || lang);
+      if (gem && gem.length) {
+        res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "Content-Length": gem.length, "X-TTS-Engine": "gemini" });
+        return res.end(gem);
+      }
+    } catch (_) { /* no key / quota / error → Edge neural below */ }
+  }
   // 2) Microsoft Edge NEURAL voices (professional quality, keyless).
   //    Pass the raw lang/dialect so Arabic gets the right regional neural voice.
   try {
