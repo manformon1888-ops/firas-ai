@@ -2252,7 +2252,7 @@ function pcmToWav(pcm, rate) {
 /** The acting direction that gives the voice its feeling, per language. */
 function geminiTtsStyle(lang) {
   return String(lang || "").startsWith("ar")
-    ? "أنت فِراس، شابٌّ عربيّ ودود ومرِح تتحدث مع صديقك على الهاتف. انطق النص التالي بعربيةٍ فصيحة لكن بروحٍ عفوية دافئة جدًّا وحميمة — نبرة إنسانية حيّة تتموّج مع المعنى (تعلو قليلاً عند السؤال أو الحماس وتلين عند اللطف)، ابتسامة تُسمع في الصوت، وقفات قصيرة طبيعية بين الجُمل، وإيقاع سريع قليلاً وحيوي. تكلّم كإنسان حقيقي مقرّب، لا كقارئ نشرة أخبار — لا جمود ولا رسمية ولا رتابة إطلاقًا. النص: "
+    ? "أنت فِراس، شابٌّ عربيّ ودود ومرِح تتحدث مع صديقك على الهاتف. انطق النص التالي بعربيةٍ فصيحة سليمة النطق — مخارج حروف واضحة، وتشكيل صحيح للكلمات كما ينطقها متحدثٌ فصيح متمكّن، من غير لكنة أعجمية — لكن بروحٍ عفوية دافئة جدًّا وحميمة: نبرة إنسانية حيّة تتموّج مع المعنى (تعلو قليلاً عند السؤال أو الحماس وتلين عند اللطف)، ابتسامة تُسمع في الصوت، وقفات قصيرة طبيعية بين الجُمل، وإيقاع سريع قليلاً وحيوي. تكلّم كإنسان حقيقي مقرّب، لا كقارئ نشرة أخبار — لا جمود ولا رسمية ولا رتابة إطلاقًا. النص: "
     : "You are Firas, a friendly, upbeat young man talking to a friend on the phone. Say the following with a very warm, human, spontaneous delivery — a lively voice that rises a touch on questions and excitement and softens on kindness, a smile you can hear, short natural pauses, and a slightly brisk, energetic rhythm. Speak like a real close friend, never like a news reader — no stiffness, no formality, no monotone at all. Text: ";
 }
 async function geminiSynthesize(text, lang) {
