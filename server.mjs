@@ -111,15 +111,22 @@ const GEMINI_OAI_URL     = "https://generativelanguage.googleapis.com/v1beta/ope
 // pollinations on error/quota. Free key, NO credit card (aistudio.google.com).
 // GEMINI API KEY POOL — Gemini's free tier is quota-limited PER PROJECT (not per key),
 // so add keys from DIFFERENT Google Cloud projects/accounts to multiply the daily voice
-// quota. Set GEMINI_API_KEY (+ GEMINI_API_KEYS="k2,k3" or GEMINI_API_KEY_1..9). When a
-// key hits its limit (429/quota) the pool rotates to the next; a limited key rests briefly
-// (RPM caps reset each minute; daily caps reset ~midnight Pacific) and self-heals.
+// quota. Put ALL your keys in ONE variable — GEMINI_API_KEYS — separated by commas,
+// spaces or new lines (whatever); GEMINI_API_KEY and GEMINI_API_KEY_1..24 also still work.
+// Everything is merged, quotes/whitespace stripped, and DUPLICATES removed, so it doesn't
+// matter if the same key appears twice. When a key hits its limit (429) the pool rotates
+// to the next; a limited key rests briefly (RPM resets each minute, daily ~midnight PT).
 const GEMINI_KEYS = (() => {
-  const keys = [];
-  if (process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY.trim());
-  for (const k of (process.env.GEMINI_API_KEYS || "").split(",")) { const v = k.trim(); if (v) keys.push(v); }
-  for (let i = 1; i <= 24; i++) { const v = (process.env["GEMINI_API_KEY_" + i] || "").trim(); if (v) keys.push(v); }
-  return [...new Set(keys)];
+  const blob = [
+    process.env.GEMINI_API_KEY || "",
+    process.env.GEMINI_API_KEYS || "",
+    ...Array.from({ length: 24 }, (_, i) => process.env["GEMINI_API_KEY_" + (i + 1)] || ""),
+  ].join(" ");
+  const keys = blob
+    .split(/[\s,;]+/)                         // comma / space / newline / semicolon — any separator
+    .map((k) => k.trim().replace(/^["']+|["']+$/g, "")) // strip stray quotes/whitespace
+    .filter((k) => k.length >= 20);           // real keys are long; drops empty/junk tokens
+  return [...new Set(keys)];                  // de-dupe so a repeated key isn't counted twice
 })();
 const GEMINI_API_KEY     = GEMINI_KEYS[0] || "";   // back-compat: `if (GEMINI_API_KEY)` = "any key configured"
 const _gemCooldown = new Map();                    // key → ms timestamp it may be retried
