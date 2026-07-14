@@ -2184,6 +2184,72 @@ async function edgeSynthesize(text, lang) {
   return all;
 }
 
+/* ---------------------------------------------------------------------------
+   Gemini EXPRESSIVE TTS — the emotional, ChatGPT-grade voice. Unlike classic
+   TTS (which reads), this is a generative audio model we DIRECT with a style
+   instruction ("speak warmly, like a close friend"), so it performs the line
+   with real intonation and feeling, in any language/dialect. Uses the same
+   free GEMINI_API_KEY as chat/vision. Returns WAV (PCM wrapped). Falls back
+   to Edge neural / Google TTS when the key is missing or the quota is hit.
+   --------------------------------------------------------------------------- */
+const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // warm, natural male
+let geminiTtsDisabledUntil = 0; // circuit-breaker after quota/errors
+// Small in-memory cache (greeting + repeated lines) so the call's fixed phrases
+// never re-spend quota. ~40 clips × ~250 KB ≈ 10 MB tops.
+const ttsCache = new Map();
+function ttsCachePut(key, buf) {
+  ttsCache.set(key, buf);
+  if (ttsCache.size > 40) ttsCache.delete(ttsCache.keys().next().value);
+}
+/** Wrap raw little-endian 16-bit mono PCM in a WAV header so <audio> plays it. */
+function pcmToWav(pcm, rate) {
+  const hdr = Buffer.alloc(44);
+  hdr.write("RIFF", 0); hdr.writeUInt32LE(36 + pcm.length, 4); hdr.write("WAVE", 8);
+  hdr.write("fmt ", 12); hdr.writeUInt32LE(16, 16); hdr.writeUInt16LE(1, 20); hdr.writeUInt16LE(1, 22);
+  hdr.writeUInt32LE(rate, 24); hdr.writeUInt32LE(rate * 2, 28); hdr.writeUInt16LE(2, 32); hdr.writeUInt16LE(16, 34);
+  hdr.write("data", 36); hdr.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([hdr, pcm]);
+}
+/** The acting direction that gives the voice its feeling, per language. */
+function geminiTtsStyle(lang) {
+  return String(lang || "").startsWith("ar")
+    ? "أنت فِراس، مساعد صوتي ودود. انطق النص التالي بصوت طبيعي دافئ وحيوي، بعفوية تامة كأنك تتحدث مع صديق مقرّب — نبرة معبّرة تتفاعل مع المعنى، وقفات طبيعية، وحماس خفيف عند الأخبار الجيدة. لا تقرأ قراءة رسمية جامدة. النص: "
+    : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, completely natural conversational tone — expressive intonation that reacts to the meaning, natural pauses, a hint of enthusiasm where it fits. Never a flat formal read. Text: ";
+}
+async function geminiSynthesize(text, lang) {
+  if (!GEMINI_API_KEY) throw new Error("no gemini key");
+  if (Date.now() < geminiTtsDisabledUntil) throw new Error("gemini tts circuit-open");
+  const cacheKey = crypto.createHash("sha1").update(GEMINI_TTS_VOICE + "|" + lang + "|" + text).digest("hex");
+  const hit = ttsCache.get(cacheKey);
+  if (hit) return hit;
+  const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TTS_MODEL + ":generateContent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: geminiTtsStyle(lang) + text }] }],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_TTS_VOICE } } },
+      },
+    }),
+    signal: AbortSignal.timeout(40_000),
+  });
+  if (!r.ok) {
+    // Quota (429) or transient error → open the breaker briefly so calls stay snappy on Edge.
+    geminiTtsDisabledUntil = Date.now() + (r.status === 429 ? 120_000 : 45_000);
+    throw new Error("gemini tts http " + r.status);
+  }
+  const j = await r.json().catch(() => null);
+  const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+  const inl = Array.isArray(parts) ? parts.find((p) => p.inlineData && p.inlineData.data) : null;
+  if (!inl) throw new Error("gemini tts empty");
+  const rate = (() => { const m = /rate=(\d+)/.exec(inl.inlineData.mimeType || ""); return m ? +m[1] : 24000; })();
+  const wav = pcmToWav(Buffer.from(inl.inlineData.data, "base64"), rate);
+  ttsCachePut(cacheKey, wav);
+  return wav;
+}
+
 function ttsChunks(text, max) {
   // Split on sentence enders first, then pack words up to `max` chars per piece.
   const sentences = String(text).split(/(?<=[.!?؟،؛\n])\s+/);
@@ -2214,7 +2280,18 @@ async function handleTts(req, res) {
   if (!text) { res.writeHead(400); return res.end(); }
   const raw = String(body.lang || "").toLowerCase();
   const lang = raw.startsWith("ar") ? "ar" : (/^[a-z]{2}(-[a-z]{2})?$/.test(raw) ? raw.slice(0, 2) : "en");
-  // 1) PRIMARY: Microsoft Edge NEURAL voices (professional quality, keyless).
+  // 1) PRIMARY: Gemini EXPRESSIVE TTS — a generative voice that PERFORMS the
+  //    line with real feeling and natural intonation (ChatGPT-style), directed
+  //    by an acting instruction. Needs GEMINI_API_KEY; quota/errors trip a
+  //    breaker so calls fall to Edge instantly instead of waiting.
+  try {
+    const gem = await geminiSynthesize(text, raw || lang);
+    if (gem && gem.length) {
+      res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "Content-Length": gem.length, "X-TTS-Engine": "gemini" });
+      return res.end(gem);
+    }
+  } catch (_) { /* no key / quota / error → Edge neural below */ }
+  // 2) Microsoft Edge NEURAL voices (professional quality, keyless).
   //    Pass the raw lang/dialect so Arabic gets the right regional neural voice.
   try {
     const edge = await edgeSynthesize(text, raw || lang);
@@ -2223,7 +2300,7 @@ async function handleTts(req, res) {
       return res.end(edge);
     }
   } catch (_) { /* Edge blocked/unavailable → Google Translate TTS below */ }
-  // 2) FALLBACK: Google Translate TTS (robust, keyless, lower quality).
+  // 3) FALLBACK: Google Translate TTS (robust, keyless, lower quality).
   const slow = body.slow ? "&ttsspeed=0.5" : "";
   const chunks = ttsChunks(text, 190);
   const bufs = [];
