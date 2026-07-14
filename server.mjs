@@ -2095,7 +2095,10 @@ const EDGE_SEC_VER = "1-143.0.3650.75";
 const EDGE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 // Speaking rate for the Edge voice — a touch brisk feels more natural in a call.
+// English is dialed back slightly (+7%): its neural voices already talk fast, so
+// +12% sounded rushed; Arabic and the rest keep the brisker default.
 const EDGE_RATE = process.env.EDGE_TTS_RATE || "+12%";
+const EDGE_RATE_EN = process.env.EDGE_TTS_RATE_EN || "+7%";
 // A natural neural voice per language (male, warm — fits the "معك فِراس" persona).
 const EDGE_VOICES = {
   ar: "ar-SA-HamedNeural", "ar-sa": "ar-SA-HamedNeural", "ar-eg": "ar-EG-ShakirNeural",
@@ -2139,7 +2142,7 @@ function edgeXmlEscape(s) {
   return out;
 }
 /** Synthesize ONE text chunk to an MP3 Buffer via Edge neural TTS. */
-function edgeSynthOne(text, voice, skew) {
+function edgeSynthOne(text, voice, skew, rate) {
   return new Promise((resolve, reject) => {
     const path = "/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=" + EDGE_TRUSTED +
       "&Sec-MS-GEC=" + edgeGec(skew) + "&Sec-MS-GEC-Version=" + EDGE_SEC_VER +
@@ -2169,7 +2172,7 @@ function edgeSynthOne(text, voice, skew) {
       sendText("X-Timestamp:" + edgeDateStr() + "\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
         '{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}');
       const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='" +
-        voice + "'><prosody pitch='+0Hz' rate='" + EDGE_RATE + "' volume='+0%'>" + edgeXmlEscape(text) + "</prosody></voice></speak>";
+        voice + "'><prosody pitch='+0Hz' rate='" + (rate || EDGE_RATE) + "' volume='+0%'>" + edgeXmlEscape(text) + "</prosody></voice></speak>";
       sendText("X-RequestId:" + crypto.randomUUID().replace(/-/g, "") + "\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:" + edgeDateStr() + "Z\r\nPath:ssml\r\n\r\n" + ssml);
       let buf = Buffer.alloc(0); const parts = [];
       socket.on("data", (d) => {
@@ -2201,14 +2204,15 @@ function edgeSynthOne(text, voice, skew) {
 async function edgeSynthesize(text, lang) {
   if (Date.now() < edgeDisabledUntil) throw new Error("edge circuit-open");
   const voice = edgeVoiceFor(lang);
+  const rate = String(lang || "").toLowerCase().startsWith("en") ? EDGE_RATE_EN : EDGE_RATE;
   const chunks = ttsChunks(text, 1600);
   const bufs = [];
   for (const c of chunks) {
     let out;
-    try { out = await edgeSynthOne(c, voice, edgeSkew); }
+    try { out = await edgeSynthOne(c, voice, edgeSkew, rate); }
     catch (e1) {
       // one retry with the (possibly just-learned) skew
-      try { out = await edgeSynthOne(c, voice, edgeSkew); }
+      try { out = await edgeSynthOne(c, voice, edgeSkew, rate); }
       catch (e2) { edgeDisabledUntil = Date.now() + 60_000; throw e2; }
     }
     if (out && out.length) bufs.push(out);
