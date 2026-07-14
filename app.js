@@ -7829,7 +7829,7 @@ function tightenInlineMath(md) {
 /* The item count the user asked for ("10 integrals", "عشرة تكاملات", "ten hard questions") → N, or 0. */
 function parseRequestedItemCount(text) {
   let s = String(text || "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
-  const NOUN = "(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|اسئلة|سؤال|سوال|فقرات|فقر[ةه]|تمارين|تمرين|معادلات?|معادلة|انتيكرل|انتقرل)";
+  const NOUN = "(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكامل(?:ات)?|مسائل|مسأل[ةه]?|أسئلة|اسئلة|سؤال|سوال|فقرات|فقر[ةه]|تمارين|تمرين|معادلات?|معادلة|انتيكرل|انتقرل)";
   // digits with a few adjectives allowed between: "10 challenging novel questions"
   const dm = new RegExp("(\\d{1,4})\\s*(?:[A-Za-z؀-ۿ'’,-]+\\s+){0,6}?" + NOUN, "i").exec(s);
   if (dm) { const n = parseInt(dm[1], 10); if (n >= 2 && n <= 2000) return n; }
@@ -8005,15 +8005,15 @@ async function runFileAgentPipeline(convo, fmt, lang, tierKey, signal, onStage) 
   }
   // BIG-COUNT branch: a request for many items ("1000 integrals/problems/questions…")
   // would truncate in a single author call → generate it in parallel BATCHES instead.
-  const cm = userText.match(/(\d[\d,]{1,5})\s*\+?\s*(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|سؤال|تمارين|تمرين|انتيكرل|انتقرل|معادلات?|معادلة)/i);
+  const cm = userText.match(/(\d[\d,]{1,5})\s*\+?\s*(?:integrals?|problems?|questions?|exercises?|equations?|items?|mcqs?|تكامل(?:ات)?|مسائل|مسأل[ةه]?|أسئلة|سؤال|تمارين|تمرين|انتيكرل|انتقرل|معادلات?|معادلة)/i);
   let bigCount = cm ? parseInt(cm[1].replace(/,/g, ""), 10) : 0;
   // Worksheet of math items? Several phrasings should ALSO trigger the batched generator
   // (otherwise a long worksheet truncates/fails in one author call). Take the LARGEST signal.
-  const isMathWorksheet = /integrals?|تكاملات?|انتيكرل|انتقرل|problems?|مسائل|مسأل[ةه]?|questions?|أسئلة|سؤال|exercises?|تمارين|تمرين|equations?|معادلات?/i.test(userText);
+  const isMathWorksheet = /integrals?|تكامل(?:ات)?|انتيكرل|انتقرل|problems?|مسائل|مسأل[ةه]?|questions?|أسئلة|سؤال|exercises?|تمارين|تمرين|equations?|معادلات?/i.test(userText);
   if (isMathWorksheet) {
     // "300 hard JEE integrals" — count with adjectives between (only a 2+ digit number, so a "3
     // rows" never counts as the item total).
-    const cm2 = userText.match(/(\d{2,5})\s+(?:[A-Za-z؀-ۿ'’.-]+\s+){0,5}(?:integrals?|problems?|questions?|exercises?|equations?|تكاملات?|مسائل|مسأل[ةه]?|أسئلة|تمارين|معادلات?)/i);
+    const cm2 = userText.match(/(\d{2,5})\s+(?:[A-Za-z؀-ۿ'’.-]+\s+){0,5}(?:integrals?|problems?|questions?|exercises?|equations?|تكامل(?:ات)?|مسائل|مسأل[ةه]?|أسئلة|تمارين|معادلات?)/i);
     if (cm2) { const n = parseInt(cm2[1], 10); if (n >= 30) bigCount = Math.max(bigCount, n); }
     // "15 pages" / "15 filled" / "15 sheets" → treat the number as PAGES (~9 items each).
     const pm = userText.match(/(\d{1,3})\s*\+?\s*(?:pages?|sheets?|filled|صفحات?|صفحة|ورق[ةه]?|اوراق|مملوء)/i);
@@ -8028,9 +8028,20 @@ async function runFileAgentPipeline(convo, fmt, lang, tierKey, signal, onStage) 
   // problems). NEVER for an image/file SOURCE (an uploaded exam is a STRUCTURED document on a specific
   // subject — physics, chemistry… — that must be REPLICATED harder in the SAME subject, not turned into a
   // pile of integrals). Those go to the normal author, which respects the source's subject and structure.
-  const hasSource = (srcImages && srcImages.length) || (lastUser && lastUser.fileText);
+  // The MESSAGE ITSELF can also be the source: a pasted exam/worksheet ("…questions… (a)(b)(c)(d) …
+  // Convert to pdf using KaTeX") must be RENDERED as-is, never replaced by generated integrals — that
+  // exact case used to route here (a stray "full/long" word defaulted bigCount to 150) and shipped an
+  // empty one-page PDF when generation failed.
+  const numberedLines = (userText.match(/^\s{0,8}\d{1,3}\s*[.)-]\s+\S/gm) || []).length;
+  const optionLines = (userText.match(/^\s*[-•]?\s*\(?([a-dA-D]|[أ-د])\)\s*\S/gm) || []).length;
+  const convertIntent = /\b(?:convert|render|typeset|turn\s+(?:this|it|the\s+above))\b|حو[ّ]?ل|صيّ?ر\s*(?:هذا|ها)|اطبع\s*(?:هذا|ما\s*سبق)|using\s+katex|بالكاتكس/i.test(userText);
+  const textIsSource = convertIntent || numberedLines >= 4 || optionLines >= 4;
+  const hasSource = (srcImages && srcImages.length) || (lastUser && lastUser.fileText) || textIsSource;
   if (bigCount >= 80 && fmt !== "xlsx" && fmt !== "csv" && fmt !== "pptx" && !hasSource) {
-    return await runBatchedFileDoc(userText, bigCount, fmt, lang, tierKey, signal, onStage);
+    const batched = await runBatchedFileDoc(userText, bigCount, fmt, lang, tierKey, signal, onStage);
+    // null = the batch run produced ZERO problems (engine hiccup) — fall through to the
+    // normal single-shot author instead of shipping an empty document.
+    if (batched != null) return batched;
   }
   // 1) Planner — identity + outline
   onStage("plan");
@@ -8237,6 +8248,9 @@ async function runBatchedFileDoc(userText, count, fmt, lang, tierKey, signal, on
     if (p) probs.push(p);
     if (parts[1] && parts[1].trim()) ans.push(parts[1].trim());
   }
+  // EVERY batch came back empty (engine down / all aborted) → never ship a blank
+  // one-page document; return null so the caller falls back to the normal author.
+  if (!probs.length) return null;
   const intro = lang === "ar"
     ? "مجموعة منسّقة من التكاملات بمستويات متدرّجة — من المبتدئ حتى الأولمبياد. الإجابات النهائية في آخر الكتاب."
     : "A curated collection of integrals spanning every level — from beginner to Olympiad. Final answers are at the end.";
