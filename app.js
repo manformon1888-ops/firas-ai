@@ -7447,10 +7447,59 @@ function codeLooksComplete(code, lang) {
   if (!s) return false;
   const isHtml = lang === "html" || /<!doctype html|<html[\s>]/i.test(s);
   if (isHtml) return /<\/html>\s*$/i.test(s);
-  const opens = (s.match(/\{/g) || []).length, closes = (s.match(/\}/g) || []).length;
+  // Count only STRUCTURAL braces: blank out strings, comments and regex literals on a
+  // scratch copy first, so brace chars living inside text (e.g. a `"{ }"` in a string) don't
+  // skew the balance signal and falsely flag a finished file as incomplete (or vice-versa).
+  const stripped = s
+    .replace(/\/\*[\s\S]*?\*\//g, " ")                                 // block comments
+    .replace(/`(?:\\[\s\S]|[^\\`])*`/g, "``")                          // template literals
+    .replace(/'(?:\\.|[^\\'\n])*'/g, "''")                             // single-quoted strings
+    .replace(/"(?:\\.|[^\\"\n])*"/g, '""')                             // double-quoted strings
+    .replace(/\/\/[^\n]*/g, " ")                                       // line comments
+    .replace(/\/(?![*\/])(?:\\.|\[(?:\\.|[^\]\n])*\]|[^\\\/\n])+\/[gimsuy]*/g, "//"); // regex literals
+  const opens = (stripped.match(/\{/g) || []).length, closes = (stripped.match(/\}/g) || []).length;
   // balanced braces AND ends on a real terminator: a closing bracket/semicolon, OR a full-line
   // comment, OR a block-comment close (a truncated file ends mid-identifier, which none of these are).
   return opens === closes && /(?:[}\);\]>]|\/\/[^\n]*|\*\/)\s*$/.test(s);
+}
+/** Shared stub/placeholder detector. Scans a generated file body and returns an array of
+    { line, snippet, kind } hits — the concrete definition of "placeholder" the other specs
+    call. Pure: no side effects, returns [] when clean. Language-aware so it does not flag
+    legitimate JS/JSX spreads or CSS ellipsis-like syntax. */
+function cwPlaceholderScan(code, lang) {
+  const src = String(code == null ? "" : code);
+  if (!src.trim()) return [];
+  const L = String(lang || "").toLowerCase();
+  const isCss = L === "css" || L === "scss" || L === "less";
+  const isPy = L === "py" || L === "python";
+  const isJsx = /jsx|tsx|react/.test(L);
+  const lines = src.split(/\r?\n/);
+  const hits = [];
+  const add = (i, ln, kind) => { hits.push({ line: i + 1, snippet: String(ln).trim().slice(0, 120), kind: kind }); };
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i], t = ln.trim();
+    if (!t) continue;
+    // TODO / FIXME / XXX markers
+    if (/(?:^|[^A-Za-z0-9_])(?:TODO|FIXME|XXX)\b/.test(ln)) { add(i, ln, "todo"); continue; }
+    // English stub phrases
+    if (/\b(?:not implemented|coming soon|your code here|implement me|lorem ipsum)\b/i.test(ln)) { add(i, ln, "phrase"); continue; }
+    // throw new Error('not implemented') and kin
+    if (/throw\s+new\s+\w*Error\s*\(\s*['"`][^'"`]*implement/i.test(ln)) { add(i, ln, "throw-stub"); continue; }
+    // Python `pass` used as a whole body
+    if (isPy && /^pass\s*(?:#.*)?$/.test(t)) { add(i, ln, "py-pass"); continue; }
+    // bare `...` or `/* ... */` used as a body — skip CSS, and skip real JS/JSX spreads (…props)
+    if (!isCss) {
+      if (/\/\*\s*(?:\.\.\.|…)\s*\*\//.test(ln)) { add(i, ln, "ellipsis"); continue; }
+      if (/^(?:\.\.\.|…)\s*;?$/.test(t) && !isJsx) { add(i, ln, "ellipsis"); continue; }
+    }
+    // empty event/handler bodies: onClick(){}, handleSave = () => {}
+    if (/\b(?:on[A-Z]\w*|handle[A-Z]\w*)\b[^\n]*(?:\)\s*\{\s*\}|=>\s*\{\s*\})/.test(ln)) { add(i, ln, "empty-handler"); continue; }
+    // placeholder image references
+    if (/(?:via\.placeholder|placehold\.(?:co|it|jp)|placeholder\.com|example\.com\/image)/i.test(ln)) { add(i, ln, "placeholder-img"); continue; }
+    if (/\b(?:src|href|url|poster)\s*[=:]\s*['"`(](?:\.\/|\.\.\/)?(?:assets|img|images)\/[^'"`)]*\.(?:png|jpe?g|gif|webp|svg|avif)/i.test(ln)) { add(i, ln, "placeholder-img"); continue; }
+    if (/['"`]\.\/(?:photo|image|placeholder)\.(?:jpg|jpeg|png|webp)/i.test(ln)) { add(i, ln, "placeholder-img"); continue; }
+  }
+  return hits;
 }
 /** Remove firas-code wrappers / stray meta objects the model sometimes leaks INTO a
     code body (they corrupt the file). */
@@ -11555,10 +11604,67 @@ function projPreviewHtml(proj, entryPath) {
     if (isExternal(href)) return m;   // keep CDN stylesheets as-is
     const f = findAsset(href, "css"); return f ? "<style>\n" + f.content + "\n</style>" : m;
   });
-  html = html.replace(/<script\b[^>]*src=["']?([^"'\s>]+\.js)["']?[^>]*>\s*<\/script>/gi, (m, src) => {
+  // ── ES-module support ─────────────────────────────────────────────────────────────────────────
+  // A srcdoc has NO base URL, so cross-file `import './x.js'` and `<script type="module" src>` die
+  // ("Cannot use import statement outside a module" / unresolved specifiers) and modern no-build
+  // React/Vue/Three projects render blank. Fix: register every local .js as a Blob URL, rewrite each
+  // LOCAL import specifier to a stable bare key, and emit an import map that maps those keys → Blob
+  // URLs. Rewrites target STABLE keys (never other files' URLs), so blob creation is cycle-safe and
+  // order-independent. Bare CDN specifiers ("three", "react") are left for the author's import map.
+  const MOD_KEY = (p) => "@firasmod/" + norm(p);
+  const rewriteSpecs = (content) => String(content || "").replace(
+    /(\b(?:import|export)\b[^;'"\n]*?\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"']+)\2/g,
+    (full, lead, q, spec) => {
+      const bare = spec.replace(/[?#].*$/, "");
+      const local = /^\.?\.?\//.test(bare) || /\.m?js$/i.test(bare);   // ./x, ../x, /x, or an explicit .js/.mjs
+      if (isExternal(spec) || !local) return full;                     // CDN / bare / data: → import map or native
+      const tgt = findAsset(bare, "js");
+      if (!tgt || !/\.m?js$/i.test(tgt.path)) return full;             // only rewrite when it resolves to a local module
+      return lead + q + MOD_KEY(tgt.path) + q;
+    }
+  );
+  const wantsModules = /<script\b[^>]*\btype\s*=\s*["']?module\b/i.test(html) || /<script\b[^>]*\btype=["']importmap["']/i.test(html);
+  let modImportMap = null, importMapEmitted = false;
+  if (wantsModules) {
+    const blobUrlByPath = {};
+    const urlForModule = (path) => {
+      const k = norm(path);
+      if (blobUrlByPath[k]) return blobUrlByPath[k];
+      const f = proj.files.find((x) => norm(x.path) === k) || findAsset(path, "js");
+      if (!f || !/\.m?js$/i.test(f.path)) return null;
+      const u = URL.createObjectURL(new Blob([rewriteSpecs(f.content)], { type: "text/javascript" }));
+      blobUrlByPath[norm(f.path)] = u; return u;
+    };
+    proj.files.forEach((f) => { if (/\.m?js$/i.test(f.path)) urlForModule(f.path); });   // register up-front → order-independent
+    modImportMap = {};
+    Object.keys(blobUrlByPath).forEach((k) => { modImportMap[MOD_KEY(k)] = blobUrlByPath[k]; });
+    if (!Object.keys(modImportMap).length) modImportMap = null;
+    // Fold any author-written import map (e.g. "three" → CDN) into ours; rewrite local-file targets to Blob URLs.
+    html = html.replace(/<script\b[^>]*\btype=["']importmap["'][^>]*>([\s\S]*?)<\/script>/gi, (m, body) => {
+      let parsed = {}; try { parsed = JSON.parse(body) || {}; } catch (_) { parsed = {}; }
+      const imports = Object.assign({}, parsed.imports || null);
+      Object.keys(imports).forEach((key) => {
+        const v = imports[key];
+        if (typeof v === "string" && !isExternal(v)) { const lf = findAsset(v, "js"); if (lf && /\.m?js$/i.test(lf.path)) imports[key] = urlForModule(lf.path) || v; }
+      });
+      if (modImportMap) Object.assign(imports, modImportMap);
+      importMapEmitted = true;
+      const out = Object.assign({}, parsed); out.imports = imports;
+      return '<script type="importmap">' + JSON.stringify(out) + "</script>";
+    });
+  }
+  html = html.replace(/<script\b([^>]*?)\bsrc=["']?([^"'\s>]+\.m?js)["']?([^>]*)>\s*<\/script>/gi, (m, pre, src, post) => {
     if (isExternal(src)) return m;    // keep CDN scripts (e.g. Three.js) as-is — never inline a local file over them
-    const f = findAsset(src, "js"); return f ? "<script>\n" + f.content + "\n</script>" : m;
+    const f = findAsset(src, "js"); if (!f) return m;
+    const isModule = /\btype\s*=\s*["']?module\b/i.test(pre + " " + post);
+    return isModule
+      ? '<script type="module">\n' + rewriteSpecs(f.content) + "\n</script>"   // preserve module semantics + resolve local imports
+      : "<script>\n" + f.content + "\n</script>";                              // classic script — inline verbatim as before
   });
+  if (wantsModules && modImportMap && !importMapEmitted) {   // no author import map, but module imports exist → inject one first
+    const tag = '<script type="importmap">' + JSON.stringify({ imports: modImportMap }) + "</script>";
+    html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (h) => h + "\n" + tag) : tag + "\n" + html;
+  }
   return html;
 }
 /* VISUAL AUDIT — the agent's EYES. Renders the app in the sandbox and MEASURES visual defects the
@@ -11691,6 +11797,26 @@ function lintProject(files) {
     files.filter((f) => /\.css$/i.test(f.path)).forEach((cf) => {
       const used = htmlFiles.some((hf) => (hf.content || "").includes(norm(cf.path)) || (hf.content || "").includes(norm(cf.path).split("/").pop()));
       if (htmlFiles.length && !used) issues.push("UNREFERENCED FILE: " + cf.path + " is never linked by any HTML page — add its <link rel=stylesheet> where it belongs.");
+    });
+    // ── mobile-first responsive checks — deterministic, zero model calls, 100% precise ──
+    for (const hf of htmlFiles) {
+      const vm = ((hf.content || "").match(/<meta\b[^>]*name=["']?viewport[^>]*>/i) || [""])[0];
+      if (vm && (!/initial-scale\s*=\s*1/i.test(vm) || /user-scalable\s*=\s*no/i.test(vm) || /maximum-scale\s*=\s*1\b/i.test(vm))) {
+        issues.push('BROKEN VIEWPORT in ' + hf.path + ' — the <meta viewport> lacks initial-scale=1 or disables zoom (user-scalable=no / maximum-scale=1), which breaks pinch-zoom and phone scaling. Set content="width=device-width, initial-scale=1" and allow the user to zoom.');
+      }
+    }
+    const styleContent = files.filter((f) => /\.css$/i.test(f.path)).map((f) => f.content || "").join("\n") + "\n" +
+      htmlFiles.map((hf) => [...(hf.content || "").matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1] || "").join("\n")).join("\n");
+    if (styleContent.trim() && !/@media/i.test(styleContent)) {
+      issues.push('NO RESPONSIVE BREAKPOINTS — the layout never adapts to phone width. Add at least one @media (max-width: 640px) query that stacks multi-column layouts into a single column and shrinks type/spacing.');
+    }
+    [...styleContent.matchAll(/([^{}]*)\{([^{}]*)\}/g)].forEach((rule) => {
+      const sel = rule[1] || "", body = rule[2] || "";
+      if (/\b(?:img|canvas|svg|video|picture)\b/i.test(sel)) return;
+      const wm = body.match(/(?:^|[^-])width\s*:\s*(\d{3,})px/i);
+      if (wm && parseInt(wm[1], 10) > 600) {
+        issues.push('FIXED px WIDTH (' + wm[1] + 'px) on "' + sel.trim().replace(/\s+/g, " ").slice(0, 44) + '" will overflow a 380px phone — use max-width/% or clamp() instead of a hard px width.');
+      }
     });
   } catch (_) {}
   return issues.slice(0, 12);
@@ -11999,6 +12125,32 @@ async function agentCall(messages, tierKey, signal) {
   }
   throw (lastErr || new Error("agent call failed"));
 }
+/* Streaming twin of agentCall: same 3-attempt backoff + 180s watchdog + engine-busy resilience,
+   but drives streamAgentText so the caller sees live tokens via onDelta(fullSoFar). A mid-file
+   transport blip aborts+retries; on each retry we fire onDelta('') FIRST so the UI drops the
+   corrupted partial buffer before the fresh stream begins. Returns the full text. */
+async function agentCallStream(messages, tierKey, signal, onDelta) {
+  let lastErr = null;
+  for (let a = 0; a < 3; a++) {
+    if (a > 0 && onDelta) { try { onDelta(""); } catch (_) {} }   // retry → reset the on-screen partial
+    const ac = new AbortController();
+    const onAbort = () => { try { ac.abort(); } catch (_) {} };
+    if (signal) { signal.addEventListener("abort", onAbort, { once: true }); if (signal.aborted) onAbort(); }
+    const to = setTimeout(() => { try { ac.abort("agent-timeout"); } catch (_) {} }, 180000); // 3-min hard cap/call
+    try {
+      const out = await streamAgentText(messages, tierKey, ac.signal, onDelta);
+      if (out && out.trim()) return out.trim();
+    } catch (e) {
+      lastErr = e;
+      if (signal && signal.aborted) throw e;   // real user Stop → abort the run; watchdog abort → retry
+    } finally {
+      clearTimeout(to);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    }
+    await new Promise((r) => setTimeout(r, 900 * (a + 1)));
+  }
+  throw (lastErr || new Error("agent call failed"));
+}
 async function agentWebSearch(q) {
   try {
     const r = await fetch("/api/search?q=" + encodeURIComponent(String(q).slice(0, 280)), { credentials: "same-origin" });
@@ -12123,6 +12275,7 @@ const DEPTH_MANDATE = " DEPTH MANDATE: this step must be genuinely thorough and 
    local images, text drowning in busy photos, sideways scroll, and colliding absolute elements. */
 const VISUAL_POLICY =
   " VISUAL POLICY (hard rules): IMAGES — the generated folder has NO image assets, so NEVER reference local files (assets/…, img/…, ./photo.jpg). Allowed only: (1) inline SVG you draw yourself, (2) CSS gradients/patterns, (3) https://picsum.photos/seed/<word>/<w>/<h> for photos, (4) Font Awesome icons via its CDN. Every <img> gets width+height (or aspect-ratio), object-fit:cover, background-color fallback, loading=\"lazy\", and onerror=\"this.style.display='none'\". CONTRAST — text NEVER sits directly on a photo: put it on a solid/gradient panel or add a dark overlay layer (rgba(0,0,0,.55)+) under white text. LAYOUT — avoid absolute positioning for content flow (flex/grid only; absolute only for tiny decorations with pointer-events:none), nothing may overflow the viewport horizontally (max-width:100%, overflow-x controlled), test mentally at 1280px AND 380px widths, and in RTL. SPACING — generous consistent padding; separate sections clearly; never let two text blocks touch or overlap." +
+  " SEED DATA IS MANDATORY AND COUNTED — any list/grid/table/bank ships hard-coded with AT LEAST 8–12 realistic, on-topic rows (believable names, prices, dates, questions); never an empty array, never 1–3 sample stubs, never data fetched from a URL that does not exist." +
   " VISUAL EXCELLENCE — the output must look LEGENDARY (اسطوري): the work of a top studio, not a generic AI page. This is a HARD bar, not a nicety. Build on a real design system, defined ONCE in :root and reused everywhere:" +
   " (1) DESIGN TOKENS — declare CSS custom properties in :root and use them for EVERY color/space/radius/shadow (never scatter raw hex or magic px). Colors: one branded accent + a neutral ramp (e.g. --bg, --surface, --text, --muted, --border) + accent tints; pick a real palette with intent (a mood: calm/luxury/energetic/editorial) — NEVER the default #007bff-on-white bootstrap look, NEVER pure #000 on pure #fff. Contrast every text/bg pair ≥ WCAG AA (4.5:1 body, 3:1 large/UI)." +
   " (2) TYPOGRAPHY — a clear modular scale (~1.25 ratio: e.g. 13/16/20/25/31/39/49px) with big confident headings and calm body; body line-height 1.5–1.7, headings 1.05–1.2; measure capped ~60–75ch for readable columns; deliberate font pairing loaded from Google Fonts CDN (a characterful display face for headings + a clean sans for body — e.g. a serif/grotesk display over Inter/system-ui); tighten heading letter-spacing slightly, set font-weight contrast (700–800 headings vs 400 body). Fluid sizing via clamp() for hero/section titles." +
@@ -12130,24 +12283,43 @@ const VISUAL_POLICY =
   " (4) DEPTH & SURFACE — layered, not flat: soft LAYERED shadows (two-stack, e.g. 0 1px 2px + 0 8px 24px rgba with low alpha), subtle borders (1px hairline in --border), gentle radii (a consistent --radius ~10–16px, pills for chips/buttons), and tasteful use of gradient/blur/backdrop for hero and glass surfaces. Cards lift on hover. Nothing looks like a bare rectangle." +
   " (5) MICRO-MOTION — purposeful, GPU-friendly transitions on transform/opacity only (never animate layout props): hover/focus lifts (~120–200ms ease/cubic-bezier), staggered entrance reveals via IntersectionObserver, smooth-scroll anchors, and a tasteful hero/loading flourish. Motion is subtle and fast, never gratuitous. ALWAYS wrap non-essential motion in @media (prefers-reduced-motion: reduce){…} that disables it." +
   " (6) DARK & LIGHT — support BOTH via tokens: @media (prefers-color-scheme: dark) overrides the :root color vars with a purpose-built dark palette (dark is NOT just inverted light — raise surface, lower saturation, keep AA contrast). Every component must read correctly in both." +
-  " (7) RESPONSIVE — mobile-first, fluid: real breakpoints (~640/768/1024/1280), grids collapse gracefully (auto-fit/minmax over fixed columns), touch targets ≥ 44px, no fixed pixel widths that break at 380px. clamp()/min()/max() over hard media-query jumps where natural." +
-  " (8) ACCESSIBILITY & POLISH — semantic HTML5 landmarks (header/nav/main/section/footer), a clearly VISIBLE :focus-visible ring on every interactive element, ARIA labels on icon-only buttons, alt text on meaningful images, form inputs with <label> + inline validation states; :hover/:focus/:active/:disabled all styled; empty/loading/error states designed, not blank. The first screen (hero) must be striking and communicate the purpose instantly." +
+  " (7) RESPONSIVE — MOBILE-FIRST IS MANDATORY (this WILL be previewed and audited at 380px): (a) <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> is REQUIRED and must NOT disable zoom (no user-scalable=no / maximum-scale=1); (b) write BASE styles for the smallest screen first, then layer enhancements ONLY inside min-width media queries (~640/768/1024/1280); (c) NEVER a fixed px width on any layout container — use %, max-width, min()/clamp(); (d) grids use repeat(auto-fit,minmax(…,1fr)) and collapse to ONE column under ~640px; (e) any data table or wide element must reflow to stacked cards OR live inside an overflow-x:auto wrapper so the PAGE itself never scrolls sideways; (f) images/media get max-width:100%; height:auto; (g) tap targets ≥ 44px, and primary nav becomes a working hamburger/toggle under ~768px. Prefer clamp()/min()/max() over hard media-query jumps where natural. The page MUST show ZERO horizontal scroll at 360px." +
+  " (8) ACCESSIBILITY CONTRACT (hard rules, this WILL be checked — every clause is enforceable, not aspirational): " +
+  "(8.1) SEMANTIC LANDMARKS — use real header/nav/main/footer landmarks with EXACTLY ONE <main> and EXACTLY ONE <h1> on the page, and a logical heading order that never skips a level (h1→h2→h3, never h1→h3). Sections use <section>/<article> with an accessible name, not bare <div>s. " +
+  "(8.2) DOCUMENT META — <html> carries lang AND dir set to the content language (e.g. lang=\"ar\" dir=\"rtl\" for Arabic, lang=\"en\" dir=\"ltr\" for English), plus a real, descriptive <title>. " +
+  "(8.3) VISIBLE FOCUS — a clearly VISIBLE :focus-visible ring on EVERY interactive element (links, buttons, inputs, custom widgets). NEVER outline:none without an equally visible replacement (ring/box-shadow). " +
+  "(8.4) NAMES ON CONTROLS — every icon-only button/link gets an aria-label describing its action; every meaningful <img> gets a real descriptive alt; every decorative image gets alt=\"\" (empty). " +
+  "(8.5) NO CLICK-ONLY WIDGETS — any custom/clickable non-native control (a div/span acting as a button, tab, toggle, accordion, dropdown) MUST have the correct role, tabindex=\"0\", AND an Enter/Space keydown handler that fires the same action as click. No control may be operable by mouse only. " +
+  "(8.6) LIVE REGIONS — dynamic regions that update in place (score, cart/badge count, live search results, form success/error messages, toasts) get aria-live=\"polite\" (or role=\"status\"/role=\"alert\") so screen readers announce the change. " +
+  "(8.7) FORMS — every input/select/textarea is tied to a real <label for> (or an aria-label when no visible label); on failed validation set aria-invalid=\"true\" AND show a text error message linked via aria-describedby — never color-only error signalling. " +
+  "(8.8) SKIP LINK — a visible-on-focus 'skip to main content' link is the first focusable element, before the nav, targeting the <main> id. " +
+  " POLISH — :hover/:focus/:active/:disabled all styled; empty/loading/error states designed, not blank; the first screen (hero) must be striking and communicate the purpose instantly." +
   " STYLE COHERENCE (private self-check before output): pick a strong direction and commit to it; every color, radius, shadow, font-size and gap traces back to the tokens above; no orphan raw values, no default-browser look, no two competing accent colors. If a screen looks generic or flat, redesign it until it looks intentional and premium.";
-const SIZE_MANDATE_WEB = " NO SKELETONS: deliver a LARGE, COMPLETE, launch-ready implementation — err on the side of MORE (many hundreds to thousands of lines when the feature set warrants it; long files are welcome, never truncate). Every section fully realized with REAL content (never lorem/placeholder), full responsive design, refined spacing/typography, hover/focus states, smooth animations and micro-interactions, and real working logic with edge cases and errors handled. Do not stop early to 'keep it short'. The file MUST be syntactically valid and run correctly as-is — mentally execute it before finishing — and output complete, start to end, never truncated. If you ever near an output limit, keep emitting RAW code only — never write 'rest omitted', a summary, or any closing prose; a cut-off tail is auto-continued from your exact last character, so a mid-token stop is safe but a placeholder is a defect.";
-const SIZE_MANDATE_CODE = " NO SKELETONS and NO STUBS: every function fully implemented — never `pass`, `TODO`, `...`, `throw new Error('not implemented')`, or '// rest of logic here'. Deliver a LARGE, COMPLETE, runnable file (many hundreds to thousands of lines when the task warrants — long files are welcome, never truncate). Handle edge cases and errors, include realistic sample/seed data where needed, and make it run end-to-end as-is. Output complete, start to end, never truncated. If you ever near an output limit, keep emitting RAW code only — never write 'rest omitted', a summary, or any closing prose; a cut-off tail is auto-continued from your exact last character, so a mid-token stop is safe but a placeholder is a defect.";
+const SIZE_MANDATE_WEB = " NO SKELETONS: deliver a LARGE, COMPLETE, launch-ready implementation — err on the side of MORE (many hundreds to thousands of lines when the feature set warrants it; long files are welcome, never truncate). Every section fully realized with REAL content (never lorem/placeholder), full responsive design, refined spacing/typography, hover/focus states, smooth animations and micro-interactions, and real working logic with edge cases and errors handled. Do not stop early to 'keep it short'. The file MUST be syntactically valid and run correctly as-is — mentally execute it before finishing — and output complete, start to end, never truncated. If you ever near an output limit, keep emitting RAW code only — never write 'rest omitted', a summary, or any closing prose; a cut-off tail is auto-continued from your exact last character, so a mid-token stop is safe but a placeholder is a defect." +
+  " FINAL SELF-SCAN (mandatory before you output the last line): search your own file for each of these exact tokens — TODO, FIXME, XXX, `...` as a body, `pass` as a whole body, throw new Error(\"not implemented\"), \"coming soon\", \"your code here\", \"rest of\", \"lorem\", \"placeholder\". If ANY appears, rewrite that section with the real implementation. A single one of these tokens in the delivered file is a hard defect and a failed task.";
+const SIZE_MANDATE_CODE = " NO SKELETONS and NO STUBS: every function fully implemented — never `pass`, `TODO`, `...`, `throw new Error('not implemented')`, or '// rest of logic here'. Deliver a LARGE, COMPLETE, runnable file (many hundreds to thousands of lines when the task warrants — long files are welcome, never truncate). Handle edge cases and errors, include realistic sample/seed data where needed, and make it run end-to-end as-is. Output complete, start to end, never truncated. If you ever near an output limit, keep emitting RAW code only — never write 'rest omitted', a summary, or any closing prose; a cut-off tail is auto-continued from your exact last character, so a mid-token stop is safe but a placeholder is a defect." +
+  " FINAL SELF-SCAN (mandatory before you output the last line): search your own file for each of these exact tokens — TODO, FIXME, XXX, `...` as a body, `pass` as a whole body, throw new Error(\"not implemented\"), \"coming soon\", \"your code here\", \"rest of\", \"lorem\", \"placeholder\". If ANY appears, rewrite that section with the real implementation. A single one of these tokens in the delivered file is a hard defect and a failed task.";
 /* Coding brain: real working logic + smart library use — appended to every code builder. */
 const TECH_BRAIN =
   " REAL LOGIC (hard rule): every interactive feature must actually WORK end-to-end — every button/menu/form is wired to a real handler that visibly does its job; search/filter/sort really filter; a cart/favorites/todo really adds, updates totals, and PERSISTS via localStorage; forms validate and give feedback. A control that does nothing is a defect." +
   " LIBRARIES: when the task names or clearly benefits from a library/framework (React, Vue, Tailwind, Bootstrap, Chart.js, Three.js, Leaflet, anime.js…), load it correctly from its official CDN (browser/UMD build, pinned version, correct init for no-build usage) — otherwise clean vanilla JS. Never import npm-style in browser files." +
-  " NON-WEB STACKS (Python/Node/bots/APIs): produce a proper runnable project — correct entry point, clean module structure, requirements.txt / package.json with real versions, and a README.md with exact run commands.";
+  " TAILWIND (hard rule — the #1 silent framework failure): this is a NO-BUILD page, so Tailwind works ONLY via the Play CDN. Put exactly <script src=\"https://cdn.tailwindcss.com\"></script> in <head>, write utilities directly in class=\"…\" attributes, and customize ONLY through an inline `tailwind.config = {…}` global object (a <script> after the CDN tag). NEVER use the `@tailwind base/components/utilities` directives, NEVER `@apply`/`@layer`/`@variants`, NEVER a local prebuilt tailwind.css, and NEVER a postcss.config or tailwind.config.js file — those all require a PostCSS/CLI build and render NOTHING through a CDN, shipping a completely UNSTYLED page with NO error. If you emit any of those directives the page is broken; use the Play-CDN form only." +
+  " NON-WEB STACKS (Python/Node/bots/APIs): produce a proper runnable project that installs and boots first try —" +
+  " (a) DEPENDENCIES pinned for real: package.json MUST declare real PINNED versions, an `engines` field, and both a `start` and a `dev` script (or a requirements.txt with pinned `==` versions + the exact Python version for Python projects). No phantom or unversioned deps." +
+  " (b) LAYERED STRUCTURE, not one god-file: split into cohesive modules — routes/controllers/services/models/middleware (Express/Fastify) or blueprints/ + services + models (Flask/FastAPI) — each with a single responsibility; the entry point only wires things up." +
+  " (c) CONFIG via a dedicated config module that reads process.env / os.environ (port, db url, secrets, log level) with sane defaults, plus a committed `.env.example` listing every variable — NEVER hard-code secrets, ports, or connection strings inline." +
+  " (d) VALIDATION + ONE error path: every route validates its inputs at the boundary and rejects bad requests with proper status codes; all errors flow through ONE centralized error-handling middleware/handler that returns a consistent JSON error shape and the right HTTP status — never a raw stack trace or a naked 500." +
+  " (e) OPERATIONAL ESSENTIALS: expose a `GET /health` endpoint, set up structured logging (not stray prints), configure CORS and body/JSON parsing, and handle graceful shutdown on SIGINT/SIGTERM (close the server + drain connections)." +
+  " (f) PERSISTENCE for real: if the task implies stored data, use a real store or a seeded in-memory/SQLite module with an actual data-access layer — never a bare global array pretending to be a database." +
+  " (g) README.md that a stranger can follow: exact install and run commands, the env vars to set, and a copy-paste curl (or equivalent) example request AND response for EVERY endpoint — so the server is `install && start`-able and testable immediately.";
 /* Engineering brain: raises RAW CODE POWER — real architecture, real algorithms, real error handling —
    appended to serious NON-GAME code (backend/CLI/library/API/bot/data). Additive; games keep their own
    canvas contract, front-end visuals keep VISUAL_POLICY. This is the depth mandate for logic-heavy code. */
 const ENGINEERING_BRAIN =
   " ENGINEERING DEPTH (hard bar — the code must read as written by a senior engineer, production-grade, not a toy sketch):" +
-  " (1) ARCHITECTURE — separate concerns into cohesive layers/modules with a single clear responsibility each (e.g. entry/CLI ↔ core domain logic ↔ data/IO ↔ config); no god-function that does everything, no business logic buried in the entry point. Name a real data model (classes/types/records with typed fields), and pass dependencies in rather than reaching for globals. Choose the RIGHT data structure and algorithm for the job and keep hot paths efficient (no accidental O(n²) over large inputs, no repeated re-computation you can cache) — state the complexity in a comment where it matters." +
+  " (1) ARCHITECTURE — separate concerns into cohesive layers/modules with a single clear responsibility each (e.g. entry/CLI ↔ core domain logic ↔ data/IO ↔ config); no god-function that does everything, no business logic buried in the entry point. Name a real data model (classes/types/records with typed fields), and pass dependencies in rather than reaching for globals. Choose the RIGHT data structure and algorithm for the job and keep hot paths efficient with the RIGHT structure: use a Map/Set for membership and keyed lookups (O(1)) instead of Array.includes/find scans inside a loop (which makes the loop O(n²)); hoist invariant computation and compiled regexes OUT of loops; avoid nested passes over large collections — precompute an index once; and stream/paginate large IO rather than loading an entire file/dataset into memory. State the complexity of any non-trivial hot path in a comment." +
   " (2) REAL LOGIC, NEVER FAKED — implement the actual algorithm end-to-end (parsing, math, state machine, traversal, scheduling — whatever the task truly needs), never a hard-coded lookup that only fits the sample, never a random/stubbed result standing in for a computation. Every branch and edge case is handled: empty input, missing/duplicate keys, boundary values, overflow, off-by-one, concurrent access. If the task implies persistence, actually read/write the store; if it implies a protocol/format, honour it exactly." +
-  " (3) ERROR HANDLING AS A STRATEGY — validate inputs at the boundary and fail with clear, specific, typed errors/exceptions (never a bare `except: pass`, never swallow-and-continue that hides bugs); use structured logging over stray prints; make external calls (network/file/db) resilient — timeouts, a bounded retry with backoff where it makes sense, and graceful degradation on failure. Never leave a resource unclosed (use context managers / try-finally / defer)." +
+  " (3) ERROR HANDLING AS A STRATEGY — validate inputs at the boundary and fail with clear, specific, typed errors/exceptions (never a bare `except: pass`, never swallow-and-continue that hides bugs); use structured logging over stray prints; make external calls (network/file/db) resilient — timeouts, a bounded retry with backoff where it makes sense, and graceful degradation on failure. Never leave a resource unclosed (use context managers / try-finally / defer). SECURITY — parameterize every SQL/DB query (bind params, never string-concatenate input); never pass user data to a shell/exec/os.system as a concatenated string (use arg arrays / safe APIs); load secrets, DB URLs and API keys from environment/config, never hardcoded in source or committed files; validate and size-limit all external input at the boundary before use." +
   " (4) INTERFACES & CONTRACTS — public functions have precise signatures with type hints/annotations and a one-line docstring stating what they do, their inputs, and what they return or raise; invariants enforced with guard clauses or assertions. Keep functions small and pure where possible so they are unit-testable." +
   " (5) CORRECTNESS & TESTS — include a minimal but REAL set of tests or an executable `if __name__=='__main__'` / demo `main()` that exercises the core path AND at least one edge case with realistic seed data, and prints/asserts the expected result so the reviewer can SEE it works. Configuration (paths, keys, tunables) lives in named constants or a config block at the top, never magic numbers scattered inline." +
   " (6) SELF-REVIEW — before output, mentally run the program on the sample AND on an adversarial input; trace every function is defined before use, every import is real and used, and the whole thing executes start-to-finish with no NameError/undefined symbol. A control that does nothing, a function that returns a placeholder, or a path that crashes on empty input is a DEFECT to fix before finishing.";
@@ -13250,7 +13422,7 @@ function cwLineDiff(aStr, bStr) {
   return out;
 }
 /* Console capture: injected into the preview so its logs/errors stream into the console pane. */
-const CW_CONSOLE_HOOK = "<script>(function(){function s(t,a){try{parent.postMessage({__fcw:1,t:t,m:Array.prototype.slice.call(a).map(function(x){try{return typeof x===\"object\"?JSON.stringify(x).slice(0,300):String(x)}catch(e){return String(x)}}).join(\" \").slice(0,600)},\"*\")}catch(e){}}[\"log\",\"warn\",\"error\",\"info\"].forEach(function(k){var o=console[k];console[k]=function(){s(k,arguments);try{o.apply(console,arguments)}catch(e){}}});window.addEventListener(\"error\",function(e){s(\"error\",[e.message+\" @ line \"+e.lineno])});window.addEventListener(\"unhandledrejection\",function(e){s(\"error\",[\"Promise: \"+e.reason])})})();</" + "script>";
+const CW_CONSOLE_HOOK = "<script>(function(){function s(t,a){try{parent.postMessage({__fcw:1,t:t,m:Array.prototype.slice.call(a).map(function(x){try{return typeof x===\"object\"?JSON.stringify(x).slice(0,300):String(x)}catch(e){return String(x)}}).join(\" \").slice(0,600)},\"*\")}catch(e){}}[\"log\",\"warn\",\"error\",\"info\"].forEach(function(k){var o=console[k];console[k]=function(){s(k,arguments);try{o.apply(console,arguments)}catch(e){}}});window.addEventListener(\"error\",function(e){try{parent.postMessage({__fcw:1,t:\"error\",m:e.message+\" @ line \"+e.lineno,file:e.filename||\"\",line:e.lineno||0,col:e.colno||0,stack:(e.error&&e.error.stack||\"\").slice(0,1200)},\"*\")}catch(_e){}});window.addEventListener(\"unhandledrejection\",function(e){try{var r=e.reason;parent.postMessage({__fcw:1,t:\"error\",m:\"Promise: \"+((r&&r.message)||r),file:(r&&r.fileName)||\"\",line:(r&&r.lineNumber)||0,col:(r&&r.columnNumber)||0,stack:(r&&r.stack||\"\").slice(0,1200)},\"*\")}catch(_e){}})})();</" + "script>";
 let _cwMsgWired = false;
 function cwWireConsoleListener() {
   if (_cwMsgWired) return;
@@ -13266,6 +13438,12 @@ function cwWireConsoleListener() {
     pane.appendChild(row);
     pane.scrollTop = pane.scrollHeight;
     if (d.t === "error") {
+      // Persist live runtime errors into a structured buffer so the fix loop / cwAskAI can read the ACTUAL
+      // error before editing (the Claude Code move) — not just flash it once in the console tab.
+      if (cwState.liveErrorsProj !== state.activeId) { cwState.liveErrors = []; cwState.liveErrorsProj = state.activeId; }
+      const buf = (cwState.liveErrors = cwState.liveErrors || []);
+      const msg = String(d.m || "").slice(0, 600);
+      if (msg && buf[buf.length - 1] !== msg && buf.indexOf(msg) === -1) { buf.push(msg); if (buf.length > 30) buf.shift(); }
       const tab = document.querySelector("#codeWorkspace .cw-tab[data-tab=console]");
       if (tab) tab.classList.add("has-errors");
     }
@@ -13317,27 +13495,71 @@ function renderCodeHome(root) {
         '<div class="cw-home__grid">' + recentHtml + "</div>" +
       "</div>" +
     "</div></div>";
-  const nameOf = () => root.querySelector(".cw-home__name").value.trim() || (ar ? "مشروع جديد" : "new-project");
-  const openBlank = () => { createCodeProject(nameOf(), CW_BLANK_FILES.map((f) => ({ path: f.path, content: f.content }))); cwState.file = 0; cwState.renderedChat = ""; renderAll(); };
+  function cwDeriveName(desc, ar) {
+    let s = String(desc || "").trim();
+    if (!s) return "";
+    s = s.split(/[.!?،\n]/)[0].trim();                                   // first clause only
+    const strip = (re) => { const t = s.replace(re, "").trim(); if (t) s = t; };   // drop only if something remains
+    strip(/^(?:please\s+|kindly\s+|من\s+فضلك\s+)/i);                     // polite lead-ins
+    strip(/^(?:build|create|make|design|develop|generate|code|write|a|an|the)\s+/i);
+    strip(/^(?:ابنِ|ابن|اصنع|أنشئ|انشئ|صمّم|صمم|اعمل|أريد|اريد|اعطني|أعطني)\s+/);
+    strip(/^(?:لي|لنا|لِي)\s+/);
+    strip(/^(?:موقع|تطبيق|صفحة|برنامج)\s+(?:لـ|ل|عن|يقوم\s+بـ)?\s*/);    // redundant "website/app for…"
+    s = s.replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    if (s.length > 48) {                                                 // cap on a word boundary
+      let cut = s.slice(0, 48);
+      const sp = cut.lastIndexOf(" ");
+      if (sp > 20) cut = cut.slice(0, sp);
+      s = cut.trim();
+    }
+    return s;
+  }
+  const nameOf = () => {
+    const el = root.querySelector(".cw-home__name");
+    const manual = ((el && el.value) || "").trim();
+    if (manual) return manual;
+    const d = root.querySelector(".cw-home__desc");
+    const derived = cwDeriveName(d ? d.value : "", ar);
+    return derived || (ar ? "مشروع جديد" : "new-project");
+  };
+  const openBlank = () => {
+    // Name the blank scaffold from the name field if given, else derive a title from the LIVE description
+    // (read at click time, never a stale capture) so a described-then-blank project still lands titled.
+    const typedName = root.querySelector(".cw-home__name").value.trim();
+    const liveDesc  = (root.querySelector(".cw-home__desc").value || "").trim();
+    const blankName = typedName || (liveDesc ? titleFrom(liveDesc) : (ar ? "مشروع جديد" : "new-project"));
+    createCodeProject(blankName, CW_BLANK_FILES.map((f) => ({ path: f.path, content: f.content }))); cwState.file = 0; cwState.renderedChat = ""; renderAll();
+  };
   root.querySelector(".cw-home__blank").addEventListener("click", openBlank);
-  root.querySelector(".cw-home__create").addEventListener("click", async () => {
+  const createBtn = root.querySelector(".cw-home__create");
+  const cwSetBuilding = () => { createBtn.disabled = true; createBtn.classList.add("is-building"); createBtn.classList.remove("is-retry"); createBtn.innerHTML = '<span class="cw-home__spin"></span>' + (ar ? "يبني مشروعك…" : "Building…"); };
+  const cwSetRetry = () => { createBtn.disabled = false; createBtn.classList.remove("is-building"); createBtn.classList.add("is-retry"); createBtn.innerHTML = "↻ " + (ar ? "أعد المحاولة" : "Retry"); };
+  const cwRunBuild = async () => {
     const desc = (root.querySelector(".cw-home__desc").value || "").trim();
     if (!desc) { openBlank(); return; }                       // no description → just open a blank project directly
-    const btn = root.querySelector(".cw-home__create");
-    if (btn.disabled) return;
-    btn.disabled = true; btn.classList.add("is-building");
-    btn.innerHTML = '<span class="cw-home__spin"></span>' + (ar ? "يبني مشروعك…" : "Building…");
+    if (createBtn.disabled) return;
+    cwSetBuilding();
     try {
       const files = await cwGenerateProject(nameOf(), desc);
-      if (!files || !files.length) { showToast(ar ? "تعذّر الإنشاء — جرّب وصفًا أوضح" : "Couldn't build it — try a clearer description"); btn.disabled = false; btn.classList.remove("is-building"); btn.innerHTML = (ar ? "ابنِ بالذكاء" : "Build with AI") + " ✨"; return; }
+      if (!files || !files.length) {
+        // Returned but produced nothing usable. This is NOT proof the prompt was bad — the engine
+        // can hiccup and hand back an empty/unparseable result — so stay neutral and offer a real
+        // Retry. The description is preserved in the textarea, so one click re-runs it verbatim.
+        showToast(ar ? "لم يكتمل الإنشاء — أعد المحاولة، أو أضِف تفاصيل للوصف" : "Build didn't complete — retry, or add more detail to your description");
+        cwSetRetry();
+        return;
+      }
       createCodeProject(nameOf(), files);
       cwState.file = 0; cwState.renderedChat = "";
       renderAll();
     } catch (_) {
-      showToast(ar ? "تعذّر الاتصال بمحرّك الذكاء" : "AI engine unavailable — try again");
-      btn.disabled = false; btn.classList.remove("is-building"); btn.innerHTML = (ar ? "ابنِ بالذكاء" : "Build with AI") + " ✨";
+      // cwGenerateProject threw → network/engine failure, honestly the engine's fault, not the prompt's.
+      showToast(ar ? "تعذّر الاتصال بمحرّك الذكاء — أعد المحاولة" : "AI engine unavailable — retry");
+      cwSetRetry();
     }
-  });
+  };
+  createBtn.addEventListener("click", cwRunBuild);
   root.querySelectorAll(".cw-proj").forEach((b) => b.addEventListener("click", (e) => {
     const id = b.getAttribute("data-id");
     if (e.target.closest(".cw-proj__del")) {
@@ -13370,6 +13592,9 @@ function cwParseFileBlocks(text, existing) {
     const p = m[1].trim().replace(/^\/+/, "").slice(0, 120);
     if (!p) continue;
     const body = m[2].replace(/\n$/, "");
+    const blank = body.trim() === "";
+    const prior = existing && existing.find((f) => f.path === p);
+    if (blank && prior && String(prior.content).trim()) continue;
     if (seen.has(p)) files[seen.get(p)].content = body;
     else { seen.set(p, files.length); files.push({ path: p, content: body }); }
     lastEnd = re.lastIndex; lastPath = p;
@@ -13382,16 +13607,76 @@ function cwParseFileBlocks(text, existing) {
     if ((after.match(/```/g) || []).length === 0) { const p = om[1].trim().replace(/^\/+/, "").slice(0, 120); if (p) { open = { path: p, content: after }; lastPath = p; } }
   }
   const dels = existing ? [...s.matchAll(/^DELETE:\s*([^\s`]+)\s*$/gm)].map((x) => x[1]).filter((p) => existing.some((f) => f.path === p)) : [];
-  return { files, changes: files.map((f) => ({ path: f.path, content: f.content })), dels, open, tailPath: lastPath };
+  const changes = files.map((f) => ({ path: f.path, content: f.content }));
+  // RENAME / MOVE — when a file's path changes, every cross-file reference to the OLD path (<script src>, <link href>,
+  // ES `import ... from`, and fetch()/string-literal paths) is rewritten to the NEW path so the preview keeps resolving;
+  // a dangling ref after a rename is exactly what breaks the app today. We ONLY ever rewrite references to a path that is
+  // being DELETED, so this can never clobber a still-valid reference. Old paths are deleted only once refs are patched.
+  const cwBase = (p) => String(p).split("/").pop();
+  const renames = [];
+  if (existing) {
+    // (a) explicit directive: `RENAME: oldPath -> newPath`
+    [...s.matchAll(/^RENAME:\s*([^\s`]+)\s*->\s*([^\s`]+)\s*$/gm)].forEach((x) => {
+      const from = x[1].trim().replace(/^\/+/, ""), to = x[2].trim().replace(/^\/+/, "");
+      if (!from || !to || from === to || !existing.some((f) => f.path === from)) return;
+      if (renames.some((r) => r.from === from)) return;
+      renames.push({ from, to });
+      if (!dels.includes(from)) dels.push(from);
+      // carry the (possibly edited) old content to the new path if the model didn't output it directly
+      if (!changes.some((c) => c.path === to)) {
+        const edited = changes.find((c) => c.path === from);
+        const src = edited ? edited.content : (existing.find((f) => f.path === from) || {}).content;
+        if (src != null) changes.push({ path: to, content: String(src) });
+      }
+      // drop any lingering edit that still targets the old (now-deleted) path
+      for (let i = changes.length - 1; i >= 0; i--) if (changes[i].path === from) changes.splice(i, 1);
+    });
+    // (b) inferred move: a DELETE'd file and a freshly-added file that share a basename → treat it as a rename
+    dels.forEach((from) => {
+      if (renames.some((r) => r.from === from)) return;
+      const cand = changes.find((c) => c.path !== from && cwBase(c.path) === cwBase(from) && !existing.some((f) => f.path === c.path));
+      if (cand) renames.push({ from, to: cand.path });
+    });
+  }
+  if (renames.length) {
+    const surviving = existing.map((f) => ({ path: f.path, content: String(f.content || "") }));
+    changes.forEach((c) => { const i = surviving.findIndex((u) => u.path === c.path); if (i >= 0) surviving[i].content = c.content; else surviving.push({ path: c.path, content: c.content }); });
+    renames.forEach((r) => {
+      const oldBase = cwBase(r.from), newBase = cwBase(r.to), escB = oldBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      surviving.forEach((u) => {
+        if (u.path === r.from || dels.includes(u.path)) return;
+        let nw = String(u.content == null ? "" : u.content);
+        [r.from, "./" + r.from, "/" + r.from].forEach((v) => { ['"', "'", "`"].forEach((q) => { nw = nw.split(q + v + q).join(q + r.to + q); }); });
+        if (oldBase !== r.from) nw = nw.replace(new RegExp("([\"'`(/])(?:\\./)?" + escB + "([\"'`)])", "g"), "$1" + newBase + "$2");
+        if (nw === u.content) return;
+        u.content = nw;
+        const ci = changes.findIndex((c) => c.path === u.path);
+        if (ci >= 0) changes[ci].content = nw; else changes.push({ path: u.path, content: nw });
+      });
+    });
+  }
+  return { files, changes, dels, open, tailPath: lastPath };
 }
+/* PERSISTENCE CONTRACT — one hard rule appended to every WEB (non-game) build so generated
+   apps never lose the user's data on refresh, matching Claude-Code-grade production output. */
+const PERSISTENCE_BRAIN =
+  " ▶ PERSISTENCE (HARD CONTRACT — the app MUST survive a full page refresh with zero data loss): implement EXACTLY ONE persistence layer for the whole app." +
+  " (1) KEY — one namespaced localStorage key of the form `firas:<app-slug>:v1` (a short kebab-case slug of what the app is, e.g. `firas:todo:v1`); never scatter multiple ad-hoc keys." +
+  " (2) WRAPPERS — define two tiny functions and route ALL reads/writes through them: `load()` returns the parsed state object (or a clean default when absent/corrupt), and `save(state)` JSON.stringify's and writes it. BOTH bodies are wrapped in try/catch so a QuotaExceededError (storage full) or a private-browsing/SecurityError degrades SILENTLY (return the default / no-op) — never throw, never break the UI." +
+  " (3) SAVE ON EVERY MUTATION — call save(state) after EVERY state change: add, edit, delete, toggle, reorder, select, filter change, score/progress change, theme change, and setting change — immediately, not only on beforeunload/unload (which is unreliable on mobile). Keep an in-memory state object as the single source of truth and persist it on each transition." +
+  " (4) RESTORE BEFORE FIRST PAINT — on DOMContentLoaded, call load() FIRST and rebuild the entire UI from the stored state before anything renders, so the user never sees an empty flash that then repopulates. The restored state drives the initial render, not a hard-coded default." +
+  " (5) VERSIONED SCHEMA — the stored object carries a `version` field. On load, if JSON.parse throws OR the version does not match the current schema, DISCARD the stored value and reset to a clean default (optionally migrate) rather than crashing or rendering broken UI." +
+  " (6) WHAT MUST PERSIST BY DEFAULT — all user-entered data (items/notes/cart/answers/records), the current selections and active filters/sort/category, any in-progress input the user has typed but not yet submitted, the chosen theme (light/dark), and scroll or active-tab/active-view position where it materially affects the experience. If in doubt whether something should persist, persist it.";
+/* Security brain — baseline XSS/eval/secrets hygiene appended to EVERY build (web, non-web, games). */
+const SECURITY_BRAIN = " SECURITY HYGIENE (hard rule): treat every user/URL/localStorage/network value as hostile. Render untrusted text with textContent or createElement — NEVER string-concatenate it into innerHTML/insertAdjacentHTML/outerHTML/document.write; when HTML is truly required, escape < > & \" ' via a small escapeHtml() helper you include, or sanitize. NEVER eval(), new Function(), setTimeout/setInterval with a string arg, or the Function constructor on any dynamic/user data. Do not build SQL/shell/HTML by concatenating input. Never hardcode secrets/API keys/tokens in client code; read them from config/env. Set rel=\"noopener noreferrer\" on target=_blank links and validate/whitelist any URL before using it as href/src.";
 /* The shared coding brain — Claude-Code-grade quality bar appended to every build prompt. */
 function cwBrain(isWeb, reqText) {
-  return TECH_BRAIN + SIZE_MANDATE_CODE + (isWeb ? (SIZE_MANDATE_WEB + VISUAL_POLICY) : "") +
+  return SECURITY_BRAIN + TECH_BRAIN + SIZE_MANDATE_CODE + (isWeb ? (SIZE_MANDATE_WEB + VISUAL_POLICY) : "") +
     ((!isWeb && !cwIsGameRequest(reqText)) ? ENGINEERING_BRAIN : "") +
     ((isWeb && cwIsGameRequest(reqText)) ? (cwGameBrain() + (cwIs3DRequest(reqText) ? cwGame3DBrain() : "") + cwGameGenreRecipe(reqText)) :
       " GAMES / INTERACTIVE CANVAS: if the request is a game or animated/interactive app, build a GENUINELY PLAYABLE, polished one — a <canvas> with a real requestAnimationFrame loop (delta-time based), responsive keyboard + touch + mouse controls, collision detection, score/lives, win/lose + restart, sound-free juice (particles, easing, screen shake where fitting), a start screen and HUD, and it must scale to fit the screen. No stub loop, no 'coming soon' — a complete game.") +
-    ((isWeb && !cwIsGameRequest(reqText)) ? cwAppRecipe(reqText) : "") +
-    " SELF-REVIEW BEFORE OUTPUT (private, never narrated): mentally EXECUTE the code end-to-end — every control is wired to a real handler, every id/class/selector it references actually exists in the files you output, state that should survive a refresh uses localStorage, all links/paths resolve, and the markup is syntactically valid and complete. Fix every defect you find SILENTLY; the delivered code must read as correct from the first line — no visible self-correction, no meta.";
+    ((isWeb && !cwIsGameRequest(reqText)) ? (cwAppRecipe(reqText) + PERSISTENCE_BRAIN) : "") +
+    " SELF-REVIEW BEFORE OUTPUT (private, never narrated): mentally EXECUTE the code end-to-end — every control is wired to a real handler, every id/class/selector it references actually exists in the files you output, MENTALLY REFRESH THE PAGE — every piece of user-entered data, every toggle/selection/filter, current progress, and the chosen theme MUST reappear exactly as left; if anything resets to empty or default on reload, wire it through the persistence layer before output. Confirm the storage key is read on load and written on every mutation. All links/paths resolve, and the markup is syntactically valid and complete. COMPLETENESS GATE — CONFIRM each file is emitted COMPLETE and syntactically valid for its language: JS — balanced brackets/braces/parens and quotes, no statement cut mid-expression, no truncated tail; CSS — every rule closed and braces balanced; HTML — every tag closed. NEVER abbreviate with \"// rest unchanged\", \"/* ... */\", \"...\", or any elision comment standing in for real code — output the WHOLE file every time. If you are approaching a length limit, FINISH the current file completely rather than starting another. Fix every defect you find SILENTLY; the delivered code must read as correct from the first line — no visible self-correction, no meta.";
 }
 /* Per-category APP recipes for NON-GAME web apps — the app-side twin of cwGameGenreRecipe.
    Detects the most common student/user app categories and injects a concrete, testable
@@ -13400,12 +13685,27 @@ function cwBrain(isWeb, reqText) {
 function cwAppRecipe(text) {
   const s = String(text || "").toLowerCase();
   if (!s) return "";
-  if (/(\bquiz\b|\bexam\b|\btrivia\b|\bmcq\b|flash\s*cards?|اختبار|كويز|امتحان|أسئلة\s*واختيارات|اختيار\s*من\s*متعدد|بطاقات\s*(تعليمية|مراجعة))/i.test(s)) return " ▶ APP RECIPE — QUIZ/EXAM APP (MANDATORY FEATURES): a REAL question bank of AT LEAST 10 substantive questions hard-coded as an array of {q, options[4], answerIndex, explain} on the requested topic (accurate content, no lorem); shuffle questions AND options each run; show ONE question at a time with a progress bar (3/10) and running score; on answer, instantly color the chosen option right/wrong, reveal the correct one, and show the explanation before Next; a results screen with percentage, grade word, per-question review list, and a working Restart that reshuffles; persist best score in localStorage and show it. Every button wired; keyboard 1-4 also answers.";
-  if (/(dashboard|admin\s*panel|analytics|لوحة\s*(تحكم|معلومات|بيانات)|إحصائيات|احصائيات|تقارير\s*تفاعلية)/i.test(s)) return " ▶ APP RECIPE — DASHBOARD (MANDATORY FEATURES): seed realistic sample data as arrays at the top of the script (12+ rows, believable names/numbers on the requested domain); a sidebar or top nav with 3+ sections; 4 stat cards computed FROM the data (totals, averages, growth) — never hard-coded strings that disagree with the table; at least TWO hand-rolled charts (bar + line or donut) drawn with <canvas> or inline SVG from those SAME arrays — no external chart libraries; a data table with working column sorting, a live search filter, and a status/category filter; numbers formatted with locale separators; a light/dark toggle persisted to localStorage. Filtering the table must also update the stat cards.";
-  if (/(\bstore\b|\bshop\b|e-?commerce|\bcart\b|متجر|سوق\s*إلكتروني|سلة\s*(تسوق|شراء)|منتجات\s*للبيع)/i.test(s)) return " ▶ APP RECIPE — STORE (MANDATORY FEATURES): seed 8+ products as an array {id, name, price, category, emoji-or-CSS-art image}; a responsive product grid with category filter chips AND a live search box that actually filter the grid; a WORKING cart: add-to-cart on every card, a cart drawer/panel listing items with quantity +/- steppers, per-line totals, remove, and a grand total that recomputes on every change; cart persisted to localStorage and restored on load; a checkout summary step with a simple validated form (name/phone) and a success state; a cart-count badge on the cart icon kept in sync. Prices formatted consistently; empty-cart and no-results states designed, not blank.";
-  if (/(to-?do|task\s*(list|manager)|habit|planner|study\s*(plan|schedule)|notes?\s*app|مهام|قائمة\s*مهام|جدول\s*(مذاكرة|دراسة|مهام)|مخطط|ملاحظات|عادات)/i.test(s)) return " ▶ APP RECIPE — TODO/PLANNER (MANDATORY FEATURES): full CRUD — add (Enter or button), inline edit on double-click, toggle done, delete with a subtle confirm; filters All/Active/Done plus a live counter (X remaining); optional priority or due-date field rendered as a colored chip and sortable; EVERYTHING persisted to localStorage and restored on load (test the refresh mentally); a designed empty state; clear-completed action; smooth add/remove transitions. For a study planner: days as columns or sections, subjects as colored blocks, and a progress bar of completed sessions.";
-  if (/(calculator|converter|\bgpa\b|آلة\s*حاسبة|حاسبة|محوّ?ل\s*(وحدات|عملات)|حساب\s*المعدل|المعدل\s*التراكمي)/i.test(s)) return " ▶ APP RECIPE — CALCULATOR/CONVERTER (MANDATORY FEATURES): a real button grid AND full keyboard support (digits, operators, Enter==, Backspace, Escape C); correct operator precedence and chained operations (2+3*4 → 14), decimal point guarded against doubles, divide-by-zero shows a friendly message not NaN/Infinity; a live expression line above the result; a scrollable history of past calculations (click to reuse) persisted to localStorage. For converters/GPA: conversion happens live on input, both directions, with the formula/weights visible and results rounded sensibly (4 decimals max).";
-  if (/(portfolio|personal\s*(site|website)|landing\s*page|\bcv\b\s*(site|page)|restaurant|مطعم|موقع\s*(شخصي|تعريفي|مدرست|مدرسة|شركة)|صفحة\s*هبوط|سيرة\s*ذاتية\s*(موقع|صفحة))/i.test(s)) return " ▶ APP RECIPE — PORTFOLIO/LANDING (MANDATORY FEATURES): a single polished page with 5+ real sections (hero with a strong headline, about, features/work/menu cards, testimonials or stats, contact) filled with plausible on-topic content — never lorem ipsum; a sticky nav whose links smooth-scroll to the sections and highlight the active one on scroll; a contact form with client-side validation (required, email shape) and an inline success state — never a dead submit; subtle scroll-reveal animations (IntersectionObserver); fully responsive with a working mobile menu button; consistent spacing scale, one accent color, and real hover/focus states throughout.";
+  if (/(\bquiz\b|\bexam\b|\btrivia\b|\bmcq\b|flash\s*cards?|اختبار|كويز|امتحان|أسئلة\s*واختيارات|اختيار\s*من\s*متعدد|بطاقات\s*(تعليمية|مراجعة))/i.test(s)) return " ▶ APP RECIPE — QUIZ/EXAM STUDY TOOL (MANDATORY FEATURES): a REAL question bank of AT LEAST 15 substantive questions hard-coded as an array on the requested topic (accurate content, no lorem), each carrying the RICHER shape {q, options[4], answerIndex, explain, difficulty:'easy'|'medium'|'hard', category:'<short topic tag>'} — populate EVERY field on every question (a real one-line explanation, a real difficulty, a real category), never a placeholder. Before the quiz, a start/setup screen lets the user FILTER the run by category (chips or a select built from the distinct categories in the data) and by difficulty (All/Easy/Medium/Hard); only matching questions enter the run. Shuffle both the questions AND each question's options every run (remap answerIndex correctly after shuffling — never point at a stale index). Show ONE question at a time with a progress bar (e.g. 3/15), the question's category+difficulty badges, and a running SCORE. Add an OPTIONAL per-question countdown timer (a toggle on the setup screen, default ~20s): render it as a visible shrinking RING (SVG stroke-dashoffset) or bar; when it hits zero, AUTO-MARK the question wrong, lock the options, and reveal the answer just like a manual wrong pick. On answer, instantly color the chosen option right/wrong, reveal the correct one, and show the explanation before Next. Maintain a running STREAK indicator (consecutive correct, resets to 0 on any wrong or timeout) shown live during play, and track BEST STREAK. Keep keyboard 1-4 to answer AND Enter=Next (advance to the next question / from the answered state). Results screen: percentage, grade word, best-streak for the run, a 'Review incorrect only' toggle/filter, and a per-question breakdown that for EACH question shows the question text, YOUR pick vs the CORRECT answer (clearly distinguished, e.g. ✓/✗ + colors), and its explanation. Persist to localStorage BOTH the best score AND a full ATTEMPT HISTORY — push {date:ISO-or-locale, score, total, percent} on every finished run — and render that history as a small progress list (most-recent first, capped ~10 rows) on the results and/or start screen. Provide a shareable/exportable result SUMMARY: a 'Copy result' button that builds a plain-text summary (topic, score X/Y, percent, best streak, date) and writes it via navigator.clipboard.writeText with a visible 'Copied!' confirmation (fallback to a selectable textarea if clipboard is unavailable). A working Restart reshuffles and returns to the setup screen; every button wired; design empty/no-match states (e.g. a filter that leaves 0 questions) rather than a blank screen.";
+  if (/(dashboard|admin\s*panel|analytics|لوحة\s*(تحكم|معلومات|بيانات)|إحصائيات|احصائيات|تقارير\s*تفاعلية)/i.test(s)) return " ▶ APP RECIPE — DASHBOARD (MANDATORY FEATURES): declare ONE EXPLICIT ROW SCHEMA up front as a comment AND honour it in the data — every row is an object with AT LEAST 6 typed fields, e.g. {id:number, name:string, category:string (one of a small fixed set), status:string ('active'|'pending'|'closed'), value:number, date:ISO 'YYYY-MM-DD'} — adapt the field NAMES to the requested domain but keep the shape (an id, a label, a category, a status, a numeric metric, and a real date). SEED at least 24 believable rows AS AN ARRAY at the top of the script, with plausible on-topic names/numbers and dates SPREAD across several months (not all the same day) so time filtering is meaningful — never lorem, never 3 rows. A sidebar or top nav with 3+ sections; UNDER 720px the sidebar COLLAPSES behind a hamburger toggle and the layout reflows to one column. A DATE-RANGE / TIME-WINDOW control (a set of chips like 7d/30d/90d/All or two date inputs) is the master filter: changing it recomputes the derived arrays and MUST re-run the SAME render pipeline that updates BOTH the stat cards AND every chart together — cards and charts always agree with the visible rows. FOUR stat cards, each computed FROM the filtered rows (total, average, count, growth) — never a hard-coded string that disagrees with the table — and EACH card shows a DELTA vs the immediately-prior equal-length period (▲ green when up, ▼ red when down, with the % or absolute change), computed from the data, not faked. THREE hand-rolled charts drawn with <canvas> or inline SVG from those SAME filtered arrays — no external chart libraries: a time-series line/area (metric over the date buckets), a bars chart, AND a category-breakdown chart (donut or horizontal bars grouping by the category field); all three redraw whenever the filter changes. A data table with working column sorting (click headers, toggle asc/desc), a live text-search box, and a status/category dropdown filter — all filters compose with the date range. CLICKING A ROW opens a detail panel/drawer showing that row's full field-by-field breakdown with a close button (Esc also closes). A working EXPORT button that downloads the CURRENTLY-FILTERED rows as a real CSV (proper header line, comma-escaped/quoted values) or JSON via a Blob + object URL — not a stub. Wrap the stat-card numbers (or a status line) in an aria-live=\"polite\" region so recomputed totals are announced. Numbers formatted with locale separators (toLocaleString). A designed empty state ('No rows match these filters' with a Clear-filters button) shown whenever the filtered set is empty — never a blank table or broken charts. A light/dark toggle persisted to localStorage.";
+  if (/(\bstore\b|\bshop\b|e-?commerce|\bcart\b|متجر|سوق\s*إلكتروني|سلة\s*(تسوق|شراء)|منتجات\s*للبيع)/i.test(s)) return " ▶ APP RECIPE — STORE (MANDATORY FEATURES): seed AT LEAST 12 believable, on-topic products as an array of {id, name, price(number), category, rating(0-5, one decimal), stock(integer), description(one real sentence), image(emoji or CSS-art, never a broken remote URL)} — real names/prices/descriptions for the requested shop, no lorem, no two identical rows. Build ALL of the following, every control wired to a real handler:" +
+    " (1) A responsive PRODUCT GRID with category filter chips AND a live search box that BOTH actually filter the grid; combined with the sort control below they compose (search + category + sort all apply together)." +
+    " (2) A SORT control (a <select> or chips) offering Price ↑, Price ↓, Name A–Z, and Rating — choosing one REORDERS the visible grid immediately from the SAME product array." +
+    " (3) A QUICK-VIEW MODAL opened from each card (a 'View'/tap-the-card button): it shows the product image, name, category, price, the description, a rating rendered as filled/empty STAR glyphs (★★★★☆) matching the number, a quantity stepper, and an Add-to-Cart button — with a working close (× button, backdrop click, and Escape) and focus not trapped behind it." +
+    " (4) A persisted WISHLIST/favourites: a heart (♡/♥) toggle on every card AND in the quick-view that flips filled/empty, is saved to localStorage under its own key, restored on load, and reflected everywhere the product appears (optionally a 'Favourites only' filter)." +
+    " (5) A WORKING CART: add-to-cart from cards and quick-view; a cart drawer/panel listing each line with a name, price, quantity +/- STEPPERS CLAMPED to that product's stock (never below 1, never above stock — disable + at the ceiling), a per-line subtotal, and a remove button; the grand total recomputes on every change. An OUT-OF-STOCK product (stock 0) shows an 'Out of stock' badge and a disabled add button." +
+    " (6) A CHECKOUT SUMMARY that computes and shows, as separate labelled lines: Subtotal = Σ(price×qty); Tax = 15% of subtotal; Shipping = a flat 15 (currency units) when subtotal > 0 but FREE when subtotal ≥ 200; and Grand Total = subtotal + tax + shipping − discount. State these exact rules in the UI. Accept a demo PROMO CODE input where 'SAVE10' applies a 10% discount off the subtotal (show the discount line and an invalid-code message for anything else)." +
+    " (7) An ORDER-CONFIRMATION screen after a validated name/phone form: generate and show a readable ORDER ID (e.g. #ORD-XXXXXX), the ordered LINE ITEMS with quantities and the totals, a thank-you message, and a 'Continue shopping' action that clears the cart and returns to the grid." +
+    " (8) PERSISTENCE + SYNC: both the cart AND the wishlist survive a refresh via localStorage and are restored on load; the cart-count badge on the cart icon stays in sync with total quantity at all times; prices formatted consistently (one currency symbol, two decimals)." +
+    " (9) DESIGNED STATES, never blank: empty-cart, no-search-results, out-of-stock, and empty-wishlist each get a friendly illustrated message, not an empty box. Mentally test: add 3 items, refresh (cart+badge persist), open quick-view and change quantity, favourite an item and refresh (still favourited), apply SAVE10 and confirm the discount and totals math, check out and see the order id and line items.";
+  if (/(to-?do|task\s*(list|manager)|habit|planner|study\s*(plan|schedule)|notes?\s*app|مهام|قائمة\s*مهام|جدول\s*(مذاكرة|دراسة|مهام)|مخطط|ملاحظات|عادات)/i.test(s)) return " ▶ APP RECIPE — TODO/PLANNER (MANDATORY FEATURES): full CRUD — add (Enter or button), inline edit on double-click, toggle done, delete with a subtle confirm; each task carries a category/tag (chosen from a small chip set or a free tag field) shown as a colored chip, plus a live search box that filters tasks by text AND tag as you type; filters All/Active/Done plus a live counter (X remaining); drag-to-reorder the list with Pointer Events (pointerdown/move/up, not the flaky HTML5 drag API) and persist the new order; an optional due-date field with a sort-by-due-date option and an OVERDUE highlight (red chip / left border) for past-due unfinished tasks; a small SVG progress ring showing completed-vs-total that updates on every change; EVERYTHING persisted to localStorage and restored on load (test the refresh mentally); a designed empty state; clear-completed action; smooth add/remove transitions. For a study planner: days as columns or sections, subjects as colored blocks, and the same progress ring of completed sessions.";
+  if (/(calculator|converter|\bgpa\b|آلة\s*حاسبة|حاسبة|محوّ?ل\s*(وحدات|عملات)|حساب\s*المعدل|المعدل\s*التراكمي)/i.test(s)) return " ▶ APP RECIPE — CALCULATOR/CONVERTER (MANDATORY FEATURES): a real button grid AND full keyboard support (digits, operators, Enter==, Backspace, Escape C); correct operator precedence and chained operations (2+3*4 → 14), decimal point guarded against doubles, divide-by-zero shows a friendly message not NaN/Infinity; a live expression line above the result; a SCIENTIFIC mode with √, x² (square), % (percent), +/- (sign flip) and parentheses that respect precedence; MEMORY keys M+ (add to memory), M- (subtract), MR (recall), MC (clear) with a small indicator when memory is non-empty; a scrollable history of past calculations (click any row to reuse it) persisted to localStorage. For converters/GPA: a category switcher (length, weight, temperature, currency, …) with AT LEAST 6 units per category, conversion that happens live on input in BOTH directions, and the formula/weights visible with results rounded sensibly (4 decimals max).";
+  if (/(portfolio|personal\s*(site|website)|landing\s*page|\bcv\b\s*(site|page)|restaurant|مطعم|موقع\s*(شخصي|تعريفي|مدرست|مدرسة|شركة)|صفحة\s*هبوط|سيرة\s*ذاتية\s*(موقع|صفحة))/i.test(s)) return " ▶ APP RECIPE — PORTFOLIO/LANDING (MANDATORY FEATURES): a single polished page with 6+ real sections (hero with a strong headline, about, a filterable project/work/menu gallery, testimonials or stats, a light section, contact) filled with plausible on-topic content — never lorem ipsum; the gallery MUST have category chips that filter its cards live AND a lightbox/detail overlay that opens the clicked item (larger view, title, description, close on backdrop/Esc); either a testimonials slider (prev/next or auto-advance) OR animated stat counters that count up when scrolled into view via IntersectionObserver; a light/dark theme toggle persisted to localStorage and applied on load; a sticky nav whose links smooth-scroll to the sections and highlight the active one on scroll via IntersectionObserver (never a raw scroll handler that reads each section offset on every scroll event); a contact form with client-side validation (required, email shape) and an inline success state — never a dead submit; subtle scroll-reveal animations (IntersectionObserver); fully responsive with a working mobile menu button; consistent spacing scale, one accent color, and real hover/focus states throughout.";
+  if (/(kanban|task\s*board|trello|scrum|sprint\s*board|كانبان|لوحة\s*مهام|لوح\s*مهام|سبرنت)/i.test(s)) return " ▶ APP RECIPE — KANBAN BOARD (MANDATORY FEATURES): 3+ named columns (To Do / In Progress / Done) each seeded with 4+ realistic cards modeled as {id, title, desc, tag, priority}; MOVE a card between columns — HTML5 drag-and-drop (dragstart/dragover/drop) OR pointer-based drag — and the move must SPLICE the card out of the source column array and insert it into the target array (reorder the underlying data, not just the DOM); a per-column add-card composer (title + optional tag/priority) that pushes a new card; inline edit on double-click of a card title/desc; a delete control per card with a subtle confirm; colored priority chips (low/med/high) and tag chips; a LIVE count in every column header that recomputes after any move/add/delete, plus a WIP total across the board; the ENTIRE board state (all columns + cards) persisted to localStorage on every mutation and restored on load; a designed empty-column state (dashed placeholder), never blank.";
+  if (/(crud|data\s*table|records?\s*(app|manager)|contacts?\s*(app|manager)|inventory|جدول\s*بيانات|إدارة\s*(سجلات|بيانات)|جهات\s*اتصال|مخزون)/i.test(s)) return " ▶ APP RECIPE — DATA-TABLE/CRUD (MANDATORY FEATURES): seed 12+ realistic rows as an array of objects on the requested domain (believable names/numbers, no lorem); render a table whose column headers each toggle sort asc/desc (with a direction caret) on click; a live search box that filters rows across the visible fields as you type; pagination OR a scroll container so long lists stay usable; a modal or inline form to CREATE a new row and to EDIT an existing one, with per-field validation (required fields flagged, numeric/email/date fields type-checked before save — invalid input blocks the save and shows the message); a DELETE control with a subtle confirm; EVERY mutation (create/edit/delete) persisted to localStorage and restored on load; a live total row count and a designed 'no results' state when the search matches nothing.";
+  if (/(chat\s*(app|ui)?|messenger|messaging|whatsapp\s*clone|dm\s*app|دردشة|محادثة|مراسلة|شات)/i.test(s)) return " ▶ APP RECIPE — CHAT APP (MANDATORY FEATURES, CLIENT-ONLY): a scrollable message list of chat bubbles where MY messages align right (accent fill) and the OTHER side aligns left (muted fill), each bubble carrying a small avatar (initials or emoji), the sender name, and a formatted timestamp; a sticky composer pinned to the bottom with an auto-growing <textarea> that sends on Enter (Shift+Enter = newline) AND via a send button, clearing after send and refocusing; SEED the thread with 5+ believable prior messages so it never opens empty. After I send, SIMULATE the other side replying: show an animated typing-indicator (three dots) for ~600-1200ms, then append a canned/echo-style bot reply (pick from a small varied response pool or echo+acknowledge) — this makes the thread feel alive with NO real network. Auto-scroll to the newest message on every append. If multi-conversation, render a sidebar contact list showing each contact's avatar, name, last-message preview, and an unread badge, switching the active thread on click. Persist the ENTIRE conversation history (all threads + messages) to localStorage and restore on load; design an empty state for a brand-new thread. EXPLICITLY: make NO real network/fetch/WebSocket calls — the other participant is fully mocked in-browser.";
+  if (/(login\s*(page|form)?|sign\s*[- ]?(in|up)|auth\s*(form|page)|register\s*(page|form)|تسجيل\s*(دخول|حساب)|صفحة\s*دخول|استمارة\s*تسجيل)/i.test(s)) return " ▶ APP RECIPE — AUTH FORM (MANDATORY FEATURES, UI DEMO ONLY): a single polished, centered auth card with a tab/toggle switching between Sign in and Sign up (animate the switch, keep entered email across tabs); FULL client-side validation running live on input AND on submit — every field required, email checked against a real shape regex, password length ≥ 8 with a visual STRENGTH METER (weak/medium/strong from length + character-class variety), and on Sign up a confirm-password field that must MATCH; a show/hide password toggle (eye button) on each password field; inline PER-FIELD feedback — a red error message + error ring when invalid, a green check/success state when valid — never one generic alert; keep the submit button DISABLED (and visually muted) until the whole form is valid, then on submit show a simulated logged-in SUCCESS screen (welcome + the entered name/email + a sign-out that returns to the form). MANDATORY SAFETY: this is a UI/UX DEMO ONLY — do NOT claim or imply real authentication, do NOT submit credentials to any server or real auth provider, and do NOT persist plaintext passwords anywhere beyond the live demo session (never write a password to localStorage); a short in-code comment must note it is a mock.";
+  if (/(weather\s*(app|widget|dashboard)?|forecast|طقس|حالة\s*الجو|توقعات\s*الطقس)/i.test(s)) return " ▶ APP RECIPE — WEATHER APP (MANDATORY FEATURES): no API key is available, so SEED a realistic MOCK dataset as JS arrays at the top of the script — for 3–4 named cities each provide current conditions (temp °C, condition text+matching icon, humidity %, wind km/h, feels-like), a 5-DAY forecast (day name, hi/lo, condition icon) and an HOURLY forecast (at least 8 entries: hour, temp, icon); add a `/* MOCK DATA — replace with a real API (e.g. Open-Meteo/OpenWeather): fetch here and map into this same shape */` comment where the data is defined. A city search box AND/OR selector chips that SWITCH the displayed data to that city. A current card (big temp, condition icon drawn as an emoji or inline SVG, humidity, wind, feels-like). A horizontal 5-day strip and an hourly row rendered from those arrays. A working °C/°F unit toggle that RECOMPUTES every number shown (not just a label) via a real convert function. Persist the last-selected city to localStorage and restore it on load. Designed, never blank; all controls wired to real handlers.";
+  if (/(calendar\s*(app|widget)?|month\s*view|scheduler|agenda\s*app|تقويم|روزنامة|جدول\s*مواعيد|أجندة)/i.test(s)) return " ▶ APP RECIPE — CALENDAR (MANDATORY FEATURES): a REAL month grid computed with the Date API — correct first-weekday offset (new Date(y,m,1).getDay()), correct days-in-month (new Date(y,m+1,0).getDate()), leap years handled automatically, no hard-coded static month. Prev/Next-month buttons AND a Today button that navigate the shown month/year; the actual current day highlighted distinctly. Click a day to ADD/EDIT/DELETE an event {title, time, color}; day cells show event dots or short labels for their events. Persist events to localStorage keyed by ISO date (YYYY-MM-DD) and restore them on load. A side agenda list showing the selected day's events sorted by time, with edit/delete. Localized month and weekday names and correct week start for the app language (Sunday-first Arabic / your locale). Every button wired to a real handler; empty days and empty agenda have designed states, not blank.";
   return "";
 }
 /* ═══ FIRAS CODE — GAMES THAT ACTUALLY WORK (detection → hard canvas contract →
@@ -13443,7 +13743,9 @@ function cwGameBrain() {
     " 9) SHOOTING IS A CLOSED CHAIN (ignore this whole clause if it is NOT a shooter) — if the player can fire, firing MUST hit, register, and be FELT. A gun that fires into the void, or a hit that changes nothing on screen, is a FAILED build. Wire ALL FIVE links: (1) FIRE INPUT WIRED — one shoot()/fire() CALLED from real input: mousedown/pointerdown/click AND keydown Space AND the on-screen touch fire button; a shoot() that is declared but never invoked is dead. (2) HIT TEST AGAINST THE LIVE TARGET ARRAY every shot: keep enemies in ONE array you spawn into, animate, and remove from; for each bullet loop that SAME live enemies array and test overlap explicitly (Math.hypot(dx,dy) < r1+r2 or AABB) inside the update loop — never fire without a collision test, never test against a stale snapshot or []. (3) HIT MUTATES STATE: subtract the enemy's health; at <=0 splice it out AND increment the kill/score HUD so it visibly disappears and can't be re-hit. (4) FEEDBACK EVERY SHOT: a tracer/muzzle flash on fire, and on a hit a hit-marker + spark particles/flash; on a kill a pop/burst and the score rises — the player must SEE miss vs kill. (5) AMMO/RELOAD that never permanently locks fire: decrement ammo, show it in the HUD, restore on R (and a mobile tap). Mental playtest: put the crosshair on an enemy and fire once → the bullet is tested against the live array, that enemy's health drops, at zero it disappears and the score rises, a hit-marker flashes. Never output a weapon whose bullets pass through enemies." +
     // ── 10: TERMINAL STATE + RESTART ──────────────────────────────────────────
     " 10) TERMINAL STATE + RESTART — MANDATORY, REACHABLE, RE-PLAYABLE (state- and pixel-checked; a game that runs forever with no end, or a dead end-screen with no way back, is a FAILED build — as critical as the Start button). Implement ALL FOUR as distinct wired pieces: (a) ONE explicit run-state variable declared next to score/lives — let gameOver=false, won=false (or let state='playing'|'won'|'lost'); update AND draw MUST branch on it. (b) A REACHABLE lose path that ASSIGNS the flag from real play — if(lives<=0){gameOver=true;} (or time up / player hit / fell off) — AND, where the genre has a goal, a REACHABLE win path — if(bricks.length===0||score>=TARGET){won=true;gameOver=true;} — both driven by variables that actually change during play, never a constant, never an unreachable threshold, never a flag nothing sets. (c) When terminal, STOP advancing entity physics and spawning but KEEP the RAF loop running, and DRAW every frame a full-screen semi-opaque overlay (ctx.fillRect + ctx.fillText) showing the outcome ('YOU WIN'/'GAME OVER', or 'فزت'/'خسرت') PLUS the final score PLUS a visible 'Press R / Tap to Play Again' prompt. (d) A restart() that TRULY RE-SEEDS: it reassigns the EXACT variables gameplay mutates — score=0, lives=<initial>, level/timer reset, every entity array rebuilt by calling the SAME seed/init used at first load — then sets gameOver=false/won=false (state='playing') and re-kicks the loop if it stopped. It must NEVER declare fresh locals that shadow the game's variables. Wire restart to click AND pointerdown AND keydown (R and Enter) AND touchstart, guarded to fire only while terminal. Mentally playtest to the end TWICE: lose on purpose → overlay shows → press R → a fully fresh game plays and you can then reach win." +
-    // ── 11: COMPLETE FILE — NEVER TRUNCATE ────────────────────────────────────
+    // ── 10b: PERSISTENCE — BEST SCORE + SETTINGS SURVIVE REFRESH ───────────────
+    " 10b) PERSISTENCE — THE BEST SCORE AND SETTINGS MUST SURVIVE A REFRESH (a game that forgets your high score the instant you reload reads as a throwaway toy; a persisted best is the ONE feature every arcade player expects and it is a few lines). (a) On LOAD, read a stored best from localStorage under a NAMESPACED key unique to this game — const BEST_KEY='firas.<gameslug>.best'; let best=0; try{ best=parseInt(localStorage.getItem(BEST_KEY),10)||0; }catch(e){} — then DISPLAY it in the HUD every frame ('BEST: '+best) so the player sees the bar to beat from frame 0. (b) Whenever the CURRENT run beats it — the instant score (or, for time/endless games, the survival time / distance) exceeds best — update best AND write it back immediately: if(score>best){ best=score; try{ localStorage.setItem(BEST_KEY, String(best)); }catch(e){} }. (c) On the GAME-OVER / WIN overlay, show BOTH this run's final score AND the all-time best on their own lines ('SCORE: N' and 'BEST: N'), and if this run set a new record say so ('NEW BEST!'). (d) ANY player-facing SETTING you expose — sound on/off, difficulty, chosen skin/theme, control scheme — must ALSO persist under its own namespaced key: restore it on load (fall back to a sensible default when absent) and write it back the moment the player changes it, so preferences stick across sessions. (e) GUARD EVERY read and write in try/catch (private-mode / disabled storage throws on access) so localStorage being unavailable degrades to an in-memory best and NEVER throws inside the loop or blocks Start/restart. restart() resets score to 0 but MUST NOT wipe best or the saved settings. Mental test: score 500, refresh → HUD still shows BEST: 500; toggle sound off, refresh → it is still off." +
+    // ── 11: COMPLETE FILE — NEVER TRUNCATE ────────────────────────────────
     " 11) COMPLETE FILE — NEVER TRUNCATE (this file is auto-checked for a clean close; a file cut off mid-code is an AUTOMATIC FAILED build, worse than a plain one): emit the ENTIRE file, first character to last, in ONE fenced block, and close that block with its ``` fence. A game is almost always a SINGLE index.html whose inline <script> is the LAST and LARGEST thing — that script is exactly what gets amputated, so finish it: every function body closed, every { has its }, every ( its ), every [ its ], every string/template-literal/regex closed, the requestAnimationFrame loop kicked and the Start handler written, THEN </script>, THEN </body></html> as the final characters. Do NOT emit </html> early to look done while the script above it is still mid-statement. NEVER trail off with '...', '// rest of code', '// TODO', '/* continued */', or an unterminated tag/string. If you are running long, do NOT pad and do NOT summarize — TIGHTEN scope (fewer entities, shorter data) so the WHOLE file fits and ends cleanly; write the load-bearing core FIRST (canvas+ctx, seeded entities, kicked RAF loop, Start handler, </html>) and drop only polish. Before you stop, re-read your last 15 lines: the final non-whitespace must be </html> (HTML) or } / ) / ] / ; (JS/CSS) — never a bare identifier, operator, comma, or open quote." +
     " Verify mentally: ctx is non-null, entity arrays are non-empty, the loop is kicked once at top level, collisions mutate state, Start truly begins play, a lose and a win are reachable, R restarts, and the file ends with </html>. A game that renders only the HUD with a blank play area, is stuck on a menu, has no collisions, never ends, or is truncated is unacceptable.";
 }
@@ -13622,6 +13924,22 @@ async function cwGameSanityCheck(files, signal) {
   for (const s of issues) { const k = String(s).slice(0, 80); if (!seen.has(k)) { seen.add(k); ranked.push(s); } }
   return ranked.slice(0, 10);
 }
+async function cwAppSanityCheck(files, signal) {
+  const issues = [];
+  try {
+    if (signal && signal.aborted) return [];
+    try { (typeof lintProject === "function" ? lintProject(files) : []).filter((x) => /BROKEN LINK|BROKEN REFERENCE|JS TARGETS A MISSING ID/i.test(x)).forEach((x) => issues.push(x)); } catch (_) {}
+    const html = (typeof projPreviewHtml === "function") ? projPreviewHtml({ name: "a", files }) : "";
+    if (html && (!signal || !signal.aborted) && typeof testHtmlInSandbox === "function") {
+      try { const runtime = await testHtmlInSandbox(html, 2600); runtime.forEach((e) => issues.push("RUNTIME ERROR on load: " + e + " — this throw stops the page before it initializes; fix it.")); } catch (_) {}
+    }
+  } catch (_) {}
+  const seen = new Set(), ranked = [];
+  const rank = (s) => /RUNTIME ERROR|BROKEN REFERENCE|MISSING ID|BROKEN LINK/i.test(s) ? 0 : 1;
+  issues.sort((a, b) => rank(a) - rank(b));
+  for (const s of issues) { const k = String(s).slice(0, 80); if (!seen.has(k)) { seen.add(k); ranked.push(s); } }
+  return ranked.slice(0, 8);
+}
 function cwVerifyUI(root) {
   const wrap = root && root.querySelector(".cw-diff");
   const ar = state.lang === "ar";
@@ -13785,15 +14103,43 @@ async function cwDevelopGame(name, curFiles, desc, root, signal) {
     return (best && best.length) ? best.slice(0, 30) : files.slice(0, 30);
   } catch (_) { clearDiff(); return (files && files.length) ? files.slice(0, 30) : null; }
 }
-/* A compact map of the ids/classes/symbols sibling files expose, so a file wires to them. */
+/* Two-directional contract: what each sibling EXPOSES, and the ids/classes/calls it CONSUMES from
+   others — so the file being built learns which exact names siblings are about to look up inside it. */
 function cwSiblingContract(files, exceptPath) {
-  return files.filter((f) => f.path !== exceptPath && /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(f.path)).map((f) => {
-    const c = String(f.content || "");
-    const ids = [...c.matchAll(/id=["']([\w-]+)["']/g)].map((m) => m[1]);
-    const cls = [...c.matchAll(/class=["']([^"']+)["']/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean);
-    const fns = [...c.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-    return "• " + f.path + " → ids[" + [...new Set(ids)].slice(0, 40).join(",") + "] classes[" + [...new Set(cls)].slice(0, 60).join(",") + "] symbols[" + [...new Set(fns)].slice(0, 40).join(",") + "]";
-  }).join("\n").slice(0, 3800);
+  const CW_JS_GLOBALS = /^(if|for|while|switch|catch|do|else|return|typeof|instanceof|new|await|yield|void|delete|in|of|function|super|this|console|Math|JSON|Object|Array|String|Number|Boolean|Date|RegExp|Map|Set|WeakMap|Promise|Symbol|window|document|globalThis|parseInt|parseFloat|isNaN|isFinite|encodeURIComponent|decodeURIComponent|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|cancelAnimationFrame|fetch|alert|confirm|prompt|structuredClone|require|import|export)$/;
+  const U = (a) => [...new Set(a)].filter(Boolean);
+  const harvest = (c) => ({
+    ids: [...c.matchAll(/id=["']([\w-]+)["']/g)].map((m) => m[1]),
+    cls: [...c.matchAll(/class=["']([^"']+)["']/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean),
+    fns: [...c.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+    needIds: [...c.matchAll(/getElementById\(\s*["']([\w-]+)["']/g)].map((m) => m[1])
+      .concat([...c.matchAll(/querySelector(?:All)?\(\s*["']#([\w-]+)/g)].map((m) => m[1])),
+    needCls: [...c.matchAll(/getElementsByClassName\(\s*["']([\w-]+)/g)].map((m) => m[1])
+      .concat([...c.matchAll(/querySelector(?:All)?\(\s*["']\.([\w-]+)/g)].map((m) => m[1])),
+    needCalls: [...c.matchAll(/(?:\bwindow\.)?\b([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1]),
+  });
+  const info = files.filter((f) => f.path !== exceptPath && /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(f.path))
+    .map((f) => ({ path: f.path, h: harvest(String(f.content || "")) }));
+  const local = new Set();  // every id/class/symbol any sibling defines locally — provided, not needed from us
+  info.forEach((x) => { x.h.ids.forEach((v) => local.add(v)); x.h.cls.forEach((v) => local.add(v)); x.h.fns.forEach((v) => local.add(v)); });
+  const lines = info.map((x) => {
+    const own = new Set([...x.h.ids, ...x.h.cls, ...x.h.fns]);
+    const expose = "• " + x.path + " → ids[" + U(x.h.ids).slice(0, 40).join(",") + "] classes[" + U(x.h.cls).slice(0, 60).join(",") + "] symbols[" + U(x.h.fns).slice(0, 40).join(",") + "]";
+    const nI = U(x.h.needIds).filter((v) => !own.has(v)).slice(0, 40);
+    const nC = U(x.h.needCls).filter((v) => !own.has(v)).slice(0, 40);
+    const nK = U(x.h.needCalls).filter((v) => !CW_JS_GLOBALS.test(v) && !own.has(v)).slice(0, 40);
+    const needs = (nI.length || nC.length || nK.length) ? "\n  ↳ needs ids[" + nI.join(",") + "] classes[" + nC.join(",") + "] calls[" + nK.join(",") + "]" : "";
+    return expose + needs;
+  });
+  // Aggregate the names siblings look up but NOBODY defines locally — the file we're building must provide them.
+  const wantI = U(info.flatMap((x) => x.h.needIds)).filter((v) => !local.has(v)).slice(0, 40);
+  const wantC = U(info.flatMap((x) => x.h.needCls)).filter((v) => !local.has(v)).slice(0, 40);
+  const wantK = U(info.flatMap((x) => x.h.needCalls)).filter((v) => !CW_JS_GLOBALS.test(v) && !local.has(v)).slice(0, 40);
+  const expose = "SIBLINGS EXPOSE (reference these EXACT names):\n" + lines.join("\n");
+  const lookUp = (wantI.length || wantC.length || wantK.length)
+    ? "\n\nSIBLINGS WILL LOOK UP THESE IN YOUR FILE — you MUST define them with these EXACT ids/names: ids[" + wantI.join(",") + "] classes[" + wantC.join(",") + "] calls[" + wantK.join(",") + "]"
+    : "";
+  return (expose + lookUp).slice(0, 4200);
 }
 function cwLangRule() {
   return state.lang === "ar"
@@ -13811,17 +14157,29 @@ function cwPlanT() {
 function cwStepUI(root, ac) {
   const wrap = root && root.querySelector(".cw-diff");
   const T = cwPlanT();
-  if (!wrap) return { plan() {}, step() {}, mark() {}, note() {}, cancelled: () => (ac && ac.signal.aborted) };
+  if (!wrap) return { plan() {}, step() {}, mark() {}, markFail() {}, note() {}, fail() {}, cancelled: () => (ac && ac.signal.aborted) };
   let steps = [], title = "";
+  const iconOf = (s) => s.state === "done" ? '<span class="cw-plan__ic cw-plan__ic--ok">' + T.done + "</span>" : s.state === "fail" ? '<span class="cw-plan__ic cw-plan__ic--fail">✗</span>' : s.state === "run" ? '<span class="cw-plan__spin"></span>' : '<span class="cw-plan__ic cw-plan__ic--wait"></span>';
+  const rowsHtml = (failView) => steps.map((s) => {
+    // in the failure view a still-"run" file never completed → show it as failed, not a live spinner
+    const st = failView && s.state === "run" ? "fail" : s.state;
+    const ic = failView ? (st === "done" ? '<span class="cw-plan__ic cw-plan__ic--ok">' + T.done + "</span>" : st === "fail" ? '<span class="cw-plan__ic cw-plan__ic--fail">✗</span>' : '<span class="cw-plan__ic cw-plan__ic--wait"></span>') : iconOf(s);
+    return '<div class="cw-plan__row cw-plan__row--' + st + '">' + ic + '<code dir="ltr">' + escapeHtml(s.file) + "</code>" + (s.does ? '<span class="cw-plan__does">' + escapeHtml(s.does) + "</span>" : "") + "</div>";
+  }).join("");
   const render = (headline) => {
-    const rows = steps.map((s) => {
-      const ic = s.state === "done" ? '<span class="cw-plan__ic cw-plan__ic--ok">' + T.done + "</span>" : s.state === "run" ? '<span class="cw-plan__spin"></span>' : '<span class="cw-plan__ic cw-plan__ic--wait"></span>';
-      return '<div class="cw-plan__row cw-plan__row--' + s.state + '">' + ic + '<code dir="ltr">' + escapeHtml(s.file) + "</code>" + (s.does ? '<span class="cw-plan__does">' + escapeHtml(s.does) + "</span>" : "") + "</div>";
-    }).join("");
-    wrap.innerHTML = '<div class="cw-diff__card cw-plan"><div class="cw-diff__head"><span class="cw-plan__spin cw-plan__spin--lg"></span><strong>' + escapeHtml(headline) + "</strong>" + (title ? '<span class="cw-diff__sum">' + escapeHtml(title) + "</span>" : "") + '</div><div class="cw-plan__list">' + rows + '</div><div class="cw-diff__acts"><button type="button" class="cw-diff__cancel cw-plan__stop">' + T.cancel + "</button></div></div>";
+    wrap.innerHTML = '<div class="cw-diff__card cw-plan"><div class="cw-diff__head"><span class="cw-plan__spin cw-plan__spin--lg"></span><strong>' + escapeHtml(headline) + "</strong>" + (title ? '<span class="cw-diff__sum">' + escapeHtml(title) + "</span>" : "") + '</div><div class="cw-plan__list">' + rowsHtml(false) + '</div><div class="cw-diff__acts"><button type="button" class="cw-diff__cancel cw-plan__stop">' + T.cancel + "</button></div></div>";
     wrap.hidden = false;
     const stop = wrap.querySelector(".cw-plan__stop");
     if (stop) stop.onclick = () => { try { ac && ac.abort(); } catch (_) {} };
+  };
+  const renderFail = (msg, onRetry) => {
+    const retryLbl = state.lang === "ar" ? "إعادة المحاولة" : "Retry";
+    wrap.innerHTML = '<div class="cw-diff__card cw-plan cw-plan--fail"><div class="cw-diff__head"><span class="cw-plan__ic cw-plan__ic--fail cw-plan__ic--lg">✗</span><strong>' + escapeHtml(msg || "") + "</strong>" + (title ? '<span class="cw-diff__sum">' + escapeHtml(title) + "</span>" : "") + '</div><div class="cw-plan__list">' + rowsHtml(true) + '</div><div class="cw-diff__acts">' + (onRetry ? '<button type="button" class="cw-diff__apply cw-plan__retry">' + escapeHtml(retryLbl) + "</button>" : "") + '<button type="button" class="cw-diff__cancel cw-plan__stop">' + T.cancel + "</button></div></div>";
+    wrap.hidden = false;
+    const stop = wrap.querySelector(".cw-plan__stop");
+    if (stop) stop.onclick = () => { try { ac && ac.abort(); } catch (_) {} };
+    const retry = wrap.querySelector(".cw-plan__retry");
+    if (retry) retry.onclick = () => { try { onRetry && onRetry(); } catch (_) {} };
   };
   render(T.planning);
   return {
@@ -13829,7 +14187,9 @@ function cwStepUI(root, ac) {
     plan(t, list) { title = t || ""; steps = (list || []).map((f) => ({ file: f.file || f, does: f.does || "", state: "wait" })); render(T.planning); },
     step(i, h) { if (steps[i]) steps[i].state = "run"; render(h || (T.building + " " + (i + 1) + " " + T.of + " " + steps.length)); },
     mark(i) { if (steps[i]) steps[i].state = "done"; render(T.building); },
+    markFail(i) { if (steps[i]) steps[i].state = "fail"; render(T.building); },
     note(msg) { render(msg); },
+    fail(msg, onRetry) { renderFail(msg, onRetry); },
   };
 }
 function cwOneFileBody(out, path) {
@@ -13841,16 +14201,47 @@ function cwOneFileBody(out, path) {
   return String(stripToCode(out) || "").replace(/\n$/, "");
 }
 async function cwPlan(name, curFiles, request, isEdit, signal) {
-  const fileList = curFiles.length ? curFiles.map((f) => "- " + f.path + " (" + String(f.content || "").length + " chars)").join("\n") : "(empty — brand-new project)";
+  let fileList;
+  if (!curFiles.length) {
+    fileList = "(empty — brand-new project)";
+  } else if (isEdit) {
+    // EDIT: let the architect READ the code (like Claude Code) — real bodies for text files, a symbol digest otherwise — so 'does' briefs match reality. Prefer files the request names, cap the total.
+    const reqL = String(request || "").toLowerCase();
+    const mentioned = (f) => { const p = String(f.path || "").toLowerCase(); const base = (p.split("/").pop() || p).replace(/\.[^.]+$/, ""); return (p && reqL.includes(p)) || (base.length > 1 && reqL.includes(base)); };
+    const ranked = curFiles.slice().sort((a, b) => (mentioned(b) ? 1 : 0) - (mentioned(a) ? 1 : 0));
+    let budget = 9000; const parts = [];
+    for (const f of ranked) {
+      const c = String(f.content || ""); const isText = /\.(html?|css|jsx?|tsx?|vue|svelte|json|md|txt|mjs|cjs)$/i.test(f.path);
+      const head = c.slice(0, 1200);
+      const digest = isText ? (head + (c.length > head.length ? "\n… (truncated)" : "")) : (cwSiblingContract([f], "") || "(binary/opaque file — no readable body)");
+      const block = "===== " + f.path + " (" + c.length + " chars)" + (mentioned(f) ? " ★ named in request" : "") + " =====\n" + digest;
+      if (budget - block.length < 0) { parts.push("- " + f.path + " (" + c.length + " chars) [body omitted — over budget]"); continue; }
+      budget -= block.length; parts.push(block);
+    }
+    fileList = parts.join("\n\n");
+  } else {
+    fileList = curFiles.map((f) => "- " + f.path + " (" + String(f.content || "").length + " chars)").join("\n");
+  }
   const sys = isEdit
-    ? "You are Firas Code's ARCHITECT planning an EDIT to an EXISTING browser project. Read the request and the current file list, then decide the MINIMAL set of files that must be UPDATED or newly ADDED to satisfy it (1-6), and any that must be DELETED. NEVER list a file that does not change. For EACH file give a one-line brief of exactly what it must contain/do after the edit. Keep the app coherent (shared ids/classes/symbols stay stable). Return ONLY valid JSON, briefs in the user's language: {\"title\":\"short change title\",\"notes\":\"1-2 lines: the approach + any tech/library choice\",\"steps\":[{\"file\":\"relative/path.ext\",\"does\":\"what this file must contain after the edit\"}],\"dels\":[\"path/to/delete.ext\"]}"
-    : ("You are Firas Code's ARCHITECT planning a COMPLETE, professional multi-file browser project that runs AS-IS with no build step. From the description, design a clean file structure of 3-8 files split by concern (ALWAYS an index.html entry; typically index.html + css/styles.css + js/app.js, plus more pages/modules/README.md when the app warrants it). Decide the tech up front (vanilla vs a pinned CDN library) and note it. For EACH file give a one-line brief of what it does and the shared ids/classes/symbols it will own, so the files wire together. Order foundations first (html, then css, then js, then extra pages)." +
+    ? "You are Firas Code's ARCHITECT planning an EDIT to an EXISTING browser project. First READ the request and the ACTUAL current file bodies/digests provided below (real code, not just names), then decide the MINIMAL set of files that must be UPDATED or newly ADDED to satisfy it (1-6), and any that must be DELETED. NEVER list a file that does not change. For EACH file give a one-line brief of exactly what it must contain/do after the edit — every brief MUST be grounded in what the code ACTUALLY contains right now (reference the real ids/classes/functions you see), never a guess that contradicts the current file. Keep the app coherent (shared ids/classes/symbols stay stable). Return ONLY valid JSON, briefs in the user's language: {\"title\":\"short change title\",\"notes\":\"1-2 lines: the approach + any tech/library choice\",\"steps\":[{\"file\":\"relative/path.ext\",\"does\":\"what this file must contain after the edit\"}],\"dels\":[\"path/to/delete.ext\"]}"
+    : ("You are Firas Code's ARCHITECT planning a COMPLETE, professional multi-file browser project that runs AS-IS with no build step. From the description, choose the file count that fits the SCOPE — do not anchor on a fixed number (ALWAYS an index.html entry): a small utility is 3-5 files (index.html + css/styles.css + js/app.js, plus maybe one module); a multi-feature app (dashboard, store, planner, multi-page site) MUST be decomposed into MORE files (up to 8) — one module per feature/route, a dedicated data/state layer (js/store.js or js/data.js), reusable UI/component files, a js/router.js or per-page HTML, plus README.md. NEVER collapse a large app into 3 files; NEVER pad a tiny one. Split by single-responsibility, not by arbitrary count. Decide the tech up front (vanilla vs a pinned CDN library) and note it. For EACH file give a one-line brief of what it does and the shared ids/classes/symbols it will own, so the files wire together. Order foundations first (html, then css, then js, then extra pages)." +
       (cwIsGameRequest(request) ? (" THIS IS A GAME: design a REAL game architecture split into engine/loop, entities, input, and UI/HUD files (e.g. index.html + css/styles.css + js/engine.js (the requestAnimationFrame game loop + state) + js/entities.js + js/input.js + js/ui.js" + (cwIs3DRequest(request) ? ", and it is 3D — plan to load Three.js from " + THREE_CDN_URL + " and split js/world.js (scene/camera/renderer/lighting) + js/player.js (controls)" : "") + "). The plan MUST yield a genuinely playable, animated, substantial game — not a static demo.") : "") +
+      " Use a CONVENTIONAL nested layout so the file tree has real structure: index.html stays at the project ROOT; put stylesheets under css/ (css/styles.css), scripts under js/ (js/app.js and any extra modules each as their own js/*.js file), images/icons/fonts under assets/, and any JSON/seed data under data/. Group every non-entry file into one of these folders — do NOT dump everything flat at the root." +
       " Return ONLY valid JSON, briefs in the user's language: {\"title\":\"short project name\",\"notes\":\"1-2 lines: architecture + tech choice\",\"steps\":[{\"file\":\"relative/path.ext\",\"does\":\"what it does + ids/classes/symbols it owns\"}],\"dels\":[]}");
   const usr = "PROJECT: " + name + "\n\nCURRENT FILES:\n" + fileList + "\n\n" + (isEdit ? "EDIT REQUEST:\n" : "WHAT TO BUILD:\n") + String(request).slice(0, isEdit ? 1200 : 1800);
-  let plan = null;
-  try { const raw = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", signal); const jm = raw.match(/\{[\s\S]*\}/); plan = jm ? JSON.parse(jm[0]) : null; } catch (_) { plan = null; }
-  if (!plan || !Array.isArray(plan.steps) || !plan.steps.length) return null;
+  let plan = null, rawPlan = "";
+  const parsePlan = (txt) => { try { const jm = String(txt || "").match(/\{[\s\S]*\}/); return jm ? JSON.parse(jm[0]) : null; } catch (_) { return null; } };
+  const planOk = (p) => !!(p && Array.isArray(p.steps) && p.steps.some((s) => s && typeof s.file === "string" && s.file.trim()));
+  try { rawPlan = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", signal); plan = parsePlan(rawPlan); } catch (_) { plan = null; }
+  if (!planOk(plan) && rawPlan && !signal.aborted) {   // ONE cheap repair round-trip recovers near-miss JSON (trailing comma / stray brace) instead of collapsing to the weak single-shot fallback
+    try {
+      const fixSys = "You output ONLY corrected, valid JSON — no prose, no markdown, no code fences. Repair the text below into ONE JSON object that matches EXACTLY this schema: {\"title\":string,\"notes\":string,\"steps\":[{\"file\":\"non-empty relative path string\",\"does\":string}],\"dels\":[string]}. Preserve the original titles/briefs/paths; only fix JSON syntax (braces, brackets, commas, quotes) and DROP any step whose file is empty or missing.";
+      const fixed = await agentCall([{ role: "system", content: fixSys }, { role: "user", content: "RAW (repair to valid JSON):\n" + String(rawPlan).slice(0, 6000) }], "max", signal);
+      const repaired = parsePlan(fixed);
+      if (planOk(repaired)) plan = repaired;
+    } catch (_) {}
+  }
+  if (!planOk(plan)) return null;
   const seen = new Set();
   const steps = plan.steps.map((s) => ({ file: String((s && s.file) || "").trim().replace(/^\/+/, "").replace(/[^\w./-]+/g, "-").slice(0, 120), does: String((s && s.does) || "").slice(0, 200) })).filter((s) => s.file && !seen.has(s.file) && seen.add(s.file)).slice(0, CW_PLAN_MAX_FILES);
   if (!steps.length) return null;
@@ -13867,7 +14258,7 @@ async function cwPlanBuild(name, curFiles, request, isEdit, ui, signal) {
   const built = [], changes = [];
   for (let i = 0; i < plan.steps.length; i++) {
     if (signal.aborted || ui.cancelled()) break;
-    if (Date.now() - t0 > CW_BUILD_BUDGET_MS) return null;
+    if (Date.now() - t0 > Math.min(CW_BUILD_BUDGET_MS + plan.steps.length * 30000, 600000)) break;   // budget scales with plan size; on timeout keep what's built and let the entry/coverage gate decide (graceful degradation, not a blind restart)
     const st = plan.steps[i];
     ui.step(i, cwPlanT().building + " " + (i + 1) + "/" + plan.steps.length + " · " + st.file);
     const isWebFile = /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(st.file);
@@ -13875,7 +14266,7 @@ async function cwPlanBuild(name, curFiles, request, isEdit, ui, signal) {
     const contract = cwSiblingContract(contractFrom, st.file);
     const prevFile = curFiles.find((f) => f.path === st.file);
     const sys = "You are Firas Code building ONE FILE of a professional multi-file project. Output ONLY the COMPLETE, FINAL content of `" + st.file + "` in ONE fenced code block — no commentary, no omissions, never stop mid-file. Stay perfectly CONSISTENT with the plan and the other files (ids, classes, imports, paths, function names)." + cwBrain(isWebFile, request) + langRule;
-    const builtTxt = built.map((b) => "===== " + b.path + " (built this run) =====\n" + String(b.content).slice(0, 1800)).join("\n\n").slice(0, 9000);
+    const builtTxt = built.map((b) => "===== " + b.path + " (built this run) =====\n" + String(b.content).slice(0, 1800)).join("\n\n").slice(0, Math.min(9000 + plan.steps.length * 1500, 30000));   // scale the feed-forward budget with the decomposition size so late files in a big project still see earlier context (paths/ids/symbols stay consistent)
     const usr = (isEdit ? "EDIT REQUEST:\n" : "PROJECT GOAL:\n") + String(request).slice(0, 1800) + (plan.notes ? "\n\nARCHITECTURE NOTES:\n" + plan.notes : "") + "\n\nFULL PLAN:\n" + planList + (builtTxt ? "\n\nFILES ALREADY BUILT THIS RUN:\n" + builtTxt : "") + (contract ? "\n\nCROSS-FILE CONTRACT — reference these EXACT ids/classes/symbols siblings expose; only ADD new ones, never rename a shared one:\n" + contract : "") + (prevFile ? "\n\nCURRENT VERSION of `" + st.file + "` (EVOLVE it):\n" + String(prevFile.content || "").slice(0, 20000) : "") + "\n\nTHIS FILE'S JOB: " + st.does + "\n\nBUILD `" + st.file + "` NOW, COMPLETE start to end.";
     let body = "";
     try {
@@ -13885,8 +14276,19 @@ async function cwPlanBuild(name, curFiles, request, isEdit, ui, signal) {
       let cont = 0;
       while (body && !codeLooksComplete(body, lang0) && cont < 6 && !signal.aborted) {   // more continuation → big files finish, stronger code
         cont++;
-        const cSys = "You are FINISHING the file `" + st.file + "` that was cut off. Continue from the EXACT last character — do NOT restart, re-emit, or summarize. Output ONLY raw continuation code that completes the file (close every tag/bracket/string; HTML ends with </html>). No fences, no commentary.";
-        const cUsr = "FILE SO FAR (ends abruptly):\n\n" + body.slice(-8000) + "\n\n(Continue now.)";
+        const cSys = "You are FINISHING the file `" + st.file + "` that was cut off. Continue from the EXACT last character — do NOT restart, re-emit, or summarize. Output ONLY raw continuation code that completes the file (close every tag/bracket/string; HTML ends with </html>). No fences, no commentary." + (contract ? "\n\nKeep using ONLY these shared ids/classes/symbols — do NOT introduce new element ids or rename anything:\n" + contract.slice(0, 1500) : "");
+        const cHead = String(body).slice(0, 1500);
+        const cTail = String(body).slice(-6000);
+        const cOpenBraces = (body.match(/\{/g) || []).length - (body.match(/\}/g) || []).length;
+        const cOpenParens = (body.match(/\(/g) || []).length - (body.match(/\)/g) || []).length;
+        const cOpenBrackets = (body.match(/\[/g) || []).length - (body.match(/\]/g) || []).length;
+        const cOpenTags = (body.match(/<[a-zA-Z][^>]*>/g) || []).length - (body.match(/<\/[a-zA-Z][^>]*>/g) || []).length - (body.match(/<[^>]*\/>/g) || []).length;
+        const cHints = [];
+        if (cOpenBraces > 0) cHints.push(cOpenBraces + " unclosed { }");
+        if (cOpenParens > 0) cHints.push(cOpenParens + " unclosed ( )");
+        if (cOpenBrackets > 0) cHints.push(cOpenBrackets + " unclosed [ ]");
+        if (cOpenTags > 0) cHints.push("~" + cOpenTags + " unclosed HTML tag(s)");
+        const cUsr = "FILE OPENING (the structure — doctype/head/ids/imports/signatures — you MUST stay consistent with; reuse these EXACT ids/classes/symbols, never re-invent them):\n\n" + cHead + "\n\n…[middle omitted]…\n\nFILE END (continue AFTER this exact character — do NOT restart):\n\n" + cTail + (cHints.length ? "\n\nSTILL OPEN: " + cHints.join(", ") + " — close them." : "") + "\n\n(Continue now.)";
         const piece = await agentCall([{ role: "system", content: cSys }, { role: "user", content: cUsr }], "max", signal);
         const add = String(stripToCode(piece) || piece).replace(/```/g, "");
         if (add.length < 6) break;
@@ -13899,10 +14301,61 @@ async function cwPlanBuild(name, curFiles, request, isEdit, ui, signal) {
     }
     if (!body) continue;
     const lang = /\.html?$/i.test(st.file) ? "html" : /\.css$/i.test(st.file) ? "css" : "js";
-    if (prevFile && body.length < String(prevFile.content || "").length * 0.5 && !codeLooksComplete(body, lang)) continue;
+    const isExtractEdit = isEdit && /split|extract|move|decompose|استخراج|تقسيم|نقل|فصل/i.test(String(request || ""));
+    if (prevFile && !isExtractEdit && body.length < String(prevFile.content || "").length * 0.5 && !codeLooksComplete(body, lang)) continue;   // don't discard a legitimately-shrunk source file during an extract/split refactor
     built.push({ path: st.file, content: body });
     changes.push({ path: st.file, content: body });
     ui.mark(i);
+  }
+  if (isEdit && changes.length) {
+    // POST-BUILD WIRING CHECK — an extract-edit that adds a new .js/.css/module but forgets the
+    // <script>/<link>/import is invisible until runtime (unstyled page, moved fn is undefined). Do a cheap
+    // STATIC resolve: every newly-added file must be referenced by a changed sibling; if not, rebuild the
+    // most-likely referrer ONCE to wire it in. Capped at one extra round to stay within budget.
+    const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const newFiles = changes.filter((c) => /\.(m?js|css)$/i.test(c.path) && !curFiles.some((f) => f.path === c.path));
+    const hasRef = (nf) => {
+      const base = esc(nf.path.split("/").pop());
+      const isCss = /\.css$/i.test(nf.path);
+      return changes.some((c) => {
+        if (c.path === nf.path) return false;
+        const t = String(c.content || "");
+        if (isCss) return new RegExp("<link[^>]+href=[\"'][^\"']*" + base, "i").test(t);
+        return new RegExp("<script[^>]+src=[\"'][^\"']*" + base, "i").test(t) || new RegExp("(?:import|require)\\b[^\\n]*[\"'][^\"']*" + base, "i").test(t);
+      });
+    };
+    const dangling = newFiles.filter((nf) => !hasRef(nf));
+    if (dangling.length && !signal.aborted && !ui.cancelled() && Date.now() - t0 <= CW_BUILD_BUDGET_MS) {
+      // Referrer = the file the code was extracted from: largest edited html/js sibling, else the entry index.html.
+      const editedSibs = changes.filter((c) => curFiles.some((f) => f.path === c.path) && /\.(html?|m?js)$/i.test(c.path));
+      const target = editedSibs.slice().sort((a, b) => String(b.content).length - String(a.content).length)[0]
+        || changes.find((c) => /(^|\/)index\.html?$/i.test(c.path))
+        || curFiles.find((c) => /(^|\/)index\.html?$/i.test(c.path));
+      if (target) {
+        const list = dangling.map((d) => d.path).join(", ");
+        const isWebTgt = /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(target.path);
+        const wSys = "You are Firas Code fixing WIRING in `" + target.path + "`. Output ONLY the COMPLETE, FINAL content of `" + target.path + "` in ONE fenced code block — no commentary, never stop mid-file. Keep everything that already works; change NOTHING except adding what is needed to load the new file(s)." + cwBrain(isWebTgt, request) + langRule;
+        const wUsr = "These NEW files were just added but NOTHING in the project loads them yet: " + list + ".\n\nEdit `" + target.path + "` to WIRE THEM IN with the CORRECT mechanism and CORRECT relative path so each file actually loads: a `<script src=...>` (before </body>) for .js, a `<link rel=\"stylesheet\" href=...>` (in <head>) for .css, or an `import`/`require` for a module. Add ONLY the missing references; leave the rest of the file intact.\n\nCURRENT `" + target.path + "`:\n" + String(target.content || "").slice(0, 20000);
+        try {
+          const out = await agentCall([{ role: "system", content: wSys }, { role: "user", content: wUsr }], "max", signal);
+          const lang0 = /\.html?$/i.test(target.path) ? "html" : (target.path.split(".").pop() || "");
+          let body = cwOneFileBody(out, target.path), cont = 0;
+          while (body && !codeLooksComplete(body, lang0) && cont < 3 && !signal.aborted) {
+            cont++;
+            const cSys = "You are FINISHING the file `" + target.path + "` that was cut off. Continue from the EXACT last character — do NOT restart, re-emit, or summarize. Output ONLY raw continuation code that completes the file (close every tag/bracket/string; HTML ends with </html>). No fences, no commentary.";
+            const piece = await agentCall([{ role: "system", content: cSys }, { role: "user", content: "FILE SO FAR (ends abruptly):\n\n" + body.slice(-8000) + "\n\n(Continue now.)" }], "max", signal);
+            const add = String(stripToCode(piece) || piece).replace(/```/g, "");
+            if (add.length < 6) break;
+            body = joinCodeContinuation(body, add);
+          }
+          if (body && body.length > String(target.content || "").length * 0.6) {
+            const idx = changes.findIndex((c) => c.path === target.path);
+            if (idx >= 0) changes[idx] = { path: target.path, content: body };
+            else changes.push({ path: target.path, content: body });
+          }
+        } catch (_) {}
+      }
+    }
   }
   if (!isEdit) {
     const hasEntry = changes.some((c) => /(^|\/)index\.html?$/i.test(c.path));
@@ -13910,8 +14363,83 @@ async function cwPlanBuild(name, curFiles, request, isEdit, ui, signal) {
     if (changes.length < Math.ceil(plan.steps.length * 0.6)) return null;
   }
   if (!changes.length && !plan.dels.length) return null;
+  // ── Post-build wiring reconciliation ───────────────────────────────────────
+  // The step that VERIFIES coherence instead of merely hinting at it: collect what the
+  // finished project actually DEFINES (file paths + element ids) vs what each built file
+  // REFERENCES (script/link/import paths, getElementById / #querySelector targets), then
+  // RE-EMIT up to 2 files whose references resolve to nothing — repaired to the real names.
+  try {
+    const allFiles = built.concat(curFiles.filter((f) => !built.some((b) => b.path === f.path)));
+    if (allFiles.length > 1) {
+      const norm = (p) => String(p || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
+      const filePaths = new Set(allFiles.map((f) => norm(f.path)));
+      const resolveRef = (fromPath, ref) => {
+        let r = String(ref || "").trim().split(/[?#]/)[0];
+        if (!r || /^(https?:)?\/\//i.test(r) || /^(data|mailto|tel|blob|javascript):/i.test(r) || r[0] === "#") return null;
+        const out = fromPath.indexOf("/") >= 0 ? fromPath.replace(/\/[^/]*$/, "").split("/") : [];
+        r.split("/").forEach((s) => { if (s === "" || s === ".") return; if (s === "..") out.pop(); else out.push(s); });
+        return norm(out.join("/"));
+      };
+      const definedIds = new Set();
+      allFiles.forEach((f) => { const txt = String(f.content || ""); let m; const re = /(?:\bid\s*=\s*|\.id\s*=\s*)["'`]([A-Za-z][\w-]*)/g; while ((m = re.exec(txt))) definedIds.add(m[1]); });
+      const unresolvedOf = (path, content) => {
+        const txt = String(content || ""); const bad = []; const seen = new Set(); let m;
+        const add = (label) => { if (!seen.has(label)) { seen.add(label); bad.push(label); } };
+        const pathRe = /(?:\b(?:src|href)\s*=\s*|\bfrom\s+|\bimport\s*\(\s*)["'`]([^"'`]+)["'`]/g;
+        while ((m = pathRe.exec(txt))) { const t = resolveRef(path, m[1]); if (t && /\.(html?|css|m?jsx?|json)$/i.test(t) && !filePaths.has(t)) add(m[1]); }
+        const idRe = /getElementById\(\s*["'`]([\w-]+)["'`]|querySelector(?:All)?\(\s*["'`]#([\w-]+)["'`]\s*\)/g;
+        while ((m = idRe.exec(txt))) { const id = m[1] || m[2]; if (id && !definedIds.has(id)) add("#" + id); }
+        return bad;
+      };
+      const definedList = Array.from(filePaths).sort().join(", ");
+      const idList = Array.from(definedIds).slice(0, 120).join(", ");
+      let reconciled = 0;
+      for (let i = 0; i < changes.length && reconciled < 2; i++) {
+        if (signal.aborted || ui.cancelled()) break;
+        if (Date.now() - t0 > CW_BUILD_BUDGET_MS) break;
+        const ch = changes[i];
+        const bad = unresolvedOf(ch.path, ch.content);
+        if (!bad.length) continue;
+        ui.note(cwPlanT().building + " · " + ch.path);
+        const isWebFile = /\.(html?|css|jsx?|tsx?|vue|svelte)$/i.test(ch.path);
+        const others = allFiles.filter((f) => f.path !== ch.path).map((f) => "===== " + f.path + " =====\n" + String(f.content).slice(0, 4000)).join("\n\n").slice(0, 22000);
+        const rSys = "You are Firas Code REPAIRING ONE FILE so it WIRES UP to the rest of a finished multi-file project. Output ONLY the COMPLETE, FINAL content of `" + ch.path + "` in ONE fenced code block — no commentary, never stop mid-file. Change ONLY what is needed to make every reference resolve; keep all working behavior, structure and styling intact." + cwBrain(isWebFile, request) + langRule;
+        const rUsr = "REAL FILES IN THIS PROJECT (use these EXACT paths): " + definedList + "\nREAL ELEMENT IDS THAT ACTUALLY EXIST: " + (idList || "(none)") +
+          "\n\nTHESE REFERENCES IN `" + ch.path + "` RESOLVE TO NOTHING — fix each to the correct real name/path from the lists above (e.g. a mistyped src=\"js/app.js\" when the real file is js/main.js, or a getElementById for an id no file defines):\n- " + bad.join("\n- ") +
+          "\n\nOTHER FILES (for the exact names/ids to reference):\n" + others +
+          "\n\nCURRENT `" + ch.path + "` (repair it, keep everything else intact):\n" + String(ch.content).slice(0, 24000) +
+          "\n\nRe-emit `" + ch.path + "` NOW, COMPLETE start to end, with every reference resolved.";
+        let fixed = "";
+        try { const out = await agentCall([{ role: "system", content: rSys }, { role: "user", content: rUsr }], "max", signal); fixed = cwOneFileBody(out, ch.path); }
+        catch (e) { if (signal.aborted) break; continue; }
+        const lang = /\.html?$/i.test(ch.path) ? "html" : /\.css$/i.test(ch.path) ? "css" : "js";
+        if (fixed && codeLooksComplete(fixed, lang) && fixed.length > String(ch.content).length * 0.5) {
+          changes[i] = { path: ch.path, content: fixed };
+          const bi = built.findIndex((b) => b.path === ch.path); if (bi >= 0) built[bi] = { path: ch.path, content: fixed };
+          reconciled++;
+        }
+      }
+    }
+  } catch (_) {}
   ui.note(cwPlanT().finishing);
-  return { changes, dels: isEdit ? plan.dels : [], summary: (plan.title || "").slice(0, 220) };
+  return { changes: cwEnsureViewport(changes), dels: isEdit ? plan.dels : [], summary: (plan.title || "").slice(0, 220) };
+}
+/* Deterministic responsive floor — a full HTML document with no <meta name="viewport"> is
+   rendered by phones at a fake ~980px desktop width, so EVERY media query is silently ignored.
+   The viewport meta is the single non-negotiable prerequisite for any responsive behavior, so
+   guarantee it here rather than trust the model to emit it on every file. For each full-document
+   .html change (has a <head>, viewport meta absent) inject the tag right after the opening <head>;
+   fragments with no <head> are left untouched, and an existing viewport meta is never duplicated. */
+function cwEnsureViewport(changes) {
+  if (!Array.isArray(changes)) return changes;
+  for (const ch of changes) {
+    if (!ch || !/\.html?$/i.test(String(ch.path || ""))) continue;
+    const html = String(ch.content == null ? "" : ch.content);
+    if (/<head[\s>]/i.test(html) && !/name=["']?viewport/i.test(html)) {
+      ch.content = html.replace(/<head([^>]*)>/i, '<head$1>\n  <meta name="viewport" content="width=device-width,initial-scale=1">');
+    }
+  }
+  return changes;
 }
 /* Build a COMPLETE multi-file project from a natural-language description (the "create with AI" path
    on the home). Plans + builds per file; falls back to a strengthened single-shot. Returns [{path,content}]. */
@@ -13926,16 +14454,95 @@ async function cwGenerateProject(name, desc, root, signal) {
     clearDiff();   // developer produced nothing → fall through to the generic build path
   }
   const ui = (root && root.querySelector(".cw-diff")) ? cwStepUI(root, ac) : { plan() {}, step() {}, mark() {}, note() {}, cancelled: () => sig.aborted };
+  /* POST-BUILD DOM A11Y PROBE — the non-game safety net that mirrors the game verify loop: mount the
+     built files in a hidden, sandboxed iframe (allow-scripts only, fully isolated) and run a
+     querySelector audit for CONCRETE accessibility violations. No new deps. Degrades to [] on error. */
+  function cwA11yProbe(html, timeoutMs) {
+    return new Promise((resolve) => {
+      try {
+        const audit = "<script>window.addEventListener('load',function(){setTimeout(function(){try{"
+          + "var V=[];var F={A:1,BUTTON:1,INPUT:1,SELECT:1,TEXTAREA:1};"
+          + "var d=function(el){var t=el.tagName.toLowerCase();var c=(el.className&&typeof el.className==='string'&&el.className.trim())?'.'+el.className.trim().split(/\\s+/)[0]:'';return t+(el.id?'#'+el.id:c);};"
+          + "if(!document.documentElement.getAttribute('lang'))V.push('<html> has no lang attribute — add lang (e.g. \"ar\" or \"en\").');"
+          + "if(!document.querySelector('main,[role=main]'))V.push('No <main> landmark — wrap the primary content in a <main> element.');"
+          + "Array.prototype.forEach.call(document.querySelectorAll('button,a[href],[role=button]'),function(el){var txt=(el.textContent||'').replace(/\\s+/g,' ').trim();var al=el.getAttribute('aria-label')||el.getAttribute('aria-labelledby');var im=el.querySelector&&el.querySelector('img[alt]:not([alt=\"\"])');if(!txt&&!al&&!im)V.push('Control with no accessible name: '+d(el)+' — add visible text or an aria-label.');});"
+          + "Array.prototype.forEach.call(document.querySelectorAll('img'),function(im){if(im.getAttribute('alt')===null)V.push('<img> without alt: '+String(im.getAttribute('src')||d(im)).slice(0,40)+' — add alt (alt=\"\" only if purely decorative).');});"
+          + "Array.prototype.forEach.call(document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]),select,textarea'),function(f){var al=f.getAttribute('aria-label')||f.getAttribute('aria-labelledby')||f.getAttribute('title');var wrap=f.closest&&f.closest('label');var byFor=false;if(f.id){var L=document.querySelectorAll('label[for]');for(var k=0;k<L.length;k++){if(L[k].getAttribute('for')===f.id){byFor=true;break;}}}if(!al&&!wrap&&!byFor)V.push('Form field with no label: '+d(f)+' — add a <label for>, wrap it in <label>, or add an aria-label.');});"
+          + "Array.prototype.forEach.call(document.querySelectorAll('[onclick]'),function(el){if(F[el.tagName])return;var r=el.getAttribute('role');if(r==='button'||r==='link')return;if(el.getAttribute('tabindex')===null)V.push('Clickable non-focusable element: '+d(el)+' — it has a click handler but no keyboard access; give it tabindex=\"0\", role=\"button\", and a keydown handler for Enter/Space.');});"
+          + "parent.postMessage({__a11y:1,v:V.slice(0,12)},'*');"
+          + "}catch(e){parent.postMessage({__a11y:1,v:[]},'*');}},400);});<\/script>";
+        let d = String(html || "");
+        d = /<head[^>]*>/i.test(d) ? d.replace(/<head[^>]*>/i, (m) => m + audit) : audit + d;
+        const iframe = document.createElement("iframe");
+        iframe.setAttribute("sandbox", "allow-scripts");
+        iframe.style.cssText = "position:fixed;left:-9999px;top:0;width:1280px;height:900px;visibility:hidden";
+        let done = false;
+        const finish = (list) => { if (done) return; done = true; window.removeEventListener("message", onMsg); try { iframe.remove(); } catch (_) {} resolve((list || []).map((s) => String(s).slice(0, 200)).slice(0, 12)); };
+        const onMsg = (e) => { if (e.data && e.data.__a11y) finish(Array.isArray(e.data.v) ? e.data.v : []); };
+        window.addEventListener("message", onMsg);
+        iframe.srcdoc = d;
+        document.body.appendChild(iframe);
+        setTimeout(() => finish([]), timeoutMs || 4500);
+      } catch (_) { resolve([]); }
+    });
+  }
   try {
     const res = await cwPlanBuild(name, [], desc, false, ui, sig);
-    if (res && res.changes.length) { clearDiff(); return res.changes.slice(0, 30); }
+    if (res && res.changes.length) {
+      let changes = res.changes.slice(0, 30);
+      // AUDIT the built app for a11y violations; if any, run ONE targeted single-file fix round.
+      try {
+        const entry = changes.find((c) => /(^|\/)index\.html?$/i.test(c.path)) || changes.find((c) => /\.html?$/i.test(c.path));
+        if (entry && !sig.aborted && typeof projPreviewHtml === "function") {
+          const doc = projPreviewHtml({ name: "a", files: changes }, entry.path);
+          const violations = doc ? await cwA11yProbe(doc, 4500) : [];
+          if (violations.length && !sig.aborted) {
+            ui.note(cwPlanT().finishing);
+            const fSys = "You are Firas Code fixing ACCESSIBILITY defects in ONE file of a built project. Output ONLY the COMPLETE, FINAL content of `" + entry.path + "` in ONE fenced code block — no commentary, no omissions. Fix EVERY listed violation with real, minimal, semantic markup: add visible text or aria-label to unlabeled controls, alt to images, a real <label for>/wrapping <label>/aria-label to form fields, lang on <html>, a <main> landmark, and make [onclick] elements keyboard-operable (tabindex=\"0\" + role=\"button\" + a keydown handler for Enter/Space). Change NOTHING else and keep every id/class/handler/import the other files rely on." + cwBrain(true, desc) + cwLangRule();
+            const fUsr = "FILE `" + entry.path + "` (fix in place):\n\n" + String(entry.content).slice(0, 22000) + "\n\nACCESSIBILITY VIOLATIONS the DOM audit found — fix ALL of them:\n- " + violations.join("\n- ") + "\n\nReturn the COMPLETE corrected `" + entry.path + "`.";
+            const fixed = await agentCall([{ role: "system", content: fSys }, { role: "user", content: fUsr }], "max", sig);
+            const body = cwOneFileBody(fixed, entry.path);
+            if (body && body.length > String(entry.content).length * 0.6) changes = changes.map((c) => c.path === entry.path ? { path: c.path, content: body } : c);
+          }
+        }
+      } catch (_) {}
+      clearDiff();
+      return changes;
+    }
   } catch (_) {}
   clearDiff();
-  const isWeb = !/^\s*(python|node|cli|bot|api)\b/i.test(String(desc || ""));
-  const sys = "You are Firas Code, a principal software engineer building like Claude Code. From the user's description, CREATE a COMPLETE, professional, production-quality multi-file project that RUNS AS-IS in a browser (no build step). Think first about ARCHITECTURE: split into clean, well-named files with clear responsibilities (web app baseline: index.html + css/styles.css + js/app.js, plus more pages/modules/data files when warranted) and keep them perfectly CONSISTENT — every id/class/function/import/path a file uses must exist in the files you output. Write REAL, working logic: every button/form/feature works, search/filter/sort really filter, a cart/todo/favorites really updates and PERSISTS via localStorage, forms validate and give feedback. Refined responsive design and polished modern styling throughout. Absolutely NO placeholders, NO 'TODO', NO '...', NO empty handlers, NO skeletons. STRICT OUTPUT: ONE short summary line in the user's language, then for EVERY file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE file content>\n```\nALWAYS include an index.html entry. Use a CDN library only when it clearly helps (official browser/UMD build, pinned, correct no-build init). Output every file COMPLETE, start to end, never truncated." + cwBrain(isWeb, desc) + cwLangRule();
-  const usr = "PROJECT NAME: " + name + "\n\nWHAT TO BUILD:\n" + String(desc).slice(0, 1500);
-  const out = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", null);
-  return cwParseFileBlocks(out, null).changes.slice(0, 30);
+  function cwIsBackendRequest(t) {
+    const s = String(t || "").toLowerCase();
+    if (/\b(express|fastify|koa|hapi|nest(?:js)?|flask|django|fastapi|sanic|bottle|sinatra|rails|laravel|spring ?boot|gin|fiber|actix)\b/.test(s)) return true;
+    if (/\b(rest|graphql|grpc)\b[\s-]*api\b/.test(s) || /\bapi\b[^.]{0,40}\b(endpoint|server|backend|route|crud)/.test(s)) return true;
+    if (/\b(back[\s-]?end|server[\s-]?side|micro[\s-]?service|web ?server|http ?server|web ?socket ?server|scraper|crawler|cron ?job|daemon|worker ?queue)\b/.test(s)) return true;
+    if (/\b(cli|command[\s-]?line|terminal app)\b/.test(s)) return true;
+    if (/\b(discord|telegram|slack|whatsapp|twitter|reddit) ?bot\b/.test(s) || /\bbot\b[^.]{0,40}\b(discord|telegram|slack)/.test(s)) return true;
+    if (/\b(node(?:\.?js)?|python|deno|bun)\b[^.]{0,40}\b(server|api|script|backend|bot|cli|daemon|worker)\b/.test(s)) return true;
+    if (/\bpackage\.json\b|\brequirements\.txt\b|\bnpm (?:install|run|start)\b|\bpip install\b/.test(s)) return true;
+    if (/^\s*(python|node|cli|bot|api)\b/.test(s)) return true;
+    return false;
+  }
+  const isWeb = !cwIsBackendRequest(desc);
+  const WEB_SYS = "You are Firas Code, a principal software engineer building like Claude Code. From the user's description, CREATE a COMPLETE, professional, production-quality multi-file project that RUNS AS-IS in a browser (no build step). Think first about ARCHITECTURE: split into clean, well-named files with clear responsibilities (web app baseline: index.html + css/styles.css + js/app.js, plus more pages/modules/data files when warranted) and keep them perfectly CONSISTENT — every id/class/function/import/path a file uses must exist in the files you output. Write REAL, working logic: every button/form/feature works, search/filter/sort really filter, a cart/todo/favorites really updates and PERSISTS via localStorage, forms validate and give feedback. Refined responsive design and polished modern styling throughout. Absolutely NO placeholders, NO 'TODO', NO '...', NO empty handlers, NO skeletons. STRICT OUTPUT: ONE short summary line in the user's language, then for EVERY file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE file content>\n```\nALWAYS include an index.html entry. Use a CDN library only when it clearly helps (official browser/UMD build, pinned, correct no-build init). Output every file COMPLETE, start to end, never truncated.";
+  const BACKEND_SYS = "You are Firas Code, a principal software engineer building like Claude Code. From the user's description, CREATE a COMPLETE, professional, production-quality multi-file BACKEND/SERVER project the user can install and run locally. Think first about ARCHITECTURE: split into clean, well-named files with clear responsibilities (a correct entry module — e.g. server.js / app.py / main.py / index.mjs — plus routes/controllers/services/models/middleware/config modules as warranted) and keep them perfectly CONSISTENT — every import/require/route/function/path a file uses must exist in the files you output. Write REAL, working logic: real routes/handlers, a real data layer (in-memory seed OR SQLite/JSON-file persistence), input validation, proper error handling and correct HTTP status codes, logging. Absolutely NO placeholders, NO 'TODO', NO '...', NO empty handlers, NO stubs. You MUST also include: a package.json with real PINNED dependency versions and a `start` script (plus a `dev` script) for Node projects — OR a requirements.txt with pinned versions for Python; a .env.example listing every variable, and a small config module that reads process.env / os.environ with sane defaults; and a README.md with the EXACT install command, the EXACT run command, and a sample curl request (with expected response) for each main endpoint. STRICT OUTPUT: ONE short summary line in the user's language, then for EVERY file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE file content>\n```\nDo NOT force an index.html and do NOT write browser-only code — build a real runnable server folder that starts with the documented command. Output every file COMPLETE, start to end, never truncated.";
+  const sys = (isWeb ? WEB_SYS : BACKEND_SYS) + cwBrain(isWeb, desc) + cwLangRule();
+  const usr = "PROJECT NAME: " + name + "\n\nWHAT TO BUILD:\n" + String(desc).slice(0, 8000);
+  if (sig && sig.aborted) return [];
+  const out = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", sig);
+  if (sig && sig.aborted) return [];
+  const fb = cwParseFileBlocks(out, null);
+  try {
+    if (fb.changes.length >= 3 && !fb.changes.some((c) => /(^|\/)readme\.md$/i.test(c.path))) {
+      const rdSys = "You are Firas Code writing the README.md for a project that was just generated. Output ONLY the raw Markdown body of README.md — no surrounding ``` fence, no preamble, no closing remarks. Base every statement on the ACTUAL files listed by the user; do NOT invent features, files, or commands that aren't there. Include, in this order: an H1 with the project name; a one-paragraph description of what it does; a '## Features' bullet list drawn from the real functionality; a '## Project structure' section listing the files with a one-line note each; a '## Run it' section (for a browser web app: open index.html directly — there is no build step; for a Node/Python project: the exact install + run commands implied by the files); and a short '## Tech' line naming any libraries actually used. Keep it accurate, concise, and professional." + cwLangRule();
+      const manifest = fb.changes.map((c) => "• " + c.path + " — " + String(c.content || "").replace(/\s+/g, " ").slice(0, 200)).join("\n");
+      const rdUsr = "PROJECT NAME: " + name + "\n\nFILES IN THE PROJECT (path — content digest):\n" + manifest.slice(0, 6000);
+      const rd = await agentCall([{ role: "system", content: rdSys }, { role: "user", content: rdUsr }], "max", null);
+      const rdText = String(rd || "").replace(/^\s*```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+      if (rdText.length > 40) fb.changes.push({ path: "README.md", content: rdText });
+    }
+  } catch (_) {}
+  return fb.changes.slice(0, 30);
 }
 function cwRefreshPreview(root, chat) {
   const { files } = codeFilesOf(chat);
@@ -14144,6 +14751,53 @@ function cwWireLayoutResize() {
   window.addEventListener("orientationchange", onResize, { passive: true });
   if (window.visualViewport) window.visualViewport.addEventListener("resize", onResize, { passive: true });
 }
+function cwSearchAll(chat, query, opts) {
+  opts = opts || {};
+  const MAX_TOTAL = 500, MAX_PER_FILE = 200;
+  const out = { total: 0, perFile: [], error: "" };
+  const q = String(query == null ? "" : query);
+  if (!q) return out;
+  const files = (codeFilesOf(chat).files) || [];
+  const flags = "g" + (opts.caseSensitive ? "" : "i");
+  let rx;
+  try {
+    let pat;
+    if (opts.regex) {
+      pat = q;
+    } else {
+      pat = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (opts.wholeWord) pat = "\\b" + pat + "\\b";
+    }
+    rx = new RegExp(pat, flags);
+  } catch (e) {
+    out.error = (state.lang === "ar" ? "نمط بحث غير صالح: " : "Invalid search pattern: ") + (e && e.message ? e.message : e);
+    return out;
+  }
+  for (let fi = 0; fi < files.length; fi++) {
+    if (out.total >= MAX_TOTAL) break;
+    const f = files[fi];
+    const lines = String(f.content || "").split("\n");
+    const matches = [];
+    for (let li = 0; li < lines.length; li++) {
+      if (out.total >= MAX_TOTAL || matches.length >= MAX_PER_FILE) break;
+      const line = lines[li];
+      rx.lastIndex = 0;
+      let m;
+      while ((m = rx.exec(line)) !== null) {
+        const start = m.index, end = m.index + (m[0] ? m[0].length : 0);
+        matches.push({
+          path: f.path, line: li + 1, col: start + 1,
+          text: line.trim(), start: start, end: end
+        });
+        out.total++;
+        if (rx.lastIndex === m.index) rx.lastIndex++; // avoid zero-width infinite loop
+        if (out.total >= MAX_TOTAL || matches.length >= MAX_PER_FILE) break;
+      }
+    }
+    if (matches.length) out.perFile.push({ path: f.path, matches: matches });
+  }
+  return out;
+}
 function cwRenderTree(root, chat) {
   const L = cwT();
   const { files } = codeFilesOf(chat);
@@ -14152,15 +14806,35 @@ function cwRenderTree(root, chat) {
   const nEl = root.querySelector(".cw-tree__n"); if (nEl) nEl.textContent = files.length;
   const cEl = root.querySelector(".cw-bar__count"); if (cEl) cEl.textContent = files.length + (state.lang === "ar" ? " ملفات" : " files");
   const extOf = (p) => (/\.html?$/.test(p) ? "html" : /\.css$/.test(p) ? "css" : /\.m?jsx?$/.test(p) ? "js" : /\.py$/.test(p) ? "py" : /\.json$/.test(p) ? "json" : /\.md$/.test(p) ? "md" : "txt");
+  const dirOf = (p) => { const s = p.lastIndexOf("/"); return s >= 0 ? p.slice(0, s) : ""; };
+  const dirCount = {}; files.forEach((f) => { const d = dirOf(f.path); if (d) dirCount[d] = (dirCount[d] || 0) + 1; });
+  const seenDir = {};
   files.forEach((f, i) => {
+    const dir = dirOf(f.path);
+    if (dir && !seenDir[dir]) {
+      seenDir[dir] = true;
+      const FT = cwFileOpsT();
+      const fr = document.createElement("div");
+      fr.className = "cw-folder"; fr.setAttribute("dir", "ltr");
+      fr.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:12px;opacity:.78;user-select:none;";
+      fr.innerHTML = '<span aria-hidden="true">📁</span>' +
+        '<span class="cw-folder__p" style="direction:ltr;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(dir) + '/</span>' +
+        '<span class="cw-folder__n" style="opacity:.7;" title="' + (state.lang === "ar" ? "عدد الملفات" : "files") + '">' + dirCount[dir] + '</span>' +
+        '<button type="button" class="cw-folder__add" title="' + escapeHtml(FT.newFile) + '" style="margin-inline-start:auto;border:0;background:transparent;cursor:pointer;font-size:15px;line-height:1;padding:0 5px;color:inherit;opacity:.85;">＋</button>';
+      const folderIdx = i;
+      fr.querySelector(".cw-folder__add").addEventListener("click", (e) => { e.stopPropagation(); cwOpNewFileHere(root, chat, folderIdx); });
+      tree.appendChild(fr);
+    }
     const ext = extOf(f.path);
     const row = document.createElement("div");
     row.className = "cw-file" + (i === cwState.file ? " is-active" : "");
+    row.dataset.fi = String(i);   // real index into files[] — survives folder-grouped reorder; NEVER trust loop/DOM position
     row.innerHTML = '<span class="cw-file__dot" data-ext="' + ext + '"></span>' +
       '<span class="cw-file__p" dir="ltr">' + escapeHtml(f.path) + "</span>" +
       '<span class="cw-file__size">' + Math.max(1, Math.round((f.content || "").length / 1024)) + "K</span>" +
       '<button type="button" class="cw-file__x" title="' + L.delF + '">✕</button>';
     row.addEventListener("click", (e) => {
+      const i = Number(row.dataset.fi);   // stamped file index, not the render position
       if (e.target.closest(".cw-file__x")) {
         if (!confirm(L.delFileC)) return;
         const st = codeFilesOf(chat);
@@ -14409,6 +15083,20 @@ async function renderCodeIDE(root, chat) {
     cwState.cm = window.CodeMirror.fromTextArea(ta, {
       lineNumbers: true, lineWrapping: false, indentUnit: 2, tabSize: 2,
       direction: "ltr", viewportMargin: 30, styleActiveLine: true,
+      // When focus is inside CodeMirror these chords are swallowed by the editor
+      // and never bubble to `root`, so the root keydown listener misses them.
+      // Bind them here to the SAME handlers so the shortcuts stay reliable while
+      // the caret is in the code (Ctrl/Cmd+S save, Ctrl/Cmd+Enter run, Ctrl/Cmd+K/P palette).
+      extraKeys: {
+        "Ctrl-S": () => { cwCommitEdit(root, chat, true); showToast(cwT().saved); },
+        "Cmd-S": () => { cwCommitEdit(root, chat, true); showToast(cwT().saved); },
+        "Ctrl-Enter": () => { cwCommitEdit(root, chat, true); },
+        "Cmd-Enter": () => { cwCommitEdit(root, chat, true); },
+        "Ctrl-K": () => { cwOpenPalette(root, chat); },
+        "Cmd-K": () => { cwOpenPalette(root, chat); },
+        "Ctrl-P": () => { cwOpenPalette(root, chat); },
+        "Cmd-P": () => { cwOpenPalette(root, chat); },
+      },
     });
     cwState.cm.on("change", () => {
       cwSetSaveState(root, "editing");
@@ -14456,6 +15144,65 @@ async function renderCodeIDE(root, chat) {
     cwAiIn.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && cwIsPhone()) { e.preventDefault(); const f = root.querySelector(".cw-ai"); if (f && f.requestSubmit) f.requestSubmit(); }
     });
+    // @-mention autocomplete: type '@' then part of a file path/name and pick from the REAL file list.
+    // Self-contained (inline styles); the popup floats above the textarea, bottom-anchored inside .cw-ai.
+    cwMentionMenu(root, chat, cwAiIn);
+  }
+  // Popup that turns a trailing "@token" at the caret into a picker over the project's real files.
+  function cwMentionMenu(root, chat, ta) {
+    const form = ta.closest(".cw-ai"); if (!form) return;
+    form.style.position = "relative";
+    let menu = null, rows = [], active = -1, token = "";
+    const close = () => { if (menu) { menu.remove(); menu = null; } rows = []; active = -1; };
+    const isOpen = () => !!menu;
+    const fuzzy = (q, s) => { q = q.toLowerCase(); s = s.toLowerCase(); let i = 0; for (let c = 0; c < s.length && i < q.length; c++) if (s[c] === q[i]) i++; return i === q.length; };
+    const paint = () => rows.forEach((r, i) => { r.style.background = i === active ? "color-mix(in srgb,var(--color-accent) 16%,transparent)" : "transparent"; });
+    const setActive = (i) => { active = i; paint(); };
+    const insert = (path) => {
+      const cut = ta.selectionStart;
+      const before = ta.value.slice(0, cut).replace(/@([\w./-]*)$/, "@" + path + " ");
+      ta.value = before + ta.value.slice(cut);
+      ta.setSelectionRange(before.length, before.length);
+      close(); ta.focus(); cwAutoGrowAi(ta);
+    };
+    const render = () => {
+      const st = codeFilesOf(chat); const files = (st && st.files) || [];
+      const hits = files.filter((f) => { const base = String(f.path).split("/").pop(); return !token || fuzzy(token, f.path) || fuzzy(token, base); }).slice(0, 8);
+      if (!hits.length) { close(); return; }
+      if (!menu) {
+        menu = document.createElement("div");
+        menu.className = "cw-ai__mentions";
+        Object.assign(menu.style, { position: "absolute", insetInline: "12px", bottom: "calc(100% + 6px)", zIndex: "40", maxHeight: "232px", overflowY: "auto", background: "var(--color-surface)", border: "1.5px solid var(--color-border-strong)", borderRadius: "12px", boxShadow: "0 12px 34px rgba(0,0,0,.24)", padding: "5px" });
+        menu.addEventListener("mousedown", (e) => e.preventDefault());   // keep the textarea focused on click
+        form.appendChild(menu);
+      }
+      menu.innerHTML = "";
+      rows = hits.map((f, i) => {
+        const r = document.createElement("div");
+        r.className = "cw-ai__mrow";
+        Object.assign(r.style, { display: "flex", alignItems: "baseline", gap: "7px", padding: "7px 10px", borderRadius: "8px", cursor: "pointer", fontFamily: "var(--font-sans)", fontSize: "12.5px", color: "var(--color-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
+        const base = String(f.path).split("/").pop(), dir = f.path.slice(0, f.path.length - base.length);
+        const b = document.createElement("span"); b.textContent = base; b.style.fontWeight = "600"; r.appendChild(b);
+        if (dir) { const d = document.createElement("span"); d.textContent = dir; d.style.cssText = "opacity:.55;font-size:11px"; r.appendChild(d); }
+        r.addEventListener("mouseenter", () => setActive(i));
+        r.addEventListener("click", () => insert(f.path));
+        menu.appendChild(r); return r;
+      });
+      setActive(0);
+    };
+    const detect = () => { const m = /@([\w./-]*)$/.exec(ta.value.slice(0, ta.selectionStart)); if (m) { token = m[1]; render(); } else close(); };
+    ta.addEventListener("input", detect);
+    ta.addEventListener("click", detect);
+    ta.addEventListener("blur", () => setTimeout(close, 120));
+    // Capture on the FORM so this fires before the textarea's phone Enter-to-send handler; only steals
+    // Enter/Tab/arrows/Esc while the menu is actually open, otherwise submit behaves as before.
+    form.addEventListener("keydown", (e) => {
+      if (!isOpen()) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); setActive((active + 1) % rows.length); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); setActive((active - 1 + rows.length) % rows.length); }
+      else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); e.stopPropagation(); if (rows[active]) rows[active].click(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    }, true);
   }
   root.querySelector(".cw-zip").addEventListener("click", () => {
     cwCommitEdit(root, chat, false);
@@ -14527,6 +15274,12 @@ async function renderCodeIDE(root, chat) {
     finally { cwState.busy = false; go.disabled = false; inp.disabled = false; go.textContent = L.aiGo; }
   });
 }
+/* Normalized content equality so cosmetic-only rewrites count as no-ops. cwParseFileBlocks strips a
+   trailing "\n" from every body, so a file stored WITH a trailing newline vs a re-emit WITHOUT one —
+   and CRLF or trailing-whitespace differences — would otherwise show a phantom +/- diff and pass as a
+   real "change". Normalizing (CRLF→LF, strip line-end whitespace, strip trailing blank lines) drops
+   those no-ops everywhere at once. Shared by cwAskAI, the single-shot filter, and cwPlanBuild edits. */
+function cwContentEq(a, b){ const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '').replace(/\n+$/,''); return norm(a) === norm(b); }
 async function cwAskAI(chat, instruction) {
   const st = codeFilesOf(chat);
   const isWeb = st.files.some((f) => /\.html?$/.test(f.path));
@@ -14540,7 +15293,7 @@ async function cwAskAI(chat, instruction) {
     let best = null;
     try { best = await cwDevelopGame(st.name, blankish ? null : st.files, req, root, null); } catch (_) {}
     if (best && best.length) {
-      const changes = best.filter((nf) => { const o = st.files.find((f) => f.path === nf.path); return !o || o.content !== nf.content; });
+      const changes = best.filter((nf) => { const o = st.files.find((f) => f.path === nf.path); return !o || !cwContentEq(o.content, nf.content); });
       const dels = st.files.filter((f) => !best.some((nf) => nf.path === f.path)).map((f) => f.path);
       if (changes.length || dels.length) return { changes, dels, summary: state.lang === "ar" ? "بنيت اللعبة وطوّرتها ✓" : "Built & developed the game ✓" };
     }
@@ -14548,8 +15301,14 @@ async function cwAskAI(chat, instruction) {
   }
   // BIGGER changes (a whole page/feature/refactor across a multi-file project) → plan-then-build for
   // coherent multi-file results. Small surgical edits stay single-shot (fast).
-  const bigger = st.files.length >= 2 && req.length > 60 &&
-    (/page|صفحة|feature|ميزة|section|قسم|refactor|إعادة\s*هيكلة|redesign|إعادة\s*تصميم|multi|متعدد|dark\s*mode|وضع\s*ليلي/i.test(req) ||
+  // Split/extract/move/decompose refactors: force the multi-file plan→build path even from ONE source
+  // file (a whole-project single-shot dump slices each file to 15000 chars and rewrites it uncontinued,
+  // corrupting large source files). These verbs also bypass the length gate — real requests are short
+  // ("split app.js into modules", "قسّم index.html إلى مكوّنات", "extract the nav into nav.js").
+  const splitVerb = /\b(?:split|extract|move|decompose|separate)\b|modular|استخراج|تقسيم|قسّ?م|تجزئة|فصل|نقل|إلى\s*ملفات|إلى\s*مكوّ?نات/i.test(req);
+  const bigger = (splitVerb ? st.files.length >= 1 : (st.files.length >= 2 && req.length > 60)) &&
+    (splitVerb ||
+     /page|صفحة|feature|ميزة|section|قسم|refactor|إعادة\s*هيكلة|redesign|إعادة\s*تصميم|multi|متعدد|dark\s*mode|وضع\s*ليلي/i.test(req) ||
      (typeof CODE_FOLLOWUP !== "undefined" && CODE_FOLLOWUP.test(req)));
   if (bigger) {
     const root = document.getElementById("codeWorkspace");
@@ -14562,12 +15321,159 @@ async function cwAskAI(chat, instruction) {
     const w0 = root && root.querySelector(".cw-diff"); if (w0) { w0.hidden = true; w0.innerHTML = ""; }
   }
   // SINGLE-SHOT — strengthened "Claude Code" brain, resilient transport (agentCall = 3 retries).
-  const filesTxt = st.files.map((f) => "===== " + f.path + " =====\n" + String(f.content).slice(0, 15000)).join("\n\n").slice(0, 90000);
-  const sys = "You are Firas Code, a principal software engineer editing the user's OPEN project like Claude Code. Apply the request with MINIMAL, SURGICAL changes — keep everything that shouldn't change byte-identical, reuse the project's existing ids/classes/functions/paths EXACTLY, and never rename or delete a shared symbol other files depend on. The result must be PRODUCTION-QUALITY and FULLY WORKING — no stubs, TODOs, '...', or dead code. STRICT OUTPUT FORMAT: first ONE short summary line in the user's language; then for EVERY added or modified file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE new file content>\n```\nTo delete a file output a line: DELETE: relative/path.ext\nRules: include ONLY files that change; ALWAYS output full file content (never snippets, never '...'), valid runnable code; do not invent files the request doesn't need." + cwBrain(isWeb, req) + cwLangRule();
-  const usr = "PROJECT: " + st.name + "\n\nCURRENT FILES:\n" + filesTxt + "\n\nUSER REQUEST:\n" + req;
-  const out = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", null);
+  // @file MENTIONS → resolve the user's @tokens to real project files (exact path → unique basename → fuzzy
+  // subsequence), so "fix the header in @styles.css" anchors on styles.css instead of being guessed from a
+  // blind whole-project dump. The @tokens stay in req (the model still reads the phrasing); the resolved
+  // focus set floats those files to the top of the context and gets an explicit FOCUS directive.
+  function cwParseMentions(req, files) {
+    const focus = [], unknown = [], seen = new Set();
+    const add = (p) => { if (p && !seen.has(p) && focus.length < 6) { seen.add(p); focus.push(p); } };
+    const isSub = (n, h) => { let i = 0; for (let j = 0; j < h.length && i < n.length; j++) if (h[j] === n[i]) i++; return i === n.length; };
+    const toks = String(req).match(/@([\w./-]+)/g) || [];
+    for (const raw of toks) {
+      const tok = raw.slice(1).replace(/[.,;:]+$/, "");
+      if (!tok) continue;
+      let hit = files.find((f) => f.path.toLowerCase() === tok.toLowerCase());
+      if (!hit) { const base = tok.split("/").pop().toLowerCase(); const bm = files.filter((f) => f.path.split("/").pop().toLowerCase() === base); if (bm.length === 1) hit = bm[0]; }
+      if (!hit) { const nd = tok.toLowerCase().replace(/[^\w.]/g, ""); if (nd.length >= 2) { const fz = files.filter((f) => isSub(nd, f.path.toLowerCase())); if (fz.length === 1) hit = fz[0]; } }
+      if (hit) add(hit.path); else if (!unknown.includes(tok)) unknown.push(tok);
+    }
+    return { focus, unknown };
+  }
+  const mentions = cwParseMentions(req, st.files);
+  const focus = mentions.focus;
+  const ordered = focus.length ? st.files.slice().sort((a, b) => (focus.includes(b.path) ? 1 : 0) - (focus.includes(a.path) ? 1 : 0)) : st.files;
+  const filesTxt = ordered.map((f) => "===== " + f.path + (focus.includes(f.path) ? "  (FOCUS)" : "") + " =====\n" + String(f.content).slice(0, 15000)).join("\n\n").slice(0, 90000)
+    + (focus.length ? "\n\nFOCUS FILES — the user @-referenced these; make the change here unless the request clearly needs other files: " + focus.join(", ") : "");
+  const sys = "You are Firas Code, a principal software engineer editing the user's OPEN project like Claude Code. Apply the request with MINIMAL, SURGICAL changes — keep everything that shouldn't change byte-identical, reuse the project's existing ids/classes/functions/paths EXACTLY, and never rename or delete a shared symbol the request DOESN'T mention. If the user asks to RENAME a symbol/id/class/function/file, rename it EVERYWHERE it appears — its definition and EVERY reference across ALL files (calls, imports, `<script src>`/`<link href>`, `#id`/`.class` selectors, `data-*` hooks, and string paths) — and output every file that changed. Never leave the old name in any file. PRESERVE-VERBATIM DISCIPLINE: reproduce every unchanged line of each emitted file BYTE-IDENTICAL to the input — do not reformat, reorder, restyle, rewrap, or 'improve' code you were not asked to touch; change only the minimum lines the request requires. The result must be PRODUCTION-QUALITY and FULLY WORKING — no stubs, TODOs, '...', or dead code. STRICT OUTPUT FORMAT: first ONE short summary line in the user's language that NAMES exactly which file(s) it will touch and why (so unrelated files are never re-emitted); then for EVERY added or modified file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE new file content>\n```\nTo delete a file output a line: DELETE: relative/path.ext\nRules: emit ONLY the files that actually change (never re-emit a file you left untouched); ALWAYS output full file content for the files you do emit (never snippets, never '...'), valid runnable code; do not invent files the request doesn't need. PRESERVE PERSISTENCE — if the project already reads/writes localStorage (or IndexedDB), keep the EXACT same storage keys and JSON schema so a user's already-saved data is not orphaned or wiped by this edit; when the change adds a new persisted field, bump the schema version and migrate/merge the old shape forward rather than overwrite it. Any new interactive state you introduce must itself be saved and restored like the rest of the app." + cwBrain(isWeb, req) + cwLangRule();
+  // RENAME → build a project-wide reference map so the model updates EVERY file (like grep-before-edit).
+  const cwRefactorTargets = (fls, name) => {
+    const nm = String(name || "").trim();
+    if (!nm || nm.length < 2) return "";
+    const e = nm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const tok = new RegExp("(?:^|[^\\w$-])" + e + "(?![\\w$-])", "g");
+    const rows = [];
+    fls.forEach((f) => {
+      const c = String(f.content || "");
+      if (!c) return;
+      const n = (c.match(tok) || []).length;
+      if (!n) return;
+      const p = f.path, kinds = [];
+      if (new RegExp('id=["\']' + e + '["\']').test(c)) kinds.push("id");
+      if (new RegExp('class=["\'][^"\']*\\b' + e + '\\b').test(c)) kinds.push("class");
+      if (new RegExp("[#.]" + e + "(?![\\w-])").test(c)) kinds.push("selector");
+      if (/\b(?:import|from|require)\b/.test(c) && new RegExp("(?:import|from|require)[^\\n]*\\b" + e + "\\b").test(c)) kinds.push("import");
+      if (/\.(?:jsx?|tsx?|mjs|cjs|vue|svelte)$/i.test(p) && new RegExp("\\b" + e + "\\b").test(c)) kinds.push("symbol");
+      if (new RegExp('(?:src|href)=["\'][^"\']*' + e).test(c) || new RegExp("\\b" + e + "\\.(?:js|css|html?|json|png|svg|jpe?g)\\b").test(c)) kinds.push("path");
+      rows.push("• " + p + ": " + n + " ref" + (n === 1 ? "" : "s") + (kinds.length ? " (" + [...new Set(kinds)].join(", ") + ")" : ""));
+    });
+    return rows.join("\n");
+  };
+  let refBlock = "";
+  const rn = req.match(/\b(?:rename|renaming)\s+(?:the\s+)?[`'"]?([A-Za-z_$][\w$-]*)/i)
+    || req.match(/\bchange\s+(?:the\s+)?[`'"]?([A-Za-z_$][\w$-]*)[`'"]?\s+(?:to|into)\b/i)
+    || req.match(/(?:أعد\s*تسمية|غيّر?\s*اسم|بدّ?ل\s*اسم|سمِّ?)\s*[`'"]?([A-Za-z_$][\w$-]*)/);
+  if (rn && rn[1]) {
+    const rl = cwRefactorTargets(st.files, rn[1]);
+    if (rl) refBlock = "\n\nREFERENCES TO UPDATE — the symbol \"" + rn[1] + "\" appears in ALL these files; rename it in EVERY one and output each changed file:\n" + rl;
+  }
+  const usr = "PROJECT: " + st.name + "\n\nCURRENT FILES:\n" + filesTxt + "\n\nUSER REQUEST:\n" + req + refBlock;
+  const ac = new AbortController();
+  let out = await agentCall([{ role: "system", content: sys }, { role: "user", content: usr }], "max", ac.signal);
+  // COMPLETENESS / CONTINUATION GUARD (mirrors cwPlanBuild): a long single-shot edit can be cut off
+  // mid-file, leaving an unterminated ```file: block that cwParseFileBlocks reports as `open` and today
+  // DROPS. Finish that file before applying — feed its tail back and stitch, up to 4 rounds — then close
+  // the dangling fence so the now-complete final file is parsed into `changes` instead of vanishing.
+  let pk = cwParseFileBlocks(out, st.files);
+  for (let cont = 0; pk.open && cont < 4 && !ac.signal.aborted; cont++) {
+    const tp = pk.tailPath || pk.open.path;
+    const lang0 = /\.html?$/i.test(tp) ? "html" : (tp.split(".").pop() || "");
+    if (codeLooksComplete(pk.open.content, lang0)) break;
+    const cSys = "You are FINISHING the file `" + tp + "` from a response that was cut off. Continue from the EXACT last character — do NOT restart, re-emit, or summarize. Output ONLY raw continuation code that completes the file (close every open tag/bracket/string; HTML ends with </html>). No fences, no commentary.";
+    const cUsr = "FILE SO FAR (ends abruptly):\n\n" + pk.open.content.slice(-8000) + "\n\n(Continue now.)";
+    const piece = await agentCall([{ role: "system", content: cSys }, { role: "user", content: cUsr }], "max", ac.signal);
+    const add = String(stripToCode(piece) || piece).replace(/```/g, "");
+    if (add.length < 6) break;
+    out = joinCodeContinuation(out, add);
+    pk = cwParseFileBlocks(out, st.files);
+  }
+  if (pk.open) out = out + "\n```";   // close the (now-finished) final file so it is included in changes
   const parsed = cwParseFileBlocks(out, st.files);
+  // PLACEHOLDER / TRUNCATION GUARD — the single-shot editor has NO continuation loop (unlike cwPlanBuild),
+  // so a small "fix it" reply can regenerate a whole file and leave the untouched 99% as a fresh TODO or
+  // "…rest of the code". Scan every emitted file for banned truncation markers; if any file is dirty, run
+  // ONE targeted repair pass that re-emits ONLY those files complete. Clean output (the common case) skips
+  // this entirely and keeps the fast single round-trip. Tight patterns: no bare "placeholder" (HTML attr),
+  // no bare "...rest"/"...existing" (JS spread/rest), case-sensitive TODO/FIXME — so real code rarely fires.
+  const CW_PH_RE = [
+    /\b(TODO|FIXME)\b/,
+    /\.\.\.\s*(rest\s+of|existing\s+code|and\s+so\s+on)\b/i,
+    /\b(rest|remainder)\s+of\s+(the\s+|your\s+)?(code|file|component|function|implementation|markup|html|css|logic|method|content)\b/i,
+    /\b(implementation|logic|code|content|markup|function\s+body)\s+(goes\s+)?here\b/i,
+    /\byour\s+code\s+here\b/i,
+    /\b(continue|continues)\s+(here|below|from\s+here|as\s+above)\b/i,
+    /\bomitted\s+for\s+brevity\b|\bfor\s+brevity\b/i,
+    /\b(rest|remainder|code|file)\s+(remains?\s+)?(the\s+same|unchanged)\b/i,
+    /(\/\/|\/\*|<!--|#)\s*\.\.\.\s*(\*\/|-->)?\s*$/,
+    /\bkeep\s+(the\s+)?existing\b|\bexisting\s+code\s+(here|unchanged|remains)\b/i,
+    /\bplaceholder\s+(content|text|code)\b/i,
+  ];
+  const scanPH = (code) => {
+    const hits = [];
+    String(code == null ? "" : code).split("\n").forEach((ln) => {
+      if (ln.length > 400) return;
+      if (CW_PH_RE.some((re) => re.test(ln))) { const t = ln.trim(); if (t) hits.push(t.slice(0, 160)); }
+    });
+    return hits.slice(0, 8);
+  };
+  const badPH = parsed.changes.map((c) => ({ path: c.path, hits: scanPH(c.content) })).filter((b) => b.hits.length);
+  if (badPH.length) {
+    try {
+      const origOf = (p) => { const o = st.files.find((f) => f.path === p); return o ? String(o.content).slice(0, 15000) : "(new file — no prior version)"; };
+      const draftOf = (p) => { const c = parsed.changes.find((x) => x.path === p); return c ? String(c.content).slice(0, 15000) : ""; };
+      const rSys = "You are Firas Code repairing your OWN draft. One or more files you just emitted contain PLACEHOLDER / TRUNCATION markers instead of real code — an unacceptable regression, because the single-shot editor applies the WHOLE file, so an elided region silently DELETES working code. Re-emit ONLY the listed files, each COMPLETE and fully runnable, keeping the SAME intended change from the request but writing EVERY line out in full: restore any region the draft elided using the ORIGINAL file as the source of truth, and remove every banned marker. BANNED — must NOT appear anywhere in your output: TODO, FIXME, '...', 'rest of the code/file', 'existing code', 'goes here', 'your code here', 'unchanged', 'omitted for brevity', 'continue here', or any comment that stands in for real code. OUTPUT FORMAT: for EACH file exactly one fenced block:\n```file:relative/path.ext\n<the COMPLETE corrected file>\n```\nNo prose, no summary line, no other files." + cwLangRule();
+      const rUsr = "USER REQUEST (the edit that must remain applied):\n" + req + "\n\nFILES TO RE-EMIT COMPLETE (offending lines quoted — every one must be gone):\n\n" +
+        badPH.map((b) => "===== " + b.path + " =====\nOFFENDING LINES:\n" + b.hits.map((h) => "  ✗ " + h).join("\n") +
+          "\n\nORIGINAL (source of truth for any region the draft elided):\n" + origOf(b.path) +
+          "\n\nYOUR DRAFT (contains the markers — fix it, do not shrink it):\n" + draftOf(b.path)).join("\n\n").slice(0, 90000);
+      const rep = await agentCall([{ role: "system", content: rSys }, { role: "user", content: rUsr }], "max", null);
+      const fixed = cwParseFileBlocks(rep, st.files);
+      fixed.changes.forEach((fc) => {
+        if (!badPH.some((b) => b.path === fc.path)) return;          // only accept files we actually asked to repair
+        const body = String(fc.content == null ? "" : fc.content);
+        if (!body.trim()) return;
+        const slot = parsed.changes.find((x) => x.path === fc.path);
+        if (!slot) return;
+        const before = scanPH(slot.content).length, after = scanPH(body).length;
+        // Merge only when the repair STRICTLY reduces markers AND did not collapse the file — so a false
+        // positive or a gutted repair can never regress the draft; worst case is one wasted call.
+        if (after < before && body.length >= String(slot.content).length * 0.5) slot.content = body;
+      });
+    } catch (_) {}
+  }
   const summary = (out.split("```")[0] || "").trim().split("\n")[0].slice(0, 220);
+  // COMPLETENESS SWEEP — a single stray ``` inside a large edited file can let the fence regex close
+  // early and ship a half-file straight to the diff. Gate EVERY changed file (not just the trailing one):
+  // any that fails codeLooksComplete gets FINISHED with the same continuation loop cwPlanBuild uses, so no
+  // edit is ever applied truncated/cut-off. Files that already pass cost nothing (no extra model calls).
+  for (const ch of (parsed.changes || [])) {
+    let body = String((ch && ch.content) || "");
+    const lang0 = /\.html?$/i.test(ch.path) ? "html" : /\.css$/i.test(ch.path) ? "css" : "js";
+    if (!body || codeLooksComplete(body, lang0)) continue;
+    let cont = 0;
+    try {
+      while (body && !codeLooksComplete(body, lang0) && cont < 6) {
+        cont++;
+        const cSys = "You are FINISHING the file `" + ch.path + "` that was cut off. Continue from the EXACT last character — do NOT restart, re-emit, or summarize. Output ONLY raw continuation code that completes the file (close every tag/bracket/string; HTML ends with </html>). No fences, no commentary.";
+        const cUsr = "FILE SO FAR (ends abruptly):\n\n" + body.slice(-8000) + "\n\n(Continue now.)";
+        const piece = await agentCall([{ role: "system", content: cSys }, { role: "user", content: cUsr }], "max", null);
+        const add = String(stripToCode(piece) || piece).replace(/```/g, "");
+        if (add.length < 6) break;
+        body = joinCodeContinuation(body, add);
+      }
+    } catch (_) {}
+    ch.content = body;
+  }
   return { changes: parsed.changes, dels: parsed.dels, summary };
 }
 /* Render the persisted Firas Code chat thread into the Chat tab (escaped bubbles + a files-touched chip). */
@@ -14576,13 +15482,47 @@ function cwRenderThread(root, chat) {
   if (!list) return;
   const L = cwT(), ar = state.lang === "ar";
   const turns = cwThreadOf(chat);
-  if (!turns.length) { list.innerHTML = '<div class="cw-thread__empty">' + escapeHtml(L.threadEmpty) + "</div>"; return; }
+  if (!turns.length) {
+    // Self-advertise the "explain this project" capability: a one-click chip in the empty state that
+    // fills the AI command bar with the explain phrase and submits it through the exact same code path
+    // as a typed question. Only shown once the project actually has a file to explain.
+    const explainPhrase = ar ? "اشرح لي هذا المشروع" : "Explain this project";
+    const cta = (codeFilesOf(chat).files.length >= 1)
+      ? '<button type="button" class="cw-thread__cta">' + escapeHtml(explainPhrase) + "</button>"
+      : "";
+    list.innerHTML = '<div class="cw-thread__empty">' + escapeHtml(L.threadEmpty) + cta + "</div>";
+    const cwCta = list.querySelector(".cw-thread__cta");
+    if (cwCta) cwCta.addEventListener("click", () => {
+      const inp = root.querySelector(".cw-ai__in"), form = root.querySelector(".cw-ai");
+      if (!inp || !form || cwState.busy) return;
+      inp.value = explainPhrase;
+      if (typeof cwAutoGrowAi === "function") cwAutoGrowAi(inp);
+      if (form.requestSubmit) form.requestSubmit();
+      else form.dispatchEvent(new Event("submit", { cancelable: true }));
+    });
+    return;
+  }
+  const projFiles = (codeFilesOf(chat).files) || [];
   list.innerHTML = turns.map((t) => {
     const me = t.role === "user";
     const who = me ? L.youLbl : L.aiLbl;
     const chip = (!me && t.n > 0) ? '<span class="cw-thread__chip">' + t.n + (ar ? " ملف" : " file" + (t.n === 1 ? "" : "s")) + "</span>" : "";
+    // Echo any @file references the user typed as chips on their own bubble, resolved LIVE against the
+    // project's files, so the ask visibly scopes to real files — and an unmatched @token shows as a
+    // muted chip (the reference matched nothing) instead of silently doing nothing.
+    let refChips = "";
+    if (me) {
+      const toks = (String(t.text || "").match(/@[\w./-]+/g) || []).map((x) => x.slice(1)).filter(Boolean);
+      const seen = {};
+      toks.forEach((tok) => {
+        const low = tok.toLowerCase();
+        const hit = projFiles.find((f) => { const p = String(f.path).toLowerCase(); return p === low || p.split("/").pop() === low || p.endsWith("/" + low) || p.indexOf(low) >= 0; });
+        if (hit) { if (seen[hit.path]) return; seen[hit.path] = 1; refChips += '<span class="cw-thread__chip" title="' + escapeHtml(hit.path) + '">' + escapeHtml(String(hit.path).split("/").pop()) + "</span>"; }
+        else refChips += '<span class="cw-thread__chip" style="opacity:.5" title="' + escapeHtml(ar ? "لا ملف يطابق" : "no file matches") + '">@' + escapeHtml(tok) + "</span>";
+      });
+    }
     return '<div class="cw-thread__turn cw-thread__turn--' + (me ? "me" : "ai") + '">' +
-      '<div class="cw-thread__who">' + escapeHtml(who) + chip + "</div>" +
+      '<div class="cw-thread__who">' + escapeHtml(who) + chip + refChips + "</div>" +
       '<div class="cw-thread__bubble">' + escapeHtml(String(t.text || "")) + "</div></div>";
   }).join("");
   list.scrollTop = list.scrollHeight;
@@ -14591,10 +15531,13 @@ function cwShowDiff(root, chat, res) {
   const L = cwT();
   const st = codeFilesOf(chat);
   const wrap = root.querySelector(".cw-diff");
-  const items = res.changes.map((c) => {
+  const raw = res.changes.map((c) => {
     const old = st.files.find((f) => f.path === c.path);
     return { kind: old ? "edit" : "new", path: c.path, content: c.content, old: old ? old.content : "" };
   }).concat(res.dels.map((p) => ({ kind: "del", path: p, content: "", old: (st.files.find((f) => f.path === p) || {}).content || "" })));
+  // Drop pure no-op edits (old === content) so paths that skip cwAskAI's filter — cwPlanBuild game/bigger, cwVerifyGameAndFix — can't inject rows that would apply as no-ops. `items` stays the single source of truth for both render and apply (indexes align).
+  const items = raw.filter((it) => it.kind !== "edit" || String(it.old) !== String(it.content));
+  if (!items.length) { if (wrap) { wrap.hidden = true; wrap.innerHTML = ""; } showToast(L.nothing); return; }
   const rowsHtml = items.map((it, i) => {
     let body = "";
     if (it.kind === "del") body = '<div class="cw-diff__all cw-diff__all--del">' + L.delF + "</div>";
@@ -14608,22 +15551,43 @@ function cwShowDiff(root, chat, res) {
           : '<div class="cw-dl cw-dl--' + (r.t === "+" ? "add" : r.t === "-" ? "del" : "same") + '">' + escapeHtml(r.s || " ") + "</div>").join("") + "</div>";
       }
     }
-    return '<details class="cw-diff__file" data-i="' + i + '" ' + (items.length <= 2 ? "open" : "") + '>' +
-      '<summary><input type="checkbox" checked data-ck="' + i + '" onclick="event.stopPropagation()"> ' +
-      '<span class="cw-diff__badge cw-diff__badge--' + it.kind + '">' + (it.kind === "new" ? L.newF : it.kind === "del" ? L.delF : L.editF) + "</span>" +
+    const isDel = it.kind === "del";
+    return '<details class="cw-diff__file' + (isDel ? " cw-diff__file--del" : "") + '" data-i="' + i + '"' + (isDel ? ' style="border-inline-start:3px solid #e5484d;background:rgba(229,72,77,.06)"' : "") + (items.length <= 2 ? " open" : "") + '>' +
+      '<summary><input type="checkbox" ' + (isDel ? "" : "checked ") + 'data-ck="' + i + '" onclick="event.stopPropagation()"> ' +
+      '<span class="cw-diff__badge cw-diff__badge--' + it.kind + '">' + (it.kind === "new" ? L.newF : isDel ? "🗑 " + L.delF : L.editF) + "</span>" +
       '<code dir="ltr">' + escapeHtml(it.path) + "</code></summary>" + body + "</details>";
   }).join("");
+  let totAdd = 0, totDel = 0;
+  items.forEach((it) => {
+    if (it.kind === "del") { totDel += it.old ? it.old.split("\n").length : 0; return; }
+    if (it.kind === "new") { totAdd += it.content ? it.content.split("\n").length : 0; return; }
+    const d = cwLineDiff(it.old, it.content);
+    if (d) d.forEach((r) => { if (r.t === "+") totAdd++; else if (r.t === "-") totDel++; });
+    else { totAdd += it.content ? it.content.split("\n").length : 0; totDel += it.old ? it.old.split("\n").length : 0; }
+  });
+  const filesLbl = state.lang === "ar" ? "ملفات" : "files";
   wrap.innerHTML =
     '<div class="cw-diff__card">' +
-      '<div class="cw-diff__head"><strong>' + L.diffT + "</strong>" + (res.summary ? '<span class="cw-diff__sum">' + escapeHtml(res.summary) + "</span>" : "") + "</div>" +
+      '<div class="cw-diff__head"><strong>' + L.diffT + "</strong>" + (res.summary ? '<span class="cw-diff__sum">' + escapeHtml(res.summary) + "</span>" : "") + '<span class="cw-diff__totals">' + items.length + " " + filesLbl + ' · <b class="add">+' + totAdd + '</b> <b class="del">−' + totDel + "</b></span>" + "</div>" +
       '<div class="cw-diff__list">' + rowsHtml + "</div>" +
-      '<div class="cw-diff__acts"><button type="button" class="cw-diff__apply">✓ ' + L.apply + '</button><button type="button" class="cw-diff__cancel">' + L.cancel + "</button></div>" +
+      '<div class="cw-diff__acts"><button type="button" class="cw-diff__apply">✓ ' + L.apply + ' <span class="cw-diff__cnt">(' + items.length + ')</span></button><button type="button" class="cw-diff__cancel">' + L.cancel + "</button></div>" +
     "</div>";
   wrap.hidden = false;
   wrap.querySelector(".cw-diff__cancel").addEventListener("click", () => { wrap.hidden = true; wrap.innerHTML = ""; });
-  wrap.querySelector(".cw-diff__apply").addEventListener("click", () => {
+  const applyBtn = wrap.querySelector(".cw-diff__apply");
+  const updateCount = () => {
+    const n = wrap.querySelectorAll("[data-ck]:checked").length;
+    const cnt = applyBtn.querySelector(".cw-diff__cnt");
+    if (cnt) cnt.textContent = "(" + n + ")";
+    applyBtn.disabled = n === 0;
+  };
+  wrap.querySelectorAll("[data-ck]").forEach((c) => c.addEventListener("change", updateCount));
+  updateCount();
+  applyBtn.addEventListener("click", () => {
     const picked = [...wrap.querySelectorAll("[data-ck]")].filter((c) => c.checked).map((c) => parseInt(c.getAttribute("data-ck"), 10));
+    if (picked.length === 0) { showToast(L.nothing); return; }
     const cur = codeFilesOf(chat);
+    cwSnapTake(chat, "auto", res.summary || "AI edit"); // checkpoint the exact pre-edit state before mutating files (dedups by signature)
     picked.forEach((i) => {
       const it = items[i];
       if (it.kind === "del") { const k = cur.files.findIndex((f) => f.path === it.path); if (k >= 0) cur.files.splice(k, 1); }
@@ -14632,8 +15596,27 @@ function cwShowDiff(root, chat, res) {
         if (ex) ex.content = it.content; else cur.files.push({ path: it.path, content: it.content });
       }
     });
+    const preSnap = codeFilesOf(chat); // pre-apply files — chat.messages[0] not rewritten until codeSaveFiles runs
     codeSaveFiles(chat, cur.name, cur.files);
-    wrap.hidden = true; wrap.innerHTML = "";
+    // Signature Claude-Code safety move: keep the diff panel as a compact "Applied ✓ — Undo" bar for a few seconds.
+    const undoMsg = state.lang === "ar" ? "طُبّقت التعديلات ✓" : "Applied ✓";
+    const undoLbl = state.lang === "ar" ? "تراجع" : "Undo";
+    wrap.hidden = false;
+    wrap.innerHTML =
+      '<div class="cw-diff__undo" style="display:flex;align-items:center;gap:12px;justify-content:space-between;padding:10px 14px;border-radius:10px;background:rgba(46,160,67,.12);border:1px solid rgba(46,160,67,.35);font-weight:600">' +
+        '<span dir="' + (state.lang === "ar" ? "rtl" : "ltr") + '">' + undoMsg + "</span>" +
+        '<button type="button" class="cw-diff__undo-btn" style="cursor:pointer;border:0;border-radius:8px;padding:6px 14px;font-weight:600;background:var(--accent,#2ea043);color:#fff">↺ ' + undoLbl + "</button>" +
+      "</div>";
+    const undoTimer = setTimeout(() => { if (!wrap.hidden && wrap.querySelector(".cw-diff__undo")) { wrap.hidden = true; wrap.innerHTML = ""; } }, 6000);
+    wrap.querySelector(".cw-diff__undo-btn").addEventListener("click", () => {
+      clearTimeout(undoTimer);
+      cwSnapTake(chat, "auto"); // preserve the applied state so Undo itself is recoverable
+      codeSaveFiles(chat, preSnap.name, preSnap.files.map((f) => ({ path: f.path, content: f.content })));
+      cwState.file = Math.min(cwState.file, Math.max(0, preSnap.files.length - 1));
+      cwRenderTree(root, chat); cwSelectFile(root, chat, cwState.file); cwRefreshPreview(root, chat);
+      wrap.hidden = true; wrap.innerHTML = "";
+      showToast(state.lang === "ar" ? "تراجَعت عن التعديل ✓" : "Edit undone ✓");
+    });
     cwState.file = Math.min(cwState.file, Math.max(0, cur.files.length - 1));
     cwRenderTree(root, chat);
     cwSelectFile(root, chat, cwState.file);
@@ -14646,10 +15629,61 @@ function cwShowDiff(root, chat, res) {
         if (!touchedCode) return;
         const now = codeFilesOf(chat);
         const looksGame = now.files.some((f) => /getContext\(|requestAnimationFrame|<canvas/i.test(String(f.content || "")));
-        if (!looksGame) return;
+        if (!looksGame) {
+          // NON-GAME edit: RUN the page and, if it throws on load (or lints dirty), auto-fix it —
+          // the Claude-Code edit→run→fix cadence, so a change that breaks the preview is caught right after apply.
+          const vui = cwVerifyUI(root);
+          try {
+            const ar = state.lang === "ar";
+            let appFiles = now.files.map((f) => ({ path: f.path, content: String(f.content || "") }));
+            let busy = 0;
+            for (let round = 0; round < 2; round++) {
+              const html = (typeof projPreviewHtml === "function") ? projPreviewHtml({ name: now.name, files: appFiles }) : "";
+              if (!html) break;
+              vui.show(ar ? "يتأكد أنّ الصفحة تعمل…" : "Making sure the page runs…");
+              const findings = [];
+              try { (typeof testHtmlInSandbox === "function" ? await testHtmlInSandbox(html, 2600) : []).forEach((e) => findings.push("RUNTIME ERROR on load: " + e + " — this throw aborts the script before the page finishes rendering; fix it so the page loads clean.")); } catch (_) {}
+              try { (typeof lintProject === "function" ? lintProject(appFiles) : []).filter((x) => !/UNREFERENCED/i.test(x)).slice(0, 4).forEach((x) => findings.push(x)); } catch (_) {}
+              if (!findings.length) break;
+              // Route the fix to the file most likely to own the error: the largest JS, else the entry HTML.
+              const jsF = appFiles.filter((f) => /\.m?js$/i.test(f.path)).sort((a, b) => b.content.length - a.content.length)[0];
+              const htmlF = appFiles.find((f) => /(^|\/)index\.html?$/i.test(f.path)) || appFiles.find((f) => /\.html?$/i.test(f.path));
+              const tf = jsF || htmlF;
+              if (!tf) break;
+              vui.show(ar ? "يصلح الصفحة…" : "Fixing the page…");
+              const vlang = /\.html?$/i.test(tf.path) ? "html" : /\.css$/i.test(tf.path) ? "css" : "js";
+              const APP_FIXER_SYS = "You are Firas Code's APP FIXER. This web app was RUN in a real browser right after an edit; the exact load-time errors and lint findings are listed. Fix EVERY finding this file can own so the page LOADS AND WORKS with NO console errors: no undefined variables/functions, every referenced id/element exists before it is used, event listeners bind to real nodes, no syntax throws, no half-finished statements. Keep every id/class/function name so the sibling files keep working — make surgical changes and delete no working content." + ((typeof cwLangRule === "function") ? cwLangRule() : "") + " Output the COMPLETE fixed file `" + tf.path + "` in ONE fenced code block, and never stop mid-file.";
+              const siblings = appFiles.filter((f) => f.path !== tf.path).map((f) => "===== " + f.path + " =====\n" + String(f.content).slice(0, 6000)).join("\n\n").slice(0, 24000);
+              let fixed = "";
+              try {
+                fixed = await agentCall([
+                  { role: "system", content: APP_FIXER_SYS },
+                  { role: "user", content: (ar ? "نتائج فحص الصفحة:\n" : "PAGE QA FINDINGS:\n") + findings.slice(0, 8).map((e, i) => (i + 1) + ". " + e).join("\n") + "\n\nPROJECT FILES: " + appFiles.map((f) => f.path).join(", ") + (siblings ? "\n\nSIBLING FILES (for reference — do NOT re-output them):\n" + siblings : "") + "\n\nTHE FILE TO FIX `" + tf.path + "`:\n" + String(tf.content).slice(0, 60000) },
+                ], "max", null);
+              } catch (e) {
+                if (typeof isEngineBusyText === "function" && isEngineBusyText(String((e && e.message) || e)) && ++busy >= 2) break;
+                continue;
+              }
+              const fx = (typeof stripToCode === "function") ? stripToCode(fixed) : String(fixed || "");
+              if (fx && fx.length >= tf.content.length * 0.6 && (typeof codeLooksComplete !== "function" || codeLooksComplete(fx, vlang))) tf.content = fx; else break;
+            }
+            vui.done();
+            const fixedFiles = appFiles;
+            const changed = fixedFiles.some((nf) => { const o = now.files.find((f) => f.path === nf.path); return o && o.content !== nf.content; });
+            if (changed) {
+              codeSaveFiles(chat, now.name, fixedFiles);
+              cwRenderTree(root, chat);
+              cwSelectFile(root, chat, cwState.file);
+              cwRefreshPreview(root, chat);
+              showToast(state.lang === "ar" ? "صُلّحت الصفحة لتعمل ✓" : "Page fixed to run ✓");
+            }
+          } catch (_) { try { vui.done(); } catch (e) {} }
+          return;
+        }
         const fixedFiles = await cwVerifyGameAndFix(now.files, { ui: cwVerifyUI(root) });
         const changed = fixedFiles.some((nf) => { const o = now.files.find((f) => f.path === nf.path); return o && o.content !== nf.content; });
         if (changed) {
+          cwSnapTake(chat, "auto");   // restore point BEFORE the silent game auto-fix overwrites the user's files (this write bypasses cwShowDiff, so make it revertible too)
           codeSaveFiles(chat, now.name, fixedFiles);
           cwRenderTree(root, chat);
           cwSelectFile(root, chat, cwState.file);
@@ -14705,6 +15739,30 @@ function cwPaletteActions(root, chat) {
     { id: "theme", icon: state.theme === "dark" ? "☀" : "🌙", label: T.theme + " — " + (state.theme === "dark" ? T.themeL : T.themeD), hint: T.themeH, run: () => applyTheme(state.theme === "dark" ? "light" : "dark") },
     { id: "home", icon: "⌂", label: T.home, hint: T.homeH, run: () => click(".cw-bar__home") },
   ];
+  const errRows = Array.prototype.slice.call(root.querySelectorAll(".cw-console__list .cw-conrow--error"));
+  if (errRows.length) {
+    const seen = {}, errs = [];
+    for (let ri = 0; ri < errRows.length && errs.length < 8; ri++) {
+      const txt = (errRows[ri].textContent || "").trim();
+      if (!txt || seen[txt]) continue;
+      seen[txt] = 1; errs.push(txt);
+    }
+    const nErr = errRows.length;
+    const fLabel = ar ? ("إصلاح " + nErr + " خطأ في الكونسول") : ("Fix " + nErr + " console error" + (nErr === 1 ? "" : "s"));
+    const fHint = ar ? "اقرأ الأخطاء الحقيقية وأصلح السبب عبر الملفات" : "Read the real errors and fix the cause across files";
+    actions.unshift({ id: "fixerr", icon: "🩹", label: fLabel, hint: fHint, run: () => {
+      const inp = root.querySelector(".cw-ai__in");
+      const form = root.querySelector(".cw-ai");
+      if (!inp || !form) return;
+      const req = (ar
+        ? "التطبيق قيد التشغيل يُسجّل هذه الأخطاء — جد السبب عبر الملفات وأصلحه:\n"
+        : "The running app logs these errors — find the cause across the files and fix them:\n") + errs.join("\n");
+      inp.value = req;
+      inp.focus();
+      if (typeof cwAutoGrowAi === "function") { try { cwAutoGrowAi(inp); } catch (_) {} }
+      if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    } });
+  }
   codeFilesOf(chat).files.forEach((f, i) => { actions.push({ id: "file:" + i, icon: "📄", label: T.openf + " " + f.path, hint: T.openfH, run: () => { cwSelectFile(root, chat, i); } }); });
   return actions;
 }
@@ -14724,9 +15782,13 @@ function cwOpenPalette(root, chat) {
   root.appendChild(host);
   const inp = host.querySelector(".cw-pal__in"), list = host.querySelector(".cw-pal__list");
   let shown = [], sel = 0;
+  function askRow(query) {
+    return { act: { id: "askai", icon: "✨", label: (ar ? "اسأل الذكاء: " : "Ask AI: ") + query, hint: (ar ? "شغّل الطلب كتعديل بالذكاء" : "Run as an AI edit"), run: () => { const box = root.querySelector(".cw-ai__in"); if (box) { box.value = query; box.focus(); } const form = root.querySelector(".cw-ai"); if (form && form.requestSubmit) form.requestSubmit(); } }, score: 1e9, marks: [] };
+  }
   function render() {
     const q = inp.value.trim();
     shown = acts.map((a) => { const r = cwFuzzy(q, a.label + " " + (a.hint || "")); if (!r) return null; const lm = cwFuzzy(q, a.label); return { act: a, score: r.score, marks: lm ? lm.marks : [] }; }).filter(Boolean).sort((x, y) => y.score - x.score).slice(0, 40);
+    if (q) { if (!shown.length) shown = [askRow(q)]; else if (q.length > 12 && q.indexOf(" ") >= 0) shown.push(askRow(q)); }
     if (sel >= shown.length) sel = Math.max(0, shown.length - 1);
     if (!shown.length) { list.innerHTML = '<div class="cw-pal__empty">' + (ar ? "لا يوجد أمر مطابق" : "No matching command") + "</div>"; return; }
     list.innerHTML = shown.map((s, i) => '<div class="cw-pal__row' + (i === sel ? " is-sel" : "") + '" role="option" data-i="' + i + '">' + '<span class="cw-pal__ic">' + escapeHtml(s.act.icon || "•") + "</span>" + '<span class="cw-pal__lbl">' + cwPalMark(s.act.label, s.marks) + "</span>" + (s.act.hint ? '<span class="cw-pal__hint">' + escapeHtml(s.act.hint) + "</span>" : "") + "</div>").join("");
@@ -14766,7 +15828,7 @@ function cwSnapWriteAll(all) {
   return false;
 }
 function cwSnapList(chatId) { const arr = cwSnapReadAll()[chatId]; return Array.isArray(arr) ? arr : []; }
-function cwSnapTake(chat, kind) {
+function cwSnapTake(chat, kind, label) {
   if (!chat || !chat.codeProj) return null;
   const st = codeFilesOf(chat);
   const files = st.files.map((f) => ({ path: String(f.path), content: String(f.content || "") }));
@@ -14774,7 +15836,7 @@ function cwSnapTake(chat, kind) {
   const all = cwSnapReadAll(), arr = Array.isArray(all[chat.id]) ? all[chat.id] : (all[chat.id] = []);
   const last = arr[arr.length - 1];
   if (last && last.sig === sig) { if (kind === "manual") showToast(cwSnapT().saved); return last; }
-  const snap = { id: uid(), ts: Date.now(), kind: kind === "manual" ? "manual" : "auto", name: st.name, files, sig };
+  const snap = { id: uid(), ts: Date.now(), kind: kind === "manual" ? "manual" : "auto", name: st.name, files, sig, label: String(label || "").slice(0, 80) };
   arr.push(snap);
   while (arr.length > CW_SNAP_MAX) arr.shift();
   cwSnapWriteAll(all); _cwSnapLastTs = snap.ts;
@@ -14810,7 +15872,7 @@ function cwOpenSnapshots(root, chat) {
       return '<div class="cw-snap__row' + (fresh ? " is-fresh" : "") + '" data-id="' + s.id + '">' +
         '<span class="cw-snap__kind cw-snap__kind--' + s.kind + '">' + (s.kind === "manual" ? L.manual : L.auto) + "</span>" +
         '<span class="cw-snap__meta"><span class="cw-snap__name" dir="ltr">' + escapeHtml(s.name || chat.title || "project") + "</span>" +
-        '<span class="cw-snap__sub">' + cwSnapAgo(s.ts) + " · " + L.files(s.files.length) + "</span></span>" +
+        '<span class="cw-snap__sub">' + (s.label ? '<span class="cw-snap__label">' + escapeHtml(s.label) + "</span> · " : "") + cwSnapAgo(s.ts) + " · " + L.files(s.files.length) + "</span></span>" +
         '<button type="button" class="cw-snap__restore" data-act="restore" data-id="' + s.id + '">' + L.restore + "</button>" +
         '<button type="button" class="cw-snap__del" data-act="del" data-id="' + s.id + '" title="' + L.del + '">✕</button>' + "</div>";
     }).join("") : '<div class="cw-snap__empty">' + L.empty + "</div>";
@@ -14829,13 +15891,13 @@ function cwOpenSnapshots(root, chat) {
     const btn = e.target.closest("[data-act]"); if (!btn) return;
     const act = btn.getAttribute("data-act");
     if (act === "close") { close(); return; }
-    if (act === "now") { cwSnapTake(chat, "manual"); render(); return; }
+    if (act === "now") { cwSnapTake(chat, "manual", ""); render(); return; }
     if (act === "clear") { if (confirm(L.delAllC)) { cwSnapClear(chat.id); render(); } return; }
     if (act === "del") { cwSnapDelete(chat.id, btn.getAttribute("data-id")); render(); return; }
     if (act === "restore") {
       const snap = cwSnapList(chat.id).find((s) => s.id === btn.getAttribute("data-id")); if (!snap) return;
       if (!confirm(L.confirm)) return;
-      cwSnapTake(chat, "auto");
+      cwSnapTake(chat, "auto", ar ? "قبل الاستعادة" : "before restore");
       codeSaveFiles(chat, snap.name, snap.files.map((f) => ({ path: f.path, content: f.content })));
       cwState.file = 0; cwRenderTree(root, chat); cwSelectFile(root, chat, 0); cwRefreshPreview(root, chat);
       close(); showToast(L.restored);
