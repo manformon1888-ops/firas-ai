@@ -2079,6 +2079,86 @@ async function handleWebSearch(req, res) {
   res.end(JSON.stringify({ q, results }));
 }
 
+/* ===========================================================================
+   VOICE DICTATION — POST /api/transcribe (auth required)
+   The browser records the mic (MediaRecorder), converts it to 16-kHz mono WAV
+   and sends base64. Engine: Gemini Flash (free key, hears audio natively) —
+   Whisper-grade verbatim transcription with automatic language detection plus
+   an optional dialect hint from the in-app picker. When no engine is
+   configured the endpoint answers 503 and the frontend falls back to the
+   browser's live SpeechRecognition dictation, so the mic works either way.
+   {probe:true} lets the client discover server-STT availability at boot.
+   =========================================================================== */
+const STT_HINTS = {
+  auto: "",
+  msa: " The speech is Arabic (العربية الفصحى).",
+  iraqi: " The speech is Iraqi Arabic dialect (اللهجة العراقية). Write it in Arabic script exactly as spoken.",
+  gulf: " The speech is Gulf Arabic dialect (اللهجة الخليجية). Write it in Arabic script exactly as spoken.",
+  egyptian: " The speech is Egyptian Arabic dialect (اللهجة المصرية). Write it in Arabic script exactly as spoken.",
+  levant: " The speech is Levantine Arabic dialect (اللهجة الشامية). Write it in Arabic script exactly as spoken.",
+  maghrebi: " The speech is Maghrebi Arabic dialect (اللهجة المغاربية). Write it in Arabic script exactly as spoken.",
+  en: " The speech is English.",
+  fr: " The speech is French.",
+  tr: " The speech is Turkish.",
+  de: " The speech is German.",
+  es: " The speech is Spanish.",
+  ur: " The speech is Urdu.",
+  fa: " The speech is Persian (Farsi).",
+};
+const STT_INSTRUCTION =
+  "You are a professional speech-to-text engine. Output ONLY the verbatim transcription of the audio — " +
+  "no commentary, no quotation marks, no labels, no translation. Keep the speaker's language and dialect " +
+  "exactly as spoken (Arabic dialects stay in Arabic script as pronounced; mixed Arabic/English stays mixed). " +
+  "Add natural punctuation. If there is no intelligible speech, output an empty string.";
+async function handleTranscribe(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "authentication required" });
+  const body = await readJson(req, CHAT_BODY_LIMIT);
+  if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
+  // Capability probe — lets the frontend pick server STT vs live browser dictation.
+  if (body.probe) return sendJson(res, 200, { ok: !!GEMINI_API_KEY });
+  if (!GEMINI_API_KEY) return sendJson(res, 503, { error: "no stt engine" });
+  if (rateLimited("stt:" + user.id, 20, 60_000)) return sendJson(res, 429, { error: "rate limited" });
+  const mime = body.format === "mp3" ? "audio/mp3" : "audio/wav";
+  const audio = String(body.audio || "").replace(/^data:audio\/[a-z0-9.+-]+;base64,/i, "");
+  if (!audio || audio.length < 4_000) return sendJson(res, 400, { error: "no audio" });
+  if (audio.length > 20_000_000 || !/^[A-Za-z0-9+/=]+$/.test(audio)) return sendJson(res, 400, { error: "bad audio" });
+  const hint = STT_HINTS[String(body.lang || "auto")] || "";
+  const payload = {
+    contents: [{
+      role: "user",
+      parts: [
+        { text: STT_INSTRUCTION + " Transcribe this audio verbatim." + hint },
+        { inline_data: { mime_type: mime, data: audio } },
+      ],
+    }],
+    generationConfig: { temperature: 0 },
+  };
+  // Try each configured Gemini model (same list the chat engines use).
+  for (const model of GEMINI_TEXT_MODELS) {
+    try {
+      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!r.ok) {
+        console.error("[firas] STT " + model + " HTTP " + r.status);
+        continue;
+      }
+      const j = await r.json().catch(() => null);
+      const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+      let text = Array.isArray(parts) ? parts.map((p) => p.text || "").join("") : "";
+      text = String(text || "").trim();
+      // The engine occasionally wraps a short answer in quotes — unwrap once.
+      if ((/^".*"$/s.test(text) && text.length > 2) || (/^«.*»$/s.test(text) && text.length > 2)) text = text.slice(1, -1).trim();
+      return sendJson(res, 200, { text });
+    } catch (e) { /* timeout / network → next model */ }
+  }
+  return sendJson(res, 502, { error: "stt engine unavailable" });
+}
+
 /** Keyless REAL image search (Openverse — CC-licensed photos, no API key). Returns reliable
     Openverse-hosted thumbnail URLs so generated sites get real, relevant photos. */
 async function handleImageSearch(req, res) {
@@ -3206,6 +3286,7 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/announcements" && method === "PATCH") return await handleAnnouncementsPatch(req, res);
     if (route === "/api/announcements" && method === "DELETE") return await handleAnnouncementsDelete(req, res);
     if (route === "/api/translate" && method === "POST") return await handleTranslate(req, res);
+    if (route === "/api/transcribe" && method === "POST") return await handleTranscribe(req, res);
 
     // ---- Admin knowledge base (RAG reference books) ----
     if (route === "/api/kb" && method === "GET") return await handleKbList(req, res);

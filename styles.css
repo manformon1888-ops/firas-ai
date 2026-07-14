@@ -4008,3 +4008,82 @@ html.native-shell .CodeMirror, html.native-shell .CodeMirror *{
   -webkit-user-select: text;
   user-select: text;
 }
+
+/* ============================================================================
+   VOICE DICTATION — mic button, recording bar, dialect picker
+   ========================================================================== */
+.composer { position: relative; }
+.composer__mic.is-on { color: #fff; background: var(--color-accent); }
+/* Recording bar overlays the composer row while recording / transcribing */
+.mic-rec {
+  position: absolute; inset: 0; z-index: 6;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px; border-radius: inherit;
+  background: var(--color-surface);
+}
+.mic-rec[hidden] { display: none; }
+.mic-rec__dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #e5484d; animation: micPulse 1.15s ease-in-out infinite; }
+@keyframes micPulse { 50% { opacity: .3; transform: scale(.8); } }
+.mic-rec__viz { flex: 1 1 auto; min-width: 0; height: 34px; }
+.mic-rec__viz canvas { width: 100%; height: 100%; display: block; }
+.mic-rec__time { flex: 0 0 auto; font: 600 12.5px var(--font-mono); color: var(--color-text-muted); min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
+.mic-rec__status { flex: 1 1 auto; font: 500 13px var(--font-sans); color: var(--color-text-muted); text-align: center; }
+[dir="rtl"] .mic-rec__status { font-family: var(--font-arabic); }
+.mic-rec__cancel, .mic-rec__done {
+  flex: 0 0 auto; width: 34px; height: 34px; border: 0; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer; transition: .15s;
+  background: transparent; color: var(--color-text-muted);
+}
+.mic-rec__cancel svg, .mic-rec__done svg { width: 17px; height: 17px; }
+.mic-rec__cancel:hover { color: #e5484d; background: color-mix(in srgb, #e5484d 12%, transparent); }
+.mic-rec__done { color: #fff; background: var(--color-accent); }
+.mic-rec__done:hover { transform: scale(1.06); }
+.mic-rec__lang {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 11px; border: 1px solid var(--color-border-hairline); border-radius: var(--radius-pill);
+  background: var(--color-bg-subtle); color: var(--color-text-secondary);
+  font: 600 12px var(--font-sans); cursor: pointer; transition: .15s; white-space: nowrap;
+}
+[dir="rtl"] .mic-rec__lang { font-family: var(--font-arabic); }
+.mic-rec__lang:hover { border-color: var(--color-accent); color: var(--color-accent); }
+/* Dialect / language picker */
+.mic-menu {
+  position: absolute; bottom: calc(100% + 10px); inset-inline-end: 6px; z-index: 40;
+  min-width: 240px; max-height: 330px; overflow: auto; overscroll-behavior: contain;
+  padding: 6px; border: 1px solid var(--color-border-hairline); border-radius: 14px;
+  background: var(--color-surface);
+  box-shadow: 0 4px 10px rgba(0,0,0,.08), 0 16px 40px rgba(0,0,0,.16);
+  animation: micMenuIn .16s ease;
+}
+@keyframes micMenuIn { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+.mic-menu[hidden] { display: none; }
+.mic-menu__title {
+  padding: 8px 12px 6px; font: 700 11px var(--font-sans); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+[dir="rtl"] .mic-menu__title { font-family: var(--font-arabic); letter-spacing: 0; }
+.mic-menu__item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 9px 11px; border: 0; border-radius: 9px; cursor: pointer;
+  background: transparent; color: var(--color-text-secondary);
+  font: 500 13.5px var(--font-sans); text-align: start; transition: .12s;
+}
+[dir="rtl"] .mic-menu__item { font-family: var(--font-arabic); }
+.mic-menu__item:hover { background: var(--color-bg-subtle); }
+.mic-menu__item.is-active { color: var(--color-accent); background: var(--color-accent-soft); font-weight: 600; }
+.mic-menu__flag { flex: 0 0 auto; width: 24px; text-align: center; font-size: 15px; }
+.mic-menu__label { flex: 1 1 auto; min-width: 0; }
+.mic-menu__check { flex: 0 0 auto; width: 16px; height: 16px; opacity: 0; transform: scale(.6); transition: .15s; }
+.mic-menu__check svg { width: 16px; height: 16px; display: block; }
+.mic-menu__item.is-active .mic-menu__check { opacity: 1; transform: scale(1); }
+/* Current-dialect value in the tools (+) menu row */
+.tools-menu__value { flex: 0 0 auto; font: 600 11.5px var(--font-sans); color: var(--color-text-muted); white-space: nowrap; }
+[dir="rtl"] .tools-menu__value { font-family: var(--font-arabic); }
+@media (prefers-reduced-motion: reduce) {
+  .mic-rec__dot { animation: none; }
+  .mic-menu { animation: none; }
+  .mic-rec__done:hover { transform: none; }
+}
+/* Live-dictation variant of the bar: status text instead of the waveform */
+.mic-rec.is-live .mic-rec__viz { display: none; }
+.mic-rec.is-live .mic-rec__status { text-align: start; }

@@ -50,7 +50,7 @@
     media="print" onload="this.media='all'"
   />
 
-  <link rel="stylesheet" href="styles.css?v=native8" />
+  <link rel="stylesheet" href="styles.css?v=native9" />
 
   <!-- KaTeX (math typesetting) — NON-BLOCKING for the same reason (math renders after boot) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
@@ -71,7 +71,7 @@
        degrades gracefully (email/password still works) when it's absent. -->
   <script defer src="firebase-config.js"></script>
 
-  <script defer src="app.js?v=native8"></script>
+  <script defer src="app.js?v=native9"></script>
 </head>
 <body>
   <!-- ===== Mobile drawer scrim ===== -->
@@ -303,11 +303,19 @@
                   <span class="tools-menu__label" data-i18n="thinking">التفكير</span>
                   <span class="tools-menu__switch" aria-hidden="true"></span>
                 </button>
+                <button type="button" class="tools-menu__item" id="micLangItem">
+                  <span class="tools-menu__ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg></span>
+                  <span class="tools-menu__label" data-i18n="micLangTitle">لغة الإملاء</span>
+                  <span class="tools-menu__value" id="micLangItemVal">تلقائي</span>
+                </button>
               </div>
             </div>
           </div>
-          <!-- Trailing action cluster: [attach][send] together -->
+          <!-- Trailing action cluster: [mic][attach][send] together -->
           <div class="composer__actions">
+            <button type="button" class="icon-btn composer__mic" id="micBtn" aria-label="إدخال صوتي" title="إدخال صوتي — اضغط مطوّلًا لاختيار اللهجة">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>
+            </button>
             <button type="button" class="icon-btn composer__attach" id="attachBtn" aria-label="Attach">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.1-9.2 9.2a5 5 0 0 1-7-7l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4l8.5-8.5"/></svg>
             </button>
@@ -317,6 +325,24 @@
             </button>
           </div>
           </div>
+          <!-- Voice dictation: recording bar (overlays the row while recording / transcribing) -->
+          <div class="mic-rec" id="micRec" hidden>
+            <button type="button" class="mic-rec__cancel" id="micCancel" aria-label="إلغاء التسجيل">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+            <span class="mic-rec__dot" aria-hidden="true"></span>
+            <div class="mic-rec__viz"><canvas id="micWave"></canvas></div>
+            <span class="mic-rec__status" id="micStatus" hidden></span>
+            <span class="mic-rec__time" id="micTime">0:00</span>
+            <button type="button" class="mic-rec__lang" id="micLangChip" aria-haspopup="true" aria-expanded="false">
+              <span aria-hidden="true">🌐</span><span id="micLangLabel">تلقائي</span>
+            </button>
+            <button type="button" class="mic-rec__done" id="micDone" aria-label="إيقاف وتحويل">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l5 5L20 7"/></svg>
+            </button>
+          </div>
+          <!-- Dialect / language picker (built by app.js) -->
+          <div class="mic-menu" id="micMenu" hidden></div>
         </form>
         <p class="composer__hint" data-i18n="disclaimer">قد يخطئ فِراس. تحقّق من المعلومات المهمة.</p>
       </div>

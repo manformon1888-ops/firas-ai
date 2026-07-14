@@ -137,6 +137,16 @@ const STR = {
     newChatShort: "جديد",
     searchPlaceholder: "ابحث في المحادثات",
     composerPlaceholder: "اسأل فِراس...",
+    micLabel: "إدخال صوتي",
+    micHint: "إدخال صوتي — اضغط مطوّلًا لاختيار اللهجة",
+    micListening: "جارٍ الاستماع… تكلّم الآن",
+    micTranscribing: "جارٍ تحويل كلامك…",
+    micDenied: "اسمح بالوصول إلى المايكروفون من إعدادات المتصفح ثم أعد المحاولة.",
+    micUnsupported: "التسجيل الصوتي غير مدعوم على هذا المتصفح.",
+    micTooShort: "التسجيل قصير جدًا — تكلّم ثم اضغط ✓.",
+    micFail: "تعذّر تحويل الصوت — حاول مرة أخرى.",
+    micEmpty: "لم أسمع كلامًا واضحًا — حاول مجددًا.",
+    micLangTitle: "لغة الإملاء",
     greetingMorning: "صباح الخير",
     greetingAfternoon: "مساء الخير",
     greetingEvening: "مساءً سعيدًا",
@@ -300,6 +310,16 @@ const STR = {
     newChatShort: "New",
     searchPlaceholder: "Search conversations",
     composerPlaceholder: "Ask Firas…",
+    micLabel: "Voice input",
+    micHint: "Voice input — long-press to pick a dialect",
+    micListening: "Listening… speak now",
+    micTranscribing: "Transcribing your speech…",
+    micDenied: "Allow microphone access in your browser settings, then try again.",
+    micUnsupported: "Voice recording is not supported in this browser.",
+    micTooShort: "Recording too short — speak, then press ✓.",
+    micFail: "Couldn't transcribe the audio — please try again.",
+    micEmpty: "I didn't catch any clear speech — try again.",
+    micLangTitle: "Dictation language",
     greetingMorning: "Good morning",
     greetingAfternoon: "Good afternoon",
     greetingEvening: "Good evening",
@@ -10397,6 +10417,384 @@ function wireAuth() {
 }
 
 /* ----------------------------------------------------------------------------
+   VOICE DICTATION — ChatGPT-grade mic. Records with MediaRecorder, converts to
+   16-kHz mono WAV in the browser, then POSTs to /api/transcribe (keyless
+   Whisper-grade engine, automatic language detection). A dialect picker opens
+   from a long-press on the mic, the chip on the recording bar, or the tools
+   menu; the chosen dialect is sent as a hint so عراقي/خليجي/مصري… come back
+   in Arabic script exactly as spoken. Works with any language automatically.
+---------------------------------------------------------------------------- */
+const LS_MIC_LANG = "firas_ai_mic_lang";
+const MIC_LANGS = [
+  { key: "auto",     flag: "🌐",  ar: "تلقائي — يتعرّف على لغتك من كلامك", en: "Auto — detects your language", sa: "تلقائي", se: "Auto" },
+  { key: "msa",      flag: "📖",  ar: "العربية الفصحى",  en: "Arabic (Fus'ha)",   sa: "فصحى",    se: "MSA" },
+  { key: "iraqi",    flag: "🇮🇶", ar: "عراقية",           en: "Iraqi Arabic",      sa: "عراقية",  se: "Iraqi" },
+  { key: "gulf",     flag: "🇸🇦", ar: "خليجية",           en: "Gulf Arabic",       sa: "خليجية",  se: "Gulf" },
+  { key: "egyptian", flag: "🇪🇬", ar: "مصرية",            en: "Egyptian Arabic",   sa: "مصرية",   se: "Egyptian" },
+  { key: "levant",   flag: "🇸🇾", ar: "شامية",            en: "Levantine Arabic",  sa: "شامية",   se: "Levantine" },
+  { key: "maghrebi", flag: "🇲🇦", ar: "مغاربية",          en: "Maghrebi Arabic",   sa: "مغاربية", se: "Maghrebi" },
+  { key: "en",       flag: "🇺🇸", ar: "الإنجليزية",       en: "English",           sa: "English", se: "English" },
+  { key: "fr",       flag: "🇫🇷", ar: "الفرنسية",         en: "French",            sa: "Français", se: "French" },
+  { key: "tr",       flag: "🇹🇷", ar: "التركية",          en: "Turkish",           sa: "Türkçe",  se: "Turkish" },
+  { key: "de",       flag: "🇩🇪", ar: "الألمانية",        en: "German",            sa: "Deutsch", se: "German" },
+  { key: "es",       flag: "🇪🇸", ar: "الإسبانية",        en: "Spanish",           sa: "Español", se: "Spanish" },
+  { key: "ur",       flag: "🇵🇰", ar: "الأردية",          en: "Urdu",              sa: "اردو",    se: "Urdu" },
+  { key: "fa",       flag: "🇮🇷", ar: "الفارسية",         en: "Persian",           sa: "فارسی",   se: "Persian" },
+];
+const MIC_MAX_SECONDS = 300; // hard cap, auto-finishes (5 min ≈ 12 MB of WAV base64)
+/* BCP-47 codes for the LIVE browser dictation fallback (SpeechRecognition). */
+const MIC_BCP = {
+  auto: "", msa: "ar-SA", iraqi: "ar-IQ", gulf: "ar-SA", egyptian: "ar-EG",
+  levant: "ar-JO", maghrebi: "ar-MA", en: "en-US", fr: "fr-FR", tr: "tr-TR",
+  de: "de-DE", es: "es-ES", ur: "ur-PK", fa: "fa-IR",
+};
+const mic = {
+  rec: null, stream: null, chunks: [], busy: false, recording: false,
+  t0: 0, timer: 0, raf: 0, ctx: null, analyser: null,
+  lang: localStorage.getItem(LS_MIC_LANG) || "auto",
+  lpTimer: 0, lpFired: false,
+  serverStt: null,   // null = probing, true = /api/transcribe available, false = use live fallback
+  live: null, liveBase: "", liveFinal: "",
+};
+function micLangMeta(key) { return MIC_LANGS.find((l) => l.key === key) || MIC_LANGS[0]; }
+function micRecSupported() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder &&
+    (window.AudioContext || window.webkitAudioContext));
+}
+function micLiveSupported() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function micSupported() { return micRecSupported() || micLiveSupported(); }
+/** Update every label that shows the current dialect (chip + tools-menu row). */
+function renderMicLangLabels() {
+  const m = micLangMeta(mic.lang);
+  const short = state.lang === "ar" ? m.sa : m.se;
+  if (els.micLangLabel) els.micLangLabel.textContent = short;
+  if (els.micLangItemVal) els.micLangItemVal.textContent = m.flag + " " + short;
+  if (els.micBtn) { els.micBtn.title = t().micHint; els.micBtn.setAttribute("aria-label", t().micLabel); }
+}
+function setMicLang(key) {
+  if (!MIC_LANGS.some((l) => l.key === key)) return;
+  mic.lang = key;
+  localStorage.setItem(LS_MIC_LANG, key);
+  renderMicLangLabels();
+  closeMicMenu();
+  // Live dictation runs with a fixed language — restart it so the new dialect applies now.
+  if (mic.live) { micStopLive(false); micStartLive(); }
+}
+/* ---- the "legendary" dialect picker ---- */
+function buildMicMenu() {
+  if (!els.micMenu) return;
+  const ar = state.lang === "ar";
+  let html = '<div class="mic-menu__title">' + escapeHtml(t().micLangTitle) + "</div>";
+  for (const l of MIC_LANGS) {
+    html +=
+      '<button type="button" class="mic-menu__item' + (l.key === mic.lang ? " is-active" : "") + '" data-mic-lang="' + l.key + '">' +
+      '<span class="mic-menu__flag" aria-hidden="true">' + l.flag + "</span>" +
+      '<span class="mic-menu__label">' + escapeHtml(ar ? l.ar : l.en) + "</span>" +
+      '<span class="mic-menu__check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l5 5L20 7"/></svg></span>' +
+      "</button>";
+  }
+  els.micMenu.innerHTML = html;
+}
+function openMicMenu() {
+  if (!els.micMenu) return;
+  buildMicMenu();
+  els.micMenu.hidden = false;
+  if (els.micLangChip) els.micLangChip.setAttribute("aria-expanded", "true");
+  const onDoc = (e) => {
+    if (els.micMenu.contains(e.target) || (els.micLangChip && els.micLangChip.contains(e.target))) return;
+    closeMicMenu();
+  };
+  const onKey = (e) => { if (e.key === "Escape") closeMicMenu(); };
+  mic._undoc = () => { document.removeEventListener("pointerdown", onDoc, true); document.removeEventListener("keydown", onKey, true); };
+  document.addEventListener("pointerdown", onDoc, true);
+  document.addEventListener("keydown", onKey, true);
+}
+function closeMicMenu() {
+  if (!els.micMenu || els.micMenu.hidden) return;
+  els.micMenu.hidden = true;
+  if (els.micLangChip) els.micLangChip.setAttribute("aria-expanded", "false");
+  if (mic._undoc) { mic._undoc(); mic._undoc = null; }
+}
+/* ---- recording ---- */
+function micPickMime() {
+  const cands = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  for (const m of cands) { try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (_) {} }
+  return "";
+}
+async function micStart() {
+  if (mic.recording || mic.busy) return;
+  if (!micSupported()) { showToast(t().micUnsupported); return; }
+  // Lazy capability probe on first use (now that a session cookie exists — see initMic).
+  if (mic.serverStt === null && micRecSupported()) {
+    try { const d = await apiJson("/api/transcribe", { method: "POST", body: JSON.stringify({ probe: true }) }); mic.serverStt = !!(d && d.ok); }
+    catch (_) { mic.serverStt = null; } // unknown (e.g. transient) → try record mode; 503 path still falls back to live
+  }
+  // No server STT engine (or no recorder in this browser) → LIVE browser dictation.
+  if ((mic.serverStt === false || !micRecSupported()) && micLiveSupported()) return micStartLive();
+  if (!micRecSupported()) { showToast(t().micUnsupported); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (_) { showToast(t().micDenied); return; }
+  mic.stream = stream;
+  mic.chunks = [];
+  const mime = micPickMime();
+  try { mic.rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream); }
+  catch (_) { try { mic.rec = new MediaRecorder(stream); } catch (_) { micStopTracks(); showToast(t().micUnsupported); return; } }
+  mic.rec.ondataavailable = (e) => { if (e.data && e.data.size) mic.chunks.push(e.data); };
+  mic.rec.start(250);
+  mic.recording = true;
+  mic.t0 = Date.now();
+  // Live waveform from the same stream (best-effort — recording works without it)
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    mic.ctx = new AC();
+    const src = mic.ctx.createMediaStreamSource(stream);
+    mic.analyser = mic.ctx.createAnalyser();
+    mic.analyser.fftSize = 256;
+    src.connect(mic.analyser);
+  } catch (_) { mic.ctx = null; mic.analyser = null; }
+  // UI: show the bar
+  if (els.micStatus) { els.micStatus.hidden = true; els.micStatus.textContent = ""; }
+  if (els.micTime) els.micTime.hidden = false;
+  if (els.micRec) els.micRec.hidden = false;
+  els.composer.classList.add("is-recording");
+  if (els.micBtn) els.micBtn.classList.add("is-on");
+  renderMicLangLabels();
+  micTick();
+  mic.timer = setInterval(micTick, 500);
+  micDraw();
+}
+function micTick() {
+  const s = Math.floor((Date.now() - mic.t0) / 1000);
+  if (els.micTime) {
+    const txt = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    els.micTime.textContent = state.lang === "ar" ? toArabicDigits(txt) : txt;
+  }
+  if (s >= MIC_MAX_SECONDS && mic.recording) micFinish();
+}
+function micDraw() {
+  if (!mic.analyser || !els.micWave) return;
+  const canvas = els.micWave;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) { mic.raf = requestAnimationFrame(micDraw); return; }
+  if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+  const g = canvas.getContext("2d");
+  const data = new Uint8Array(mic.analyser.frequencyBinCount);
+  mic.analyser.getByteTimeDomainData(data);
+  g.clearRect(0, 0, canvas.width, canvas.height);
+  const accent = (getComputedStyle(document.documentElement).getPropertyValue("--color-accent") || "#2C8A78").trim();
+  g.fillStyle = accent;
+  const bars = 32, step = Math.floor(data.length / bars), bw = canvas.width / bars;
+  for (let i = 0; i < bars; i++) {
+    let peak = 0;
+    for (let j = 0; j < step; j++) peak = Math.max(peak, Math.abs(data[i * step + j] - 128));
+    const bh = Math.max(2 * dpr, (peak / 128) * canvas.height * 0.9);
+    const r = Math.min(bw * 0.28, bh / 2);
+    const x = i * bw + bw * 0.22, y = (canvas.height - bh) / 2;
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, bw * 0.56, bh, r); else g.rect(x, y, bw * 0.56, bh);
+    g.fill();
+  }
+  mic.raf = requestAnimationFrame(micDraw);
+}
+function micStopTracks() {
+  try { if (mic.rec && mic.rec.state !== "inactive") mic.rec.stop(); } catch (_) {}
+  try { if (mic.stream) mic.stream.getTracks().forEach((tr) => tr.stop()); } catch (_) {}
+  try { if (mic.ctx) mic.ctx.close(); } catch (_) {}
+  cancelAnimationFrame(mic.raf);
+  clearInterval(mic.timer);
+  mic.rec = null; mic.stream = null; mic.ctx = null; mic.analyser = null; mic.recording = false;
+}
+function micHideBar() {
+  if (els.micRec) els.micRec.hidden = true;
+  els.composer.classList.remove("is-recording");
+  if (els.micBtn) els.micBtn.classList.remove("is-on");
+  closeMicMenu();
+}
+function micCancel() {
+  if (mic.live) return micStopLive(true);
+  micStopTracks();
+  mic.chunks = [];
+  mic.busy = false;
+  micHideBar();
+}
+/* ---- LIVE browser dictation (SpeechRecognition fallback — no server engine
+   needed; Chrome/Edge/Safari). Interim words stream straight into the box. ---- */
+function micStartLive() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR || mic.live) return;
+  let lang = MIC_BCP[mic.lang] || "";
+  if (!lang) lang = state.lang === "ar" ? "ar-SA" : "en-US";
+  const r = new SR();
+  mic.live = r;
+  mic.recording = true;
+  mic.liveBase = els.input.value;
+  mic.liveFinal = "";
+  mic.t0 = Date.now();
+  r.lang = lang;
+  r.continuous = true;
+  r.interimResults = true;
+  r.maxAlternatives = 1;
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const rr = e.results[i];
+      if (rr.isFinal) mic.liveFinal += rr[0].transcript;
+      else interim += rr[0].transcript;
+    }
+    const base = mic.liveBase ? mic.liveBase.replace(/\s*$/, " ") : "";
+    els.input.value = base + (mic.liveFinal + interim).replace(/^\s+/, "");
+    autoGrow(); syncComposerDir(); updateSendState();
+  };
+  r.onerror = (e) => {
+    const code = (e && e.error) || "";
+    const hadText = !!mic.liveFinal;
+    micStopLive(false);
+    if (code === "not-allowed" || code === "service-not-allowed") showToast(t().micDenied);
+    else if (code === "no-speech") showToast(t().micEmpty);
+    else if (code && code !== "aborted" && !hadText) showToast(t().micFail);
+  };
+  r.onend = () => { if (mic.live === r) micStopLive(false); };
+  try { r.start(); } catch (_) { micStopLive(false); showToast(t().micFail); return; }
+  // UI: same bar, "listening" status instead of the waveform.
+  if (els.micRec) { els.micRec.classList.add("is-live"); els.micRec.hidden = false; }
+  if (els.micStatus) { els.micStatus.textContent = t().micListening; els.micStatus.hidden = false; }
+  if (els.micTime) els.micTime.hidden = false;
+  els.composer.classList.add("is-recording");
+  if (els.micBtn) els.micBtn.classList.add("is-on");
+  renderMicLangLabels();
+  micTick();
+  mic.timer = setInterval(micTick, 500);
+}
+function micStopLive(cancel) {
+  const r = mic.live;
+  mic.live = null;
+  mic.recording = false;
+  clearInterval(mic.timer);
+  if (r) { r.onresult = null; r.onerror = null; r.onend = null; try { r.abort(); } catch (_) {} }
+  if (cancel) { els.input.value = mic.liveBase; autoGrow(); syncComposerDir(); updateSendState(); }
+  else if (els.input.value) { els.input.focus(); try { els.input.selectionStart = els.input.selectionEnd = els.input.value.length; } catch (_) {} }
+  if (els.micRec) els.micRec.classList.remove("is-live");
+  micHideBar();
+}
+/** Stop recording, convert, transcribe, insert into the composer. */
+function micFinish() {
+  if (mic.live) return micStopLive(false);
+  if (!mic.recording || mic.busy) return;
+  const rec = mic.rec;
+  const tooShort = Date.now() - mic.t0 < 700;
+  mic.busy = true;
+  const finalize = async () => {
+    const blob = new Blob(mic.chunks, { type: (rec && rec.mimeType) || "audio/webm" });
+    micStopTracks();
+    mic.chunks = [];
+    if (tooShort || blob.size < 1500) { mic.busy = false; micHideBar(); showToast(t().micTooShort); return; }
+    // switch the bar into "transcribing" state
+    if (els.micStatus) { els.micStatus.textContent = t().micTranscribing; els.micStatus.hidden = false; }
+    if (els.micTime) els.micTime.hidden = true;
+    try {
+      const wavB64 = await micWavBase64(blob);
+      const out = await apiJson("/api/transcribe", {
+        method: "POST",
+        body: JSON.stringify({ audio: wavB64, format: "wav", lang: mic.lang }),
+      });
+      const text = (out && typeof out.text === "string" ? out.text : "").trim();
+      mic.busy = false;
+      micHideBar();
+      if (!text) { showToast(t().micEmpty); return; }
+      const cur = els.input.value;
+      els.input.value = cur ? cur.replace(/\s*$/, " ") + text : text;
+      autoGrow(); syncComposerDir(); updateSendState();
+      els.input.focus();
+      try { els.input.selectionStart = els.input.selectionEnd = els.input.value.length; } catch (_) {}
+    } catch (e) {
+      mic.busy = false;
+      micHideBar();
+      // Server has no STT engine → remember it and seamlessly reopen in LIVE mode
+      // so the user just says it again and sees words appear instantly.
+      if (e && e.status === 503 && micLiveSupported()) { mic.serverStt = false; micStartLive(); return; }
+      showToast(t().micFail);
+    }
+  };
+  if (rec && rec.state !== "inactive") {
+    rec.onstop = finalize;
+    try { rec.stop(); } catch (_) { finalize(); }
+  } else finalize();
+}
+/** Decode the recorded blob and re-encode as 16-kHz mono 16-bit WAV base64
+    (the format the transcription engine accepts; ~32 KB per second). */
+async function micWavBase64(blob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const raw = await blob.arrayBuffer();
+  const dctx = new AC();
+  let buf;
+  try { buf = await dctx.decodeAudioData(raw); } finally { try { dctx.close(); } catch (_) {} }
+  const rate = 16000;
+  const frames = Math.max(1, Math.ceil(buf.duration * rate));
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const octx = new OAC(1, frames, rate);
+  const src = octx.createBufferSource();
+  src.buffer = buf;
+  src.connect(octx.destination);
+  src.start(0);
+  const mono = (await octx.startRendering()).getChannelData(0);
+  const wav = new DataView(new ArrayBuffer(44 + mono.length * 2));
+  const wstr = (off, s) => { for (let i = 0; i < s.length; i++) wav.setUint8(off + i, s.charCodeAt(i)); };
+  wstr(0, "RIFF"); wav.setUint32(4, 36 + mono.length * 2, true); wstr(8, "WAVE");
+  wstr(12, "fmt "); wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 1, true);
+  wav.setUint32(24, rate, true); wav.setUint32(28, rate * 2, true); wav.setUint16(32, 2, true); wav.setUint16(34, 16, true);
+  wstr(36, "data"); wav.setUint32(40, mono.length * 2, true);
+  for (let i = 0; i < mono.length; i++) {
+    const s = Math.max(-1, Math.min(1, mono[i]));
+    wav.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  const bytes = new Uint8Array(wav.buffer);
+  let b64 = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    b64 += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(b64);
+}
+function initMic() {
+  if (!els.micBtn) return;
+  if (!micSupported()) { els.micBtn.style.display = "none"; return; }
+  renderMicLangLabels();
+  // NOTE: server-STT capability is probed LAZILY on first mic use (micStart), not
+  // here — initMic runs before the auth gate, so a probe now would 401 for a
+  // logged-out visitor and wrongly disable server STT for the whole session.
+  // Click = record / finish. Long-press (450 ms) or right-click = dialect picker.
+  els.micBtn.addEventListener("pointerdown", () => {
+    mic.lpFired = false;
+    mic.lpTimer = setTimeout(() => { mic.lpFired = true; openMicMenu(); }, 450);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((ev) =>
+    els.micBtn.addEventListener(ev, () => clearTimeout(mic.lpTimer)));
+  els.micBtn.addEventListener("click", () => {
+    if (mic.lpFired) { mic.lpFired = false; return; }
+    if (!els.micMenu.hidden) { closeMicMenu(); return; }
+    if (mic.recording) micFinish(); else micStart();
+  });
+  els.micBtn.addEventListener("contextmenu", (e) => { e.preventDefault(); openMicMenu(); });
+  els.micCancel.addEventListener("click", micCancel);
+  els.micDone.addEventListener("click", micFinish);
+  els.micLangChip.addEventListener("click", () => { if (els.micMenu.hidden) openMicMenu(); else closeMicMenu(); });
+  els.micMenu.addEventListener("click", (e) => {
+    const it = e.target.closest("[data-mic-lang]");
+    if (it) setMicLang(it.getAttribute("data-mic-lang"));
+  });
+  if (els.micLangItem) els.micLangItem.addEventListener("click", () => {
+    if (typeof closeToolsMenu === "function") closeToolsMenu();
+    openMicMenu();
+  });
+  // Never leave the mic running when the tab hides for a long time (privacy).
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && mic.recording) micFinish();
+  });
+}
+
+/* ----------------------------------------------------------------------------
    Init + event wiring
 ---------------------------------------------------------------------------- */
 function cacheEls() {
@@ -10413,6 +10811,18 @@ function cacheEls() {
   els.sendBtn = $("#sendBtn");
   els.composer = $("#composer");
   els.attachBtn = $("#attachBtn");
+  els.micBtn = $("#micBtn");
+  els.micRec = $("#micRec");
+  els.micWave = $("#micWave");
+  els.micTime = $("#micTime");
+  els.micStatus = $("#micStatus");
+  els.micCancel = $("#micCancel");
+  els.micDone = $("#micDone");
+  els.micLangChip = $("#micLangChip");
+  els.micLangLabel = $("#micLangLabel");
+  els.micMenu = $("#micMenu");
+  els.micLangItem = $("#micLangItem");
+  els.micLangItemVal = $("#micLangItemVal");
   els.fileInput = $("#fileInput");
   els.attachTray = $("#attachTray");
   els.scrollBottomBtn = $("#scrollBottomBtn");
@@ -10498,6 +10908,9 @@ function wireEvents() {
     if (state.streaming) stopStreaming();
     else sendMessage();
   });
+
+  // Voice dictation (mic + dialect picker)
+  initMic();
 
   // Image attachments
   els.attachBtn.addEventListener("click", () => els.fileInput.click());
