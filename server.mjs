@@ -118,7 +118,7 @@ const GEMINI_KEYS = (() => {
   const keys = [];
   if (process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY.trim());
   for (const k of (process.env.GEMINI_API_KEYS || "").split(",")) { const v = k.trim(); if (v) keys.push(v); }
-  for (let i = 1; i <= 9; i++) { const v = (process.env["GEMINI_API_KEY_" + i] || "").trim(); if (v) keys.push(v); }
+  for (let i = 1; i <= 24; i++) { const v = (process.env["GEMINI_API_KEY_" + i] || "").trim(); if (v) keys.push(v); }
   return [...new Set(keys)];
 })();
 const GEMINI_API_KEY     = GEMINI_KEYS[0] || "";   // back-compat: `if (GEMINI_API_KEY)` = "any key configured"
@@ -2257,7 +2257,7 @@ async function geminiSynthesize(text, lang) {
   });
   // Try up to N keys from the pool — a 429 on one key rotates to the next, so the
   // expressive voice keeps working across keys until ALL are quota-limited.
-  const tries = Math.min(GEMINI_KEYS.length, 4);
+  const tries = Math.min(GEMINI_KEYS.length, 6);
   let lastStatus = 0;
   for (let i = 0; i < tries; i++) {
     const key = geminiPickKey();
