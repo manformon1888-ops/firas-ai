@@ -42,28 +42,40 @@
     rel="stylesheet"
   />
 
-  <!-- Highlight.js theme — NON-BLOCKING (media-swap): it only styles code blocks that app.js
-       renders later, so first paint must not wait on this cross-origin CSS -->
-  <link
-    rel="stylesheet"
-    href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"
-    media="print" onload="this.media='all'"
-  />
+  <!-- Highlight.js + KaTeX stylesheets load LAZILY with their JS (see the loader below) so
+       the site opens without waiting on ~350 KB of code/math libs it doesn't need yet. -->
 
-  <link rel="stylesheet" href="styles.css?v=native19" />
+  <link rel="stylesheet" href="styles.css?v=native20" />
 
-  <!-- KaTeX (math typesetting) — NON-BLOCKING for the same reason (math renders after boot) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
-    media="print" onload="this.media='all'" />
-
-  <!-- CDN libs: all optional, app degrades gracefully if any fail to load -->
+  <!-- CDN libs: marked + DOMPurify are needed for the FIRST message render, so they load
+       eagerly (defer). The HEAVY math + code-highlight libs (~350 KB) are NOT needed to open
+       the site — they load LAZILY after first paint, so the app opens fast. The app already
+       renders raw when they're absent and re-renders when they arrive (math has a drain queue;
+       code re-highlights below), so nothing is lost. -->
   <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <!-- mhchem: \ce{...} chemistry equations. Must load AFTER katex, BEFORE auto-render runs. -->
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/mhchem.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <script>
+    (function () {
+      function inject(src, cb) { var s = document.createElement("script"); s.src = src; s.async = true; if (cb) s.onload = cb; document.head.appendChild(s); }
+      function loadHeavy() {
+        // KaTeX stylesheet (non-blocking) + JS → mhchem → auto-render (order matters), then drain queued math.
+        var l = document.createElement("link"); l.rel = "stylesheet"; l.href = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"; document.head.appendChild(l);
+        inject("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js", function () {
+          inject("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/mhchem.min.js", function () {
+            inject("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js");
+          });
+        });
+        // highlight.js CSS + JS, then re-colour any code blocks rendered before it arrived.
+        var h = document.createElement("link"); h.rel = "stylesheet"; h.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"; document.head.appendChild(h);
+        inject("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js", function () {
+          try { document.querySelectorAll("pre code").forEach(function (c) { try { window.hljs.highlightElement(c); } catch (e) {} }); } catch (e) {}
+        });
+      }
+      // After the page is interactive — idle if possible, else shortly after load.
+      if (document.readyState === "complete") (window.requestIdleCallback || function (f) { setTimeout(f, 200); })(loadHeavy);
+      else window.addEventListener("load", function () { (window.requestIdleCallback || function (f) { setTimeout(f, 200); })(loadHeavy); });
+    })();
+  </script>
 
   <!-- Optional Firebase config (real keys, git-ignored). Copy firebase-config.example.js
        to firebase-config.js to enable "Continue with Google". Loaded BEFORE app.js so
@@ -71,7 +83,7 @@
        degrades gracefully (email/password still works) when it's absent. -->
   <script defer src="firebase-config.js"></script>
 
-  <script defer src="app.js?v=native19"></script>
+  <script defer src="app.js?v=native20"></script>
 </head>
 <body>
   <!-- ===== Mobile drawer scrim ===== -->
@@ -361,6 +373,14 @@
           <h2 class="call__name" id="callName">فِراس</h2>
           <p class="call__status" id="callStatus"></p>
           <p class="call__caption" id="callCaption"></p>
+          <!-- Microphone consent gate — a real user tap grants mic access + unlocks audio (fixes Safari) -->
+          <div class="call__consent" id="callConsent" hidden>
+            <p class="call__consent-text" id="callConsentText">للتحدث في المكالمة، اسمح باستخدام الميكروفون</p>
+            <button type="button" class="call__consent-btn" id="callConsentBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>
+              <span id="callConsentLabel">السماح بالميكروفون والبدء</span>
+            </button>
+          </div>
           <div class="call__controls">
             <button type="button" class="call__btn call__btn--mute" id="callMute" aria-label="كتم">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>

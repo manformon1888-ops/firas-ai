@@ -4198,3 +4198,18 @@ body.product-code .composer__call { display: none; }
   .call__controls { margin-top: 6px; }
   .call__btn { width: 52px; height: 52px; }
 }
+
+/* Call: microphone consent gate (a real tap grants mic + unlocks audio for Safari/Chrome) */
+.call__consent { display: flex; flex-direction: column; align-items: center; gap: 14px; margin: 4px 0 2px; }
+.call__consent[hidden] { display: none; }
+.call__consent-text { font: 500 15px/1.6 var(--font-sans); color: var(--color-text-secondary); text-align: center; max-width: 30ch; margin: 0; }
+[dir="rtl"] .call__consent-text { font-family: var(--font-arabic); }
+.call__consent-btn {
+  display: inline-flex; align-items: center; gap: 10px; padding: 13px 24px; border: 0; border-radius: var(--radius-pill);
+  background: var(--color-accent); color: #fff; font: 600 15px var(--font-sans); cursor: pointer;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-accent) 40%, transparent); transition: transform .15s ease, background .15s ease;
+}
+[dir="rtl"] .call__consent-btn { font-family: var(--font-arabic); }
+.call__consent-btn:hover { transform: translateY(-2px); }
+.call__consent-btn:active { transform: translateY(0); }
+.call__consent-btn svg { width: 20px; height: 20px; }

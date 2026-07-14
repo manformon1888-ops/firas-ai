@@ -157,6 +157,8 @@ const STR = {
     callTapTalk: "اضغط للتحدث",
     callRecording: "أستمع… اضغط عند الانتهاء",
     callMuted: "الميكروفون مكتوم",
+    callConsentText: "للتحدث في المكالمة، اسمح باستخدام الميكروفون",
+    callConsentBtn: "السماح بالميكروفون والبدء",
     callError: "تعذّرت المكالمة — تأكد من إذن الميكروفون.",
     callSorry: "عذرًا، لم أستطع المتابعة. حاول مرة أخرى.",
     callUnsupported: "المكالمة الصوتية غير مدعومة على هذا المتصفح.",
@@ -343,6 +345,8 @@ const STR = {
     callTapTalk: "Tap to talk",
     callRecording: "Listening… tap when done",
     callMuted: "Microphone muted",
+    callConsentText: "To talk on the call, allow microphone access",
+    callConsentBtn: "Allow microphone & start",
     callError: "Call failed — check microphone permission.",
     callSorry: "Sorry, I couldn't continue. Please try again.",
     callUnsupported: "Voice calls aren't supported in this browser.",
@@ -10973,7 +10977,33 @@ const call = {
   sr: null, rec: null, stream: null, chunks: [], analyser: null, ctx: null, audio: null,
   silence: 0, finalText: "", speakToken: 0, muted: false, prevMode: null,
   vadRaf: 0, vadQuiet: 0, hadSpeech: false, serverStt: false,
+  audioEl: null, audioUnlocked: false, curUrl: "", micGranted: false,
 };
+/* Autoplay UNLOCK — Safari/Chrome block audio.play() unless it's tied to a user
+   gesture. The TTS reply plays AFTER an await (fetch), so the gesture is gone and
+   playback is blocked → silent. Fix: on the call-start / consent TAP (a real
+   gesture), prime ONE reusable <audio> element with a silent clip; every later
+   reply reuses that already-unlocked element, so it plays on every browser. */
+function callPrimeAudio() {
+  try {
+    if (!call.audioEl) {
+      const a = new Audio();
+      try { a.setAttribute("playsinline", ""); } catch (_) {}
+      a.preload = "auto";
+      call.audioEl = a;
+    }
+    if (!call.audioUnlocked) {
+      // 44-byte silent WAV — plays instantly and marks the element as user-unlocked.
+      call.audioEl.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+      call.audioEl.muted = true;
+      const p = call.audioEl.play();
+      if (p && p.then) p.then(() => { call.audioUnlocked = true; call.audioEl.muted = false; }).catch(() => { call.audioEl.muted = false; });
+      else { call.audioUnlocked = true; call.audioEl.muted = false; }
+    }
+    // Also prime speechSynthesis (the fallback voice) within the gesture.
+    try { if (window.speechSynthesis) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } } catch (_) {}
+  } catch (_) {}
+}
 function callSRAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
 function callSpeechAvailable() { return !!(window.speechSynthesis && window.SpeechSynthesisUtterance); }
 function callMicAvailable() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
@@ -11055,14 +11085,19 @@ function callSpeak(text) {
         const blob = await r.blob();
         if (call.speakToken !== token || !call.active) return resolve();
         const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        call.audio = audio;
-        const finish = () => { try { URL.revokeObjectURL(url); } catch (_) {} if (call.audio === audio) call.audio = null; if (call.speakToken === token) resolve(); };
+        // REUSE the single audio element that was UNLOCKED by the user's tap (callPrimeAudio)
+        // — a fresh `new Audio()` here would be treated as autoplay and blocked (silent) on
+        // Safari/Chrome because we're past the gesture (after the fetch await).
+        const audio = call.audioEl || (call.audioEl = new Audio());
+        try { audio.muted = false; audio.volume = 1; } catch (_) {}
+        try { if (call.curUrl) URL.revokeObjectURL(call.curUrl); } catch (_) {}
+        call.curUrl = url;
+        const finish = () => { try { if (call.curUrl === url) { URL.revokeObjectURL(url); call.curUrl = ""; } } catch (_) {} if (call.speakToken === token) resolve(); };
         audio.onended = finish;
         audio.onerror = finish;
-        try { await audio.play(); return; } catch (_) { /* autoplay blocked → device voice */ }
-        try { URL.revokeObjectURL(url); } catch (_) {}
-        if (call.audio === audio) call.audio = null;
+        audio.src = url;
+        try { await audio.play(); return; } catch (_) { /* still blocked → device voice */ }
+        try { if (call.curUrl === url) { URL.revokeObjectURL(url); call.curUrl = ""; } } catch (_) {}
       }
     } catch (_) { if (call.speakToken !== token || !call.active) return resolve(); }
     // 2) Fallback: device speechSynthesis (chunked by sentence).
@@ -11089,7 +11124,8 @@ function callSpeak(text) {
 }
 function callStopSpeaking() {
   call.speakToken++; // invalidate any in-flight speak() so it resolves
-  if (call.audio) { try { call.audio.pause(); call.audio.src = ""; } catch (_) {} call.audio = null; }
+  if (call.audioEl) { try { call.audioEl.pause(); call.audioEl.removeAttribute("src"); call.audioEl.load(); } catch (_) {} }
+  if (call.curUrl) { try { URL.revokeObjectURL(call.curUrl); } catch (_) {} call.curUrl = ""; }
   try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
 }
 /* ---- send the user's spoken turn through the normal chat, return the reply ---- */
@@ -11274,6 +11310,9 @@ async function callOpen() {
   if (call.active) return;
   if (state.product !== "ai") return;              // Firas AI only
   if (!callSupported()) { showToast(t().callUnsupported); return; }
+  // UNLOCK AUDIO NOW — this runs inside the call-button click (a user gesture), so the
+  // silent-prime marks the reused <audio> element playable; every later reply then sounds.
+  callPrimeAudio();
   call.active = true; call.muted = false; call.finalText = "";
   call.prevMode = state.mode;
   if (state.mode !== "auto") { state.mode = "auto"; }  // no plan-mode clarifying turns mid-call
@@ -11289,18 +11328,48 @@ async function callOpen() {
   if (els.callMute) els.callMute.classList.remove("is-muted");
   if (els.callName) els.callName.textContent = "Firas";
   if (els.callCaption) els.callCaption.textContent = "";
+  if (els.callConsent) els.callConsent.hidden = true;
   els.callScreen.hidden = false;
   requestAnimationFrame(() => els.callScreen.classList.add("is-open"));
   document.body.classList.add("in-call");
   callSetPhase("connecting", "");
   try { window.speechSynthesis && window.speechSynthesis.getVoices(); } catch (_) {}
-  // Probe whether the server can transcribe (Gemini) — decides whether "auto"
-  // uses true language detection (record→transcribe) or Arabic-biased SR.
+  // MIC CONSENT GATE: on first call (mic not yet granted this session), show a clear
+  // "Allow microphone" button. Its tap is a fresh user gesture → getUserMedia's native
+  // prompt fires reliably (esp. Safari) AND re-unlocks audio. If already granted, go straight.
+  if (call.micGranted || !callMicAvailable()) { callProceed(); return; }
+  if (els.callConsent && els.callConsentBtn) {
+    if (els.callConsentText) els.callConsentText.textContent = t().callConsentText;
+    if (els.callConsentLabel) els.callConsentLabel.textContent = t().callConsentBtn;
+    els.callConsent.hidden = false;
+    if (els.callControls) els.callControls.style.opacity = "0.5";
+    callSetPhase("connecting", "");
+    if (els.callStatus) els.callStatus.textContent = t().callConsentText;
+  } else { callProceed(); }
+}
+/* Consent button tapped → request mic permission within THIS gesture, then start the call. */
+async function callGrantMic() {
+  callPrimeAudio(); // fresh gesture → belt-and-suspenders audio unlock
+  let ok = true;
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    try { s.getTracks().forEach((tr) => tr.stop()); } catch (_) {} // we only needed the permission grant
+    call.micGranted = true;
+  } catch (_) { ok = false; }
+  if (!ok) { showToast(t().micDenied); if (els.callStatus) els.callStatus.textContent = t().micDenied; return; }
+  if (els.callConsent) els.callConsent.hidden = true;
+  if (els.callControls) els.callControls.style.opacity = "";
+  if (call.active) callProceed();
+}
+/* Probe STT capability, greet, then start listening. */
+async function callProceed() {
+  if (!call.active) return;
+  if (els.callControls) els.callControls.style.opacity = "";
+  callSetPhase("connecting", "");
   try { const d = await apiJson("/api/transcribe", { method: "POST", body: JSON.stringify({ probe: true }) }); call.serverStt = !!(d && d.ok); }
   catch (_) { call.serverStt = false; }
   if (!call.active) return;
-  // A quick spoken greeting, then start listening.
-  await callSpeak(t().callHello);
+  await callSpeak(t().callHello);      // greeting on the unlocked element → audible
   if (call.active) callListen();
 }
 function callEnd() {
@@ -11330,6 +11399,7 @@ function initCall() {
   if (els.callEnd) els.callEnd.addEventListener("click", callEnd);
   if (els.callMute) els.callMute.addEventListener("click", callToggleMute);
   if (els.callOrb) els.callOrb.addEventListener("click", callOrbTap);
+  if (els.callConsentBtn) els.callConsentBtn.addEventListener("click", callGrantMic);
   // Preload TTS voices (Chrome loads them async).
   try { if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => { try { window.speechSynthesis.getVoices(); } catch (_) {} }; } catch (_) {}
   // Leaving the tab pauses a live listen; returning resumes (privacy + no ghost mic).
@@ -11379,6 +11449,11 @@ function cacheEls() {
   els.callCaption = $("#callCaption");
   els.callMute = $("#callMute");
   els.callEnd = $("#callEnd");
+  els.callControls = $(".call__controls");
+  els.callConsent = $("#callConsent");
+  els.callConsentBtn = $("#callConsentBtn");
+  els.callConsentText = $("#callConsentText");
+  els.callConsentLabel = $("#callConsentLabel");
   els.fileInput = $("#fileInput");
   els.attachTray = $("#attachTray");
   els.scrollBottomBtn = $("#scrollBottomBtn");
