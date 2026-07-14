@@ -109,7 +109,32 @@ const GEMINI_OAI_URL     = "https://generativelanguage.googleapis.com/v1beta/ope
 // Gemini image model (Google AI Studio "Nano Banana") — actual Gemini-level quality.
 // If GEMINI_API_KEY is set, /api/image uses it FIRST, falling back to keyless
 // pollinations on error/quota. Free key, NO credit card (aistudio.google.com).
-const GEMINI_API_KEY     = process.env.GEMINI_API_KEY || "";
+// GEMINI API KEY POOL — Gemini's free tier is quota-limited PER PROJECT (not per key),
+// so add keys from DIFFERENT Google Cloud projects/accounts to multiply the daily voice
+// quota. Set GEMINI_API_KEY (+ GEMINI_API_KEYS="k2,k3" or GEMINI_API_KEY_1..9). When a
+// key hits its limit (429/quota) the pool rotates to the next; a limited key rests briefly
+// (RPM caps reset each minute; daily caps reset ~midnight Pacific) and self-heals.
+const GEMINI_KEYS = (() => {
+  const keys = [];
+  if (process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY.trim());
+  for (const k of (process.env.GEMINI_API_KEYS || "").split(",")) { const v = k.trim(); if (v) keys.push(v); }
+  for (let i = 1; i <= 9; i++) { const v = (process.env["GEMINI_API_KEY_" + i] || "").trim(); if (v) keys.push(v); }
+  return [...new Set(keys)];
+})();
+const GEMINI_API_KEY     = GEMINI_KEYS[0] || "";   // back-compat: `if (GEMINI_API_KEY)` = "any key configured"
+const _gemCooldown = new Map();                    // key → ms timestamp it may be retried
+function geminiMarkLimited(key, status) {
+  if (!key) return;
+  // 429 is usually a per-MINUTE RPM cap (rest 65s); other errors rest ~5 min.
+  _gemCooldown.set(key, Date.now() + (status === 429 ? 65_000 : 5 * 60_000));
+}
+/** First key not on cooldown; if all are cooling, the one recovering soonest (never give up). */
+function geminiPickKey() {
+  if (!GEMINI_KEYS.length) return "";
+  const now = Date.now();
+  for (const k of GEMINI_KEYS) { if (now >= (_gemCooldown.get(k) || 0)) return k; }
+  return GEMINI_KEYS.reduce((a, b) => ((_gemCooldown.get(a) || 0) <= (_gemCooldown.get(b) || 0) ? a : b));
+}
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 // Hugging Face image model. Only FLUX.1-schnell is still served FREE by hf-inference
 // (FLUX.1-dev/SDXL/SD3.5 now 410/400 — need a paid provider). Lossless PNG, but not
@@ -1553,7 +1578,7 @@ async function translateFetch(messages) {
   };
   if (GEMINI_API_KEY) {
     const g = await tryOne(GEMINI_OAI_URL, { model: GEMINI_TEXT_MODELS[0] || "gemini-2.5-flash", messages, temperature: 0.2 },
-      { "Content-Type": "application/json", "Authorization": "Bearer " + GEMINI_API_KEY });
+      { "Content-Type": "application/json", "Authorization": "Bearer " + (geminiPickKey() || GEMINI_API_KEY) });
     if (g) return g;
   }
   return await tryOne(FALLBACK_URL, { model: "openai-fast", messages, stream: false, temperature: 0.2 }, { "Content-Type": "application/json" });
@@ -1882,7 +1907,7 @@ async function generateImageGemini(prompt) {
   try {
     const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_IMAGE_MODEL + ":generateContent", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": (geminiPickKey() || GEMINI_API_KEY) },
       body: JSON.stringify({ contents: [{ parts: [{ text: String(prompt || "").slice(0, 4000) }] }] }),
       signal: ac.signal,
     });
@@ -2218,36 +2243,47 @@ function geminiTtsStyle(lang) {
     : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, completely natural conversational tone — expressive intonation that reacts to the meaning, natural pauses, a hint of enthusiasm where it fits. Never a flat formal read. Text: ";
 }
 async function geminiSynthesize(text, lang) {
-  if (!GEMINI_API_KEY) throw new Error("no gemini key");
+  if (!GEMINI_KEYS.length) throw new Error("no gemini key");
   if (Date.now() < geminiTtsDisabledUntil) throw new Error("gemini tts circuit-open");
   const cacheKey = crypto.createHash("sha1").update(GEMINI_TTS_VOICE + "|" + lang + "|" + text).digest("hex");
   const hit = ttsCache.get(cacheKey);
   if (hit) return hit;
-  const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TTS_MODEL + ":generateContent", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: geminiTtsStyle(lang) + text }] }],
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_TTS_VOICE } } },
-      },
-    }),
-    signal: AbortSignal.timeout(40_000),
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: geminiTtsStyle(lang) + text }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_TTS_VOICE } } },
+    },
   });
-  if (!r.ok) {
-    // Quota (429) or transient error → open the breaker briefly so calls stay snappy on Edge.
-    geminiTtsDisabledUntil = Date.now() + (r.status === 429 ? 120_000 : 45_000);
-    throw new Error("gemini tts http " + r.status);
+  // Try up to N keys from the pool — a 429 on one key rotates to the next, so the
+  // expressive voice keeps working across keys until ALL are quota-limited.
+  const tries = Math.min(GEMINI_KEYS.length, 4);
+  let lastStatus = 0;
+  for (let i = 0; i < tries; i++) {
+    const key = geminiPickKey();
+    if (!key) break;
+    let r;
+    try {
+      r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TTS_MODEL + ":generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body,
+        signal: AbortSignal.timeout(40_000),
+      });
+    } catch (e) { geminiMarkLimited(key, 0); lastStatus = 0; continue; } // network/timeout → cool this key, try next
+    if (!r.ok) { lastStatus = r.status; geminiMarkLimited(key, r.status); continue; }
+    const j = await r.json().catch(() => null);
+    const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+    const inl = Array.isArray(parts) ? parts.find((p) => p.inlineData && p.inlineData.data) : null;
+    if (!inl) { lastStatus = 200; continue; }
+    const rate = (() => { const m = /rate=(\d+)/.exec(inl.inlineData.mimeType || ""); return m ? +m[1] : 24000; })();
+    const wav = pcmToWav(Buffer.from(inl.inlineData.data, "base64"), rate);
+    ttsCachePut(cacheKey, wav);
+    return wav;
   }
-  const j = await r.json().catch(() => null);
-  const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
-  const inl = Array.isArray(parts) ? parts.find((p) => p.inlineData && p.inlineData.data) : null;
-  if (!inl) throw new Error("gemini tts empty");
-  const rate = (() => { const m = /rate=(\d+)/.exec(inl.inlineData.mimeType || ""); return m ? +m[1] : 24000; })();
-  const wav = pcmToWav(Buffer.from(inl.inlineData.data, "base64"), rate);
-  ttsCachePut(cacheKey, wav);
-  return wav;
+  // Every tried key failed → rest the whole engine briefly so calls fall to Edge fast.
+  geminiTtsDisabledUntil = Date.now() + (lastStatus === 429 ? 120_000 : 45_000);
+  throw new Error("gemini tts exhausted (" + lastStatus + ")");
 }
 
 function ttsChunks(text, max) {
@@ -2421,7 +2457,7 @@ async function handleTranscribe(req, res) {
     try {
       const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": (geminiPickKey() || GEMINI_API_KEY) },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(60_000),
       });
@@ -2577,7 +2613,7 @@ async function _geminiStream(res, msgs, signal, label) {
     try {
       upstream = await fetch(GEMINI_OAI_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + GEMINI_API_KEY },
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (geminiPickKey() || GEMINI_API_KEY) },
         body, signal,
       });
     } catch (e) { if (signal.aborted) return true; continue; }
@@ -3641,6 +3677,7 @@ initDb()
     server.listen(PORT, "0.0.0.0", () => { // bind all interfaces (required by Fly.io/containers)
       console.log(`\n  ✦ Firas AI  →  http://localhost:${PORT}`);
       console.log(`  engine: Ollama (${OLLAMA_HOST})  fallback: keyless pollinations`);
+      console.log(`  voice: ${GEMINI_KEYS.length ? "Gemini expressive (" + GEMINI_KEYS.length + " key" + (GEMINI_KEYS.length > 1 ? "s" : "") + ") → Edge neural → Google" : "Edge neural → Google (set GEMINI_API_KEY for the expressive voice)"}`);
       console.log(`  db: ${fbEnabled() ? "Firebase RTDB (" + FB_DB_URL + ")" : DB_PATH}  (users: ${DB.users.length}, chats: ${DB.chats.length})`);
       // Production-readiness guardrails (warn loudly, don't crash).
       const prod = process.env.NODE_ENV === "production";
