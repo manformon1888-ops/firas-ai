@@ -54,7 +54,17 @@ const GEMINI_TEXT_MODELS = (env("GEMINI_TEXT_MODEL") || "gemini-2.5-flash,gemini
 const GEMINI_OAI_URL     = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 // Gemini image model (Google AI Studio "Nano Banana"). If GEMINI_API_KEY is set,
 // /api/image uses it FIRST, falling back to keyless pollinations. Free key, no card.
-const GEMINI_API_KEY     = env("GEMINI_API_KEY") || "";
+// GEMINI KEY POOL — put all keys (from DIFFERENT Google accounts) in GEMINI_API_KEYS
+// (commas/spaces/newlines), or GEMINI_API_KEY / GEMINI_API_KEY_1..24. On a 429 the
+// pool rotates; a limited key rests briefly and self-heals. Feeds the voice + image + text.
+const GEMINI_KEYS = (() => {
+  const blob = [env("GEMINI_API_KEY") || "", env("GEMINI_API_KEYS") || "", ...Array.from({ length: 24 }, (_, i) => env("GEMINI_API_KEY_" + (i + 1)) || "")].join(" ");
+  return [...new Set(blob.split(/[\s,;]+/).map((k) => k.trim().replace(/^["']+|["']+$/g, "")).filter((k) => k.length >= 20))];
+})();
+const _gemCd = new Map();
+function gemMark(k, s) { if (k) _gemCd.set(k, Date.now() + (s === 429 ? 65000 : 300000)); }
+function gemPick() { if (!GEMINI_KEYS.length) return ""; const now = Date.now(); for (const k of GEMINI_KEYS) { if (now >= (_gemCd.get(k) || 0)) return k; } return GEMINI_KEYS.reduce((a, b) => ((_gemCd.get(a) || 0) <= (_gemCd.get(b) || 0) ? a : b)); }
+const GEMINI_API_KEY     = GEMINI_KEYS[0] || "";   // back-compat: `if (GEMINI_API_KEY)` = "any key configured"
 const GEMINI_IMAGE_MODEL = env("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image";
 // NVIDIA NIM — FREE OpenAI-compatible API. Max tier PRIMARY engine (DeepSeek V4 Pro, frontier-class).
 // Set NVIDIA_API_KEY in Netlify env vars; Max falls back to Gemini when unset or rate-limited.
@@ -1311,6 +1321,78 @@ async function generateImageHF(prompt) {
 /* ============================================================================
    ROUTER
    ============================================================================ */
+/* ---------------- VOICE (Deno port): /api/tts + /api/transcribe ----------------
+   Arabic → Gemini EXPRESSIVE TTS (generative, emotional). Other languages → Google
+   Translate TTS (Edge neural TTS needs a Node raw-WS and can't run on Deno edge, so
+   it's skipped here; the browser speechSynthesis is the client's final fallback).
+   /api/transcribe → Gemini (multimodal audio). All keyless-for-users via the pool. */
+const GEMINI_TTS_MODEL = env("GEMINI_TTS_MODEL") || "gemini-2.5-flash-preview-tts";
+const GEMINI_TTS_VOICE = env("GEMINI_TTS_VOICE") || "Sadaltager";
+const TTS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+function ttsStyleAr(lang) {
+  return String(lang || "").startsWith("ar")
+    ? "أنت فِراس، شابٌّ عربيّ ودود. انطق النص التالي بعربية فصيحة سليمة النطق، بروح دافئة حيوية عفوية وبوتيرة سريعة قليلاً، كأنك تتحدث مع صديق — لا جمود ولا رتابة. النص: "
+    : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, natural spoken tone at a slightly brisk pace, like talking to a friend. Text: ";
+}
+function ttsB64ToBytes(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+function pcmToWav(pcm, rate) {
+  const n = pcm.length, buf = new Uint8Array(44 + n), dv = new DataView(buf.buffer);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); dv.setUint32(4, 36 + n, true); ws(8, "WAVE"); ws(12, "fmt "); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true);
+  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n, true); buf.set(pcm, 44); return buf;
+}
+function ttsChunks(text, max) {
+  const parts = String(text).split(/(?<=[.!?؟،؛\n])\s+/); const out = []; let cur = "";
+  for (let s of parts) { s = s.trim(); if (!s) continue; while (s.length > max) { let cut = s.lastIndexOf(" ", max); if (cut < max * 0.5) cut = max; out.push(s.slice(0, cut).trim()); s = s.slice(cut).trim(); } if ((cur + " " + s).trim().length > max) { if (cur) out.push(cur.trim()); cur = s; } else cur = cur ? cur + " " + s : s; }
+  if (cur.trim()) out.push(cur.trim()); return out.filter(Boolean).slice(0, 14);
+}
+async function fetchTO(url, opts, ms) { const ac = new AbortController(); const to = setTimeout(() => ac.abort(), ms || 10000); try { return await fetch(url, Object.assign({ signal: ac.signal }, opts || {})); } finally { clearTimeout(to); } }
+async function geminiTtsSynth(text, lang) {
+  if (!GEMINI_KEYS.length) return null;
+  const body = JSON.stringify({ contents: [{ parts: [{ text: ttsStyleAr(lang) + text }] }], generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: GEMINI_TTS_VOICE } } } } });
+  for (let i = 0; i < Math.min(GEMINI_KEYS.length, 4); i++) {
+    const key = gemPick(); if (!key) break;
+    let r; try { r = await fetchTO("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TTS_MODEL + ":generateContent", { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": key }, body }, 40000); } catch (_) { gemMark(key, 0); continue; }
+    if (!r.ok) { gemMark(key, r.status); continue; }
+    const j = await r.json().catch(() => null);
+    const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+    const inl = Array.isArray(parts) ? parts.find((p) => p.inlineData && p.inlineData.data) : null;
+    if (!inl) continue;
+    const rate = (() => { const m = /rate=(\d+)/.exec(inl.inlineData.mimeType || ""); return m ? +m[1] : 24000; })();
+    return { bytes: pcmToWav(ttsB64ToBytes(inl.inlineData.data), rate), type: "audio/wav" };
+  }
+  return null;
+}
+async function googleTtsSynth(text, lang) {
+  const l = String(lang || "").startsWith("ar") ? "ar" : (/^[a-z]{2}/.test(lang) ? lang.slice(0, 2) : "en");
+  const chunks = ttsChunks(text, 190), bufs = [];
+  for (const c of chunks) {
+    let r; try { r = await fetchTO("https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=" + encodeURIComponent(l) + "&q=" + encodeURIComponent(c), { headers: { "User-Agent": TTS_UA, "Referer": "https://translate.google.com/" } }, 10000); } catch (_) { return null; }
+    if (!r.ok) return null; bufs.push(new Uint8Array(await r.arrayBuffer()));
+  }
+  if (!bufs.length) return null;
+  const total = bufs.reduce((a, b) => a + b.length, 0), out = new Uint8Array(total); let off = 0;
+  for (const b of bufs) { out.set(b, off); off += b.length; }
+  return { bytes: out, type: "audio/mpeg" };
+}
+async function geminiSTT(b64, format, lang) {
+  if (!GEMINI_KEYS.length) return null;
+  const hint = String(lang || "") === "auto" || !lang ? "" : (" The language/dialect is " + lang + "; write it in its native script exactly as spoken.");
+  const body = JSON.stringify({ contents: [{ role: "user", parts: [{ text: "You are a professional speech-to-text engine. Output ONLY the verbatim transcription — no commentary, no quotes, no translation. Keep the spoken language and dialect exactly (Arabic dialects stay in Arabic script)." + hint }, { inline_data: { mime_type: format === "mp3" ? "audio/mp3" : "audio/wav", data: b64 } }] }], generationConfig: { temperature: 0 } });
+  for (const model of GEMINI_TEXT_MODELS) {
+    const key = gemPick(); if (!key) break;
+    let r; try { r = await fetchTO("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": key }, body }, 60000); } catch (_) { gemMark(key, 0); continue; }
+    if (!r.ok) { gemMark(key, r.status); continue; }
+    const j = await r.json().catch(() => null);
+    const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+    let t = Array.isArray(parts) ? parts.map((p) => p.text || "").join("") : "";
+    t = String(t || "").trim(); if (/^".*"$/s.test(t) && t.length > 2) t = t.slice(1, -1).trim();
+    return t;
+  }
+  return null;
+}
+
 export default async (request, context) => {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -1962,6 +2044,34 @@ export default async (request, context) => {
       return json({ url: target, title, text });
     }
 
+    if (path === "/api/transcribe" && method === "POST") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      if (b && b.probe) return json({ ok: GEMINI_KEYS.length > 0 });
+      if (!GEMINI_KEYS.length) return json({ error: "no stt engine" }, 503);
+      if (rateLimited("stt:" + user.id, 20, 60000)) return json({ error: "rate limited" }, 429);
+      const audio = String((b && b.audio) || "").replace(/^data:audio\/[a-z0-9.+-]+;base64,/i, "");
+      if (!audio || audio.length < 4000 || audio.length > 20000000 || !/^[A-Za-z0-9+/=]+$/.test(audio)) return json({ error: "bad audio" }, 400);
+      try { const t = await geminiSTT(audio, b.format === "mp3" ? "mp3" : "wav", String(b.lang || "auto")); return json({ text: typeof t === "string" ? t : "" }); }
+      catch (_) { return json({ error: "stt unavailable" }, 502); }
+    }
+    if (path === "/api/tts" && method === "POST") {
+      const user = await currentUser(context);
+      if (!user) return json({ error: "authentication required" }, 401);
+      if (rateLimited("tts:" + user.id, 90, 60000)) return json({ error: "rate limited" }, 429);
+      let b; try { b = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const text = String((b && b.text) || "").replace(/\s+/g, " ").trim().slice(0, 1400);
+      if (!text) return new Response("", { status: 400 });
+      const raw = String((b && b.lang) || "").toLowerCase();
+      const lang = raw.startsWith("ar") ? "ar" : (/^[a-z]{2}(-[a-z]{2})?$/.test(raw) ? raw.slice(0, 2) : "en");
+      // Arabic → Gemini expressive voice; every other language → Google TTS (Edge neural needs Node).
+      let audio = null;
+      if (lang === "ar") { try { audio = await geminiTtsSynth(text, raw || lang); } catch (_) {} }
+      if (!audio) { try { audio = await googleTtsSynth(text, lang); } catch (_) {} }
+      if (!audio || !audio.bytes || !audio.bytes.length) return json({ error: "tts unavailable" }, 502);
+      return new Response(audio.bytes, { status: 200, headers: { "content-type": audio.type, "cache-control": "no-store", "X-TTS-Engine": audio.type === "audio/wav" ? "gemini" : "google" } });
+    }
     return json({ error: "not found" }, 404);
   } catch (e) {
     // Never echo internal error text (Firebase status codes / response fragments) to the client.
