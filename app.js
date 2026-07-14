@@ -3803,10 +3803,12 @@ function renderWelcome() {
     return;
   }
   // Minimal welcome: wordmark + time-of-day greeting. Nothing instructional.
+  // dir="auto" so a greeting mixing Arabic + a Latin name ("مساء الخير يا Dir")
+  // reads in the right order under the fixed-LTR shell.
   w.innerHTML = `
     <div class="welcome">
       <span class="nib is-aurora welcome__mark" data-size="lg" aria-hidden="true"><span class="glyph">F</span></span>
-      <h1 class="welcome__title">${escapeHtml(greetingText())}</h1>
+      <h1 class="welcome__title" dir="auto">${escapeHtml(greetingText())}</h1>
     </div>`;
   injectBrandMarks(w);
 }
