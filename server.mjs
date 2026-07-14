@@ -15,6 +15,7 @@
    Run:  node server.mjs      then open  http://localhost:3000
    ========================================================================== */
 import http from "node:http";
+import https from "node:https";
 import crypto from "node:crypto";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -2051,6 +2052,138 @@ function parseDdgLite(html) {
    browser plays with <audio>. The client falls back to speechSynthesis if this
    fails (offline / blocked).
    =========================================================================== */
+/* ---------------------------------------------------------------------------
+   Microsoft Edge "Read Aloud" NEURAL TTS — free, keyless, professional-grade
+   voices for many languages. We speak the protocol directly over a raw TLS
+   WebSocket (RFC-6455) so we can set the Origin header Microsoft requires — no
+   npm deps. Falls back to Google Translate TTS (below) if Edge is unavailable.
+   --------------------------------------------------------------------------- */
+const EDGE_TRUSTED = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+const EDGE_SEC_VER = "1-143.0.3650.75";
+const EDGE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
+// A natural neural voice per language (male, warm — fits the "معك فِراس" persona).
+const EDGE_VOICES = {
+  ar: "ar-SA-HamedNeural", "ar-sa": "ar-SA-HamedNeural", "ar-eg": "ar-EG-ShakirNeural",
+  "ar-iq": "ar-IQ-BasselNeural", "ar-jo": "ar-JO-TaimNeural", "ar-ma": "ar-MA-JamalNeural",
+  en: "en-US-AndrewMultilingualNeural", "en-us": "en-US-AndrewMultilingualNeural",
+  fr: "fr-FR-HenriNeural", tr: "tr-TR-AhmetNeural", de: "de-DE-ConradNeural",
+  es: "es-ES-AlvaroNeural", ur: "ur-PK-AsadNeural", fa: "fa-IR-FaridNeural",
+  ru: "ru-RU-DmitryNeural", it: "it-IT-DiegoNeural", pt: "pt-BR-AntonioNeural",
+  hi: "hi-IN-MadhurNeural", id: "id-ID-ArdiNeural", ja: "ja-JP-KeitaNeural",
+  zh: "zh-CN-YunxiNeural", ko: "ko-KR-InJoonNeural",
+};
+let edgeSkew = 0;         // clock-skew correction (seconds), learned on a 403
+let edgeDisabledUntil = 0; // circuit-breaker: skip Edge for a while after repeated failures
+function edgeVoiceFor(lang) {
+  const l = String(lang || "").toLowerCase();
+  return EDGE_VOICES[l] || EDGE_VOICES[l.slice(0, 2)] || EDGE_VOICES.en;
+}
+function edgeGec(skew) {
+  let ticks = Date.now() / 1000 + (skew || 0) + 11644473600;
+  ticks -= ticks % 300;
+  ticks *= 1e7;
+  return crypto.createHash("sha256").update(Math.floor(ticks) + EDGE_TRUSTED, "ascii").digest("hex").toUpperCase();
+}
+function edgeDateStr() {
+  const d = new Date();
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const mons = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const p = (n) => String(n).padStart(2, "0");
+  return days[d.getUTCDay()] + " " + mons[d.getUTCMonth()] + " " + p(d.getUTCDate()) + " " +
+    d.getUTCFullYear() + " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds()) +
+    " GMT+0000 (Coordinated Universal Time)";
+}
+function edgeXmlEscape(s) {
+  // strip control chars the service rejects (U+0000-08, 0B-0C, 0E-1F), then XML-escape
+  let out = "";
+  for (const ch of String(s)) {
+    const c = ch.codePointAt(0);
+    if (c <= 8 || c === 11 || c === 12 || (c >= 14 && c <= 31)) continue;
+    out += ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : ch;
+  }
+  return out;
+}
+/** Synthesize ONE text chunk to an MP3 Buffer via Edge neural TTS. */
+function edgeSynthOne(text, voice, skew) {
+  return new Promise((resolve, reject) => {
+    const path = "/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=" + EDGE_TRUSTED +
+      "&Sec-MS-GEC=" + edgeGec(skew) + "&Sec-MS-GEC-Version=" + EDGE_SEC_VER +
+      "&ConnectionId=" + crypto.randomUUID().replace(/-/g, "");
+    const key = crypto.randomBytes(16).toString("base64");
+    let settled = false;
+    const done = (err, buf) => { if (settled) return; settled = true; clearTimeout(to); try { req.destroy(); } catch (_) {} err ? reject(err) : resolve(buf); };
+    const req = https.request({
+      host: "speech.platform.bing.com", path, method: "GET",
+      headers: {
+        "Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": key,
+        "Origin": "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold", "User-Agent": EDGE_UA,
+        "Pragma": "no-cache", "Cache-Control": "no-cache", "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+    const to = setTimeout(() => done(new Error("edge timeout")), 12000);
+    req.on("upgrade", (res, socket) => {
+      const mask = (payload, opcode) => {
+        const len = payload.length, m = crypto.randomBytes(4); let hdr;
+        if (len < 126) hdr = Buffer.from([0x80 | opcode, 0x80 | len]);
+        else if (len < 65536) hdr = Buffer.from([0x80 | opcode, 0x80 | 126, (len >> 8) & 255, len & 255]);
+        else { hdr = Buffer.alloc(10); hdr[0] = 0x80 | opcode; hdr[1] = 0x80 | 127; hdr.writeUInt32BE(0, 2); hdr.writeUInt32BE(len, 6); }
+        const out = Buffer.alloc(len); for (let i = 0; i < len; i++) out[i] = payload[i] ^ m[i % 4];
+        return Buffer.concat([hdr, m, out]);
+      };
+      const sendText = (s) => socket.write(mask(Buffer.from(s, "utf8"), 0x1));
+      sendText("X-Timestamp:" + edgeDateStr() + "\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
+        '{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}');
+      const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='" +
+        voice + "'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>" + edgeXmlEscape(text) + "</prosody></voice></speak>";
+      sendText("X-RequestId:" + crypto.randomUUID().replace(/-/g, "") + "\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:" + edgeDateStr() + "Z\r\nPath:ssml\r\n\r\n" + ssml);
+      let buf = Buffer.alloc(0); const parts = [];
+      socket.on("data", (d) => {
+        buf = Buffer.concat([buf, d]);
+        while (buf.length >= 2) {
+          const op = buf[0] & 0x0f; let len = buf[1] & 0x7f, off = 2;
+          if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+          else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+          if (buf.length < off + len) break;
+          const payload = buf.slice(off, off + len); buf = buf.slice(off + len);
+          if (op === 0x1) { if (payload.toString("utf8").includes("Path:turn.end")) { done(null, Buffer.concat(parts)); return; } }
+          else if (op === 0x2) { const hlen = payload.readUInt16BE(0); parts.push(payload.slice(2 + hlen)); }
+          else if (op === 0x8) { done(null, Buffer.concat(parts)); return; }
+        }
+      });
+      socket.on("close", () => done(parts.length ? null : new Error("edge closed early"), Buffer.concat(parts)));
+      socket.on("error", (e) => done(e));
+    });
+    req.on("response", (res) => {
+      // Non-101 (usually 403). Learn clock skew from the server Date header so a retry works.
+      if (res.statusCode === 403 && res.headers.date) { const sv = Date.parse(res.headers.date); if (sv) edgeSkew = (sv - Date.now()) / 1000; }
+      done(new Error("edge http " + res.statusCode));
+    });
+    req.on("error", (e) => done(e));
+    req.end();
+  });
+}
+/** Synthesize `text` (chunked) to one MP3 Buffer via Edge; retries once on 403 with learned skew. */
+async function edgeSynthesize(text, lang) {
+  if (Date.now() < edgeDisabledUntil) throw new Error("edge circuit-open");
+  const voice = edgeVoiceFor(lang);
+  const chunks = ttsChunks(text, 1600);
+  const bufs = [];
+  for (const c of chunks) {
+    let out;
+    try { out = await edgeSynthOne(c, voice, edgeSkew); }
+    catch (e1) {
+      // one retry with the (possibly just-learned) skew
+      try { out = await edgeSynthOne(c, voice, edgeSkew); }
+      catch (e2) { edgeDisabledUntil = Date.now() + 60_000; throw e2; }
+    }
+    if (out && out.length) bufs.push(out);
+  }
+  const all = Buffer.concat(bufs);
+  if (!all.length) throw new Error("edge empty");
+  return all;
+}
+
 function ttsChunks(text, max) {
   // Split on sentence enders first, then pack words up to `max` chars per piece.
   const sentences = String(text).split(/(?<=[.!?؟،؛\n])\s+/);
@@ -2081,6 +2214,16 @@ async function handleTts(req, res) {
   if (!text) { res.writeHead(400); return res.end(); }
   const raw = String(body.lang || "").toLowerCase();
   const lang = raw.startsWith("ar") ? "ar" : (/^[a-z]{2}(-[a-z]{2})?$/.test(raw) ? raw.slice(0, 2) : "en");
+  // 1) PRIMARY: Microsoft Edge NEURAL voices (professional quality, keyless).
+  //    Pass the raw lang/dialect so Arabic gets the right regional neural voice.
+  try {
+    const edge = await edgeSynthesize(text, raw || lang);
+    if (edge && edge.length) {
+      res.writeHead(200, { "Content-Type": "audio/mpeg", "Cache-Control": "no-store", "Content-Length": edge.length, "X-TTS-Engine": "edge" });
+      return res.end(edge);
+    }
+  } catch (_) { /* Edge blocked/unavailable → Google Translate TTS below */ }
+  // 2) FALLBACK: Google Translate TTS (robust, keyless, lower quality).
   const slow = body.slow ? "&ttsspeed=0.5" : "";
   const chunks = ttsChunks(text, 190);
   const bufs = [];

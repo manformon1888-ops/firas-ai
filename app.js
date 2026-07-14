@@ -573,6 +573,7 @@ function injectBrandMarks(root) {
 const LS_TIER = "firas_ai_tier";
 const LS_THEME = "firas_ai_theme";
 const LS_LANG = "firas_ai_lang";
+const LS_LANG_EXPLICIT = "firas_ai_lang_explicit"; // set once the user picks a UI language in Settings
 const LS_THINK = "firas_ai_think";
 const LS_MODE = "firas_ai_mode";
 const LS_SIDEBAR = "firas_ai_sidebar_collapsed";
@@ -3107,7 +3108,11 @@ function applyShellLang(lang) {
   localStorage.setItem(LS_LANG, lang);
   const html = document.documentElement;
   html.lang = lang;
-  html.dir = lang === "ar" ? "rtl" : "ltr";
+  // LAYOUT DIRECTION IS FIXED (LTR) and NEVER follows the language — the sidebar,
+  // buttons and whole shell stay put; only the TEXT + font change with language.
+  // (Per-message bubbles/inputs still set their own dir from content for correct
+  // Arabic reading — that is content bidi, not the shell layout.)
+  html.dir = "ltr";
   // Apply translated labels
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n");
@@ -3129,8 +3134,23 @@ function applyShellLang(lang) {
   renderLandingCopy();                // re-localize landing hero copy
 }
 
-/** Recompute shell language from the active conversation's latest user msg. */
+/** True once the user has explicitly chosen a UI language in Settings — after
+    that we NEVER auto-switch the interface language from chat content. */
+function uiLangIsExplicit() { return localStorage.getItem(LS_LANG_EXPLICIT) === "1"; }
+/** Explicit UI-language choice (from Settings): change the TEXT only, remember it,
+    and stop auto-following the chat language. Layout direction stays fixed. */
+function setUiLang(lang) {
+  if (lang !== "ar" && lang !== "en") return;
+  localStorage.setItem(LS_LANG_EXPLICIT, "1");
+  applyShellLang(lang);
+  // Re-render dynamic content (welcome greeting, thread action labels) so it localizes too.
+  try { renderAll(); } catch (_) {}
+}
+
+/** Recompute shell language from the active conversation's latest user msg.
+    Skipped once the user has explicitly chosen a UI language in Settings. */
 function syncShellLangFromChat() {
+  if (uiLangIsExplicit()) return;
   const chat = activeChat();
   let lang = state.lang;
   if (chat && Array.isArray(chat.messages)) {
@@ -8990,8 +9010,9 @@ async function sendMessage() {
   els.sendBtn.classList.add("send-pulse");
   setTimeout(() => els.sendBtn.classList.remove("send-pulse"), 440);
 
-  // Shell language follows the user's latest message
-  if (lang !== state.lang) applyShellLang(lang);
+  // Shell TEXT language follows the user's latest message — UNLESS they picked a
+  // UI language in Settings (then it stays fixed). Layout direction never changes.
+  if (lang !== state.lang && !uiLangIsExplicit()) applyShellLang(lang);
 
   renderHistory(); // reflect the new/updated chat in the sidebar immediately
   // Create the chat on the server on its first user message (gets a serverId).
@@ -9481,6 +9502,7 @@ function openSettingsPanel() {
   const tx = ar ? {
     title: "الإعدادات", sub: "إدارة حسابك وأمانه", account: "الحساب",
     appearanceH: "المظهر", themeLight: "نهاري", themeDark: "ليلي",
+    langH: "لغة الواجهة", langAr: "العربية", langEn: "English",
     chEmailH: "تغيير البريد الإلكتروني", newEmail: "البريد الجديد", curPw: "كلمة المرور الحالية", saveEmail: "حفظ البريد",
     chPwH: "تغيير كلمة المرور", newPw: "كلمة المرور الجديدة", newPwHint: "٨ أحرف على الأقل", savePw: "حفظ كلمة المرور",
     dangerH: "منطقة الخطر", dangerP: "حذف الحساب يمسح جميع محادثاتك نهائياً ولا يمكن التراجع عنه.",
@@ -9490,6 +9512,7 @@ function openSettingsPanel() {
   } : {
     title: "Settings", sub: "Manage your account & security", account: "Account",
     appearanceH: "Appearance", themeLight: "Light", themeDark: "Dark",
+    langH: "Interface language", langAr: "العربية", langEn: "English",
     chEmailH: "Change email", newEmail: "New email", curPw: "Current password", saveEmail: "Save email",
     chPwH: "Change password", newPw: "New password", newPwHint: "at least 8 characters", savePw: "Save password",
     dangerH: "Danger zone", dangerP: "Deleting your account erases all your conversations permanently. This can't be undone.",
@@ -9509,6 +9532,7 @@ function openSettingsPanel() {
   const ICO = {
     sun: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     moon: '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z"/></svg>',
     mail: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
     lock: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
     alert: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>',
@@ -9534,6 +9558,13 @@ function openSettingsPanel() {
           '<div class="set-theme-seg" role="radiogroup" aria-label="' + tx.appearanceH + '">' +
             '<button type="button" class="set-theme-opt" data-theme-opt="light" role="radio">' + ICO.sun + '<span>' + tx.themeLight + '</span></button>' +
             '<button type="button" class="set-theme-opt" data-theme-opt="dark" role="radio">' + ICO.moon + '<span>' + tx.themeDark + '</span></button>' +
+          '</div>' +
+        '</section>' +
+        '<section class="set-card set-appearance">' +
+          '<div class="set-card-h"><span class="set-ico">' + ICO.globe + '</span>' + tx.langH + '</div>' +
+          '<div class="set-lang-seg" role="radiogroup" aria-label="' + tx.langH + '">' +
+            '<button type="button" class="set-theme-opt" data-lang-opt="ar" role="radio"><span>' + tx.langAr + '</span></button>' +
+            '<button type="button" class="set-theme-opt" data-lang-opt="en" role="radio"><span>' + tx.langEn + '</span></button>' +
           '</div>' +
         '</section>' +
         '<form class="set-card set-email-form" novalidate autocomplete="off">' +
@@ -9604,6 +9635,28 @@ function openSettingsPanel() {
     syncThemeSeg();
   });
   syncThemeSeg();
+
+  // — interface language (العربية / English) — changes the TEXT only; layout stays fixed.
+  const langSeg = ov.querySelector(".set-lang-seg");
+  if (langSeg) {
+    const syncLangSeg = () => {
+      langSeg.querySelectorAll("[data-lang-opt]").forEach((b) => {
+        const on = b.getAttribute("data-lang-opt") === state.lang;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+      });
+    };
+    langSeg.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-lang-opt]");
+      if (!b) return;
+      setUiLang(b.getAttribute("data-lang-opt")); // updates the whole app's text live; layout unchanged
+      syncLangSeg();
+      showToast(state.lang === "ar" ? "تم تغيير لغة الواجهة ✓" : "Interface language changed ✓");
+      // Refresh the settings panel itself so its own labels switch language too.
+      setTimeout(() => { const x = ov.querySelector(".mem-x"); if (x) x.click(); openSettingsPanel(); }, 60);
+    });
+    syncLangSeg();
+  }
 
   // — change email —
   const emailForm = ov.querySelector(".set-email-form");
@@ -10671,8 +10724,9 @@ function micCancel() {
 function micStartLive() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR || mic.live) return;
-  let lang = MIC_BCP[mic.lang] || "";
-  if (!lang) lang = state.lang === "ar" ? "ar-SA" : "en-US";
+  // "auto" biases to Arabic (Arabic-first app) rather than the UI language, so
+  // Arabic speech isn't mis-transcribed as English when the interface is English.
+  let lang = MIC_BCP[mic.lang] || "ar-SA";
   const r = new SR();
   mic.live = r;
   mic.recording = true;
@@ -10853,7 +10907,7 @@ const call = {
   active: false, phase: "idle", // idle | connecting | listening | thinking | speaking
   sr: null, rec: null, stream: null, chunks: [], analyser: null, ctx: null, audio: null,
   silence: 0, finalText: "", speakToken: 0, muted: false, prevMode: null,
-  vadRaf: 0, vadQuiet: 0, hadSpeech: false,
+  vadRaf: 0, vadQuiet: 0, hadSpeech: false, serverStt: false,
 };
 function callSRAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
 function callSpeechAvailable() { return !!(window.speechSynthesis && window.SpeechSynthesisUtterance); }
@@ -10866,7 +10920,10 @@ function callSupported() {
 function callBcp(forLang) {
   const byDialect = MIC_BCP[mic.lang];
   if (byDialect) return byDialect;
-  return (forLang || state.lang) === "ar" ? "ar-SA" : "en-US";
+  // "auto" with SpeechRecognition (which can't truly auto-detect): this is an
+  // Arabic-first app, so bias to Arabic rather than the shell/UI language — that
+  // was why Arabic speech got transcribed as English when the UI was in English.
+  return "ar-SA";
 }
 /* ---- overlay + phase UI ---- */
 function callSetPhase(phase, captionKey) {
@@ -11001,6 +11058,11 @@ function callListen() {
   if (!call.active) return;
   callStopSpeaking();
   if (call.muted) { callSetPhase("listening", ""); return; }
+  // LANGUAGE DETECTION: when the dialect is "auto", prefer the server transcribe
+  // path (Gemini) — it TRULY auto-detects the spoken language/dialect, so speaking
+  // Arabic is transcribed as Arabic even if the UI is English. Only when there is
+  // no server engine do we use SpeechRecognition (Arabic-biased for "auto").
+  if (mic.lang === "auto" && call.serverStt && callMicAvailable()) return callListenRecord();
   if (callSRAvailable()) return callListenSR();
   return callListenRecord();
 }
@@ -11160,6 +11222,11 @@ async function callOpen() {
   document.body.classList.add("in-call");
   callSetPhase("connecting", "");
   try { window.speechSynthesis && window.speechSynthesis.getVoices(); } catch (_) {}
+  // Probe whether the server can transcribe (Gemini) — decides whether "auto"
+  // uses true language detection (record→transcribe) or Arabic-biased SR.
+  try { const d = await apiJson("/api/transcribe", { method: "POST", body: JSON.stringify({ probe: true }) }); call.serverStt = !!(d && d.ok); }
+  catch (_) { call.serverStt = false; }
+  if (!call.active) return;
   // A quick spoken greeting, then start listening.
   await callSpeak(t().callHello);
   if (call.active) callListen();
