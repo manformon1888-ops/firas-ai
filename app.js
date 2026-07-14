@@ -13100,114 +13100,6 @@ function openProductMenu() {
    command bar that proposes changes as ACCEPT/REJECT diffs.
    ═══════════════════════════════════════════════════════════════════════════ */
 const cwState = { file: 0, cm: null, cmFallback: null, tab: "preview", renderedChat: "", saveTimer: 0, prevTimer: 0, busy: false, device: null, autoReload: null, mob: "code" };
-const CW_TEMPLATES = {
-  blank: { ar: "فارغ", en: "Blank", files: [{ path: "index.html", content: "<!DOCTYPE html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>مشروعي</title>\n</head>\n<body>\n  <h1>مرحبًا 👋</h1>\n</body>\n</html>\n" }] },
-  site: { ar: "موقع (HTML+CSS+JS)", en: "Site (HTML+CSS+JS)", files: [
-    { path: "index.html", content: "<!DOCTYPE html>\n<html lang=\"ar\" dir=\"rtl\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>موقعي</title>\n  <link rel=\"stylesheet\" href=\"css/styles.css\">\n</head>\n<body>\n  <header class=\"hero\"><h1>موقعي الجديد</h1><p>ابنِ شيئًا جميلًا</p><button id=\"cta\">ابدأ</button></header>\n  <script src=\"js/app.js\"></script>\n</body>\n</html>\n" },
-    { path: "css/styles.css", content: "*{margin:0;box-sizing:border-box}\nbody{font-family:system-ui,sans-serif;background:#faf9f5;color:#1a1a18}\n.hero{min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}\n.hero h1{font-size:clamp(28px,6vw,52px)}\n#cta{padding:12px 34px;border:none;border-radius:999px;background:#237a68;color:#fff;font-size:16px;cursor:pointer}\n#cta:hover{background:#1c6355}\n" },
-    { path: "js/app.js", content: "document.getElementById(\"cta\").addEventListener(\"click\", () => {\n  alert(\"يعمل! 🎉\");\n});\nconsole.log(\"جاهز\");\n" },
-  ] },
-};
-
-/* ============================================================
-   ENHANCEMENT #28 — TEMPLATES GALLERY (expanded)
-   Additive: registers 5 real starter templates + rich-card metadata.
-   Requires the ONE-LINE hook in renderCodeHome (see `wiring`).
-   Everything below is appended after cwT()/CW_TEMPLATES; no existing
-   code is rewritten. New writers still route through createCodeProject
-   -> codeSaveFiles, so the 30-file / 60000-char / 180000-byte budget
-   is respected automatically.
-   ============================================================ */
-
-/* Per-template card metadata (icon + bilingual blurb + colored badge).
-   renderCodeHome merges this over its local TPL_META, so blank/site keep
-   their existing cards and the new keys light up automatically. */
-const CW_TPL_META = {
-  react: {
-    ic: "⚛️",
-    badge: "React",
-    badgeColor: "#61dafb",
-    desc: { ar: "تطبيق React جاهز بدون بناء (CDN + Babel)", en: "Ready React app, no build (CDN + Babel)" },
-  },
-  tailwind: {
-    ic: "🌀",
-    badge: "Tailwind",
-    badgeColor: "#38bdf8",
-    desc: { ar: "صفحة أنيقة بـ Tailwind من الـ CDN", en: "Polished page styled with Tailwind CDN" },
-  },
-  game: {
-    ic: "🎮",
-    badge: "Canvas",
-    badgeColor: "#e0764f",
-    desc: { ar: "لعبة canvas تعمل بحلقة رسم وتحكّم", en: "Playable canvas game with a render loop" },
-  },
-  api: {
-    ic: "🛰️",
-    badge: "Node API",
-    badgeColor: "#6cc24a",
-    desc: { ar: "خادم Express مع مسارات + README", en: "Express-style server with routes + README" },
-  },
-  python: {
-    ic: "🐍",
-    badge: "Python",
-    badgeColor: "#a78bfa",
-    desc: { ar: "أداة Python سطر أوامر جاهزة", en: "Ready-to-run Python CLI script" },
-  },
-};
-
-/* Register the 5 new starters onto the existing CW_TEMPLATES map.
-   Object.assign keeps blank/site first, then appends these in order. */
-Object.assign(CW_TEMPLATES, {
-
-  /* ---- React (CDN/UMD + Babel, zero build) ---- */
-  react: { ar: "تطبيق React", en: "React app", files: [
-    { path: "index.html", content:
-"<!DOCTYPE html>\n<html lang=\"en\" dir=\"ltr\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>React App</title>\n  <link rel=\"stylesheet\" href=\"css/styles.css\">\n  <script crossorigin src=\"https://unpkg.com/react@18/umd/react.production.min.js\"></script>\n  <script crossorigin src=\"https://unpkg.com/react-dom@18/umd/react-dom.production.min.js\"></script>\n  <script src=\"https://unpkg.com/@babel/standalone/babel.min.js\"></script>\n</head>\n<body>\n  <div id=\"root\"></div>\n  <script type=\"text/babel\" src=\"js/app.js\"></script>\n</body>\n</html>\n" },
-    { path: "css/styles.css", content:
-"*{margin:0;box-sizing:border-box}\nbody{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:grid;place-items:center}\n.app{text-align:center;padding:32px}\n.app h1{font-size:34px;margin-bottom:6px;background:linear-gradient(100deg,#61dafb,#a78bfa);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}\n.app p{color:#94a3b8;margin-bottom:22px}\n.counter{font-size:52px;font-weight:800;margin:14px 0;font-variant-numeric:tabular-nums}\n.btns{display:flex;gap:10px;justify-content:center}\nbutton{padding:11px 22px;border:none;border-radius:12px;background:#61dafb;color:#0f172a;font-size:16px;font-weight:700;cursor:pointer;transition:.15s}\nbutton:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(97,218,251,.35)}\nbutton.ghost{background:#1e293b;color:#e2e8f0}\n" },
-    { path: "js/app.js", content:
-"const { useState } = React;\n\nfunction Counter() {\n  const [count, setCount] = useState(0);\n  return (\n    <div className=\"app\">\n      <h1>Hello, React ⚛️</h1>\n      <p>Edit js/app.js and press Refresh — no build step.</p>\n      <div className=\"counter\">{count}</div>\n      <div className=\"btns\">\n        <button onClick={() => setCount(count + 1)}>+1</button>\n        <button className=\"ghost\" onClick={() => setCount(0)}>Reset</button>\n      </div>\n    </div>\n  );\n}\n\nReactDOM.createRoot(document.getElementById(\"root\")).render(<Counter />);\nconsole.log(\"React app mounted ✓\");\n" },
-  ] },
-
-  /* ---- Tailwind CDN page ---- */
-  tailwind: { ar: "صفحة Tailwind", en: "Tailwind page", files: [
-    { path: "index.html", content:
-"<!DOCTYPE html>\n<html lang=\"en\" dir=\"ltr\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>Tailwind Page</title>\n  <script src=\"https://cdn.tailwindcss.com\"></script>\n  <script>tailwind.config={theme:{extend:{fontFamily:{sans:['Inter','system-ui','sans-serif']}}}}</script>\n</head>\n<body class=\"min-h-screen bg-slate-950 text-slate-100 antialiased\">\n  <header class=\"max-w-3xl mx-auto px-6 pt-20 text-center\">\n    <span class=\"inline-block px-3 py-1 mb-5 text-xs font-semibold rounded-full bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30\">Built with Tailwind CDN</span>\n    <h1 class=\"text-4xl sm:text-6xl font-extrabold tracking-tight bg-gradient-to-r from-sky-400 to-violet-400 bg-clip-text text-transparent\">Ship faster.</h1>\n    <p class=\"mt-5 text-lg text-slate-400\">A clean starting point styled entirely with utility classes. Edit and press Refresh.</p>\n    <div class=\"mt-8 flex gap-3 justify-center\">\n      <button id=\"cta\" class=\"px-6 py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold transition\">Get started</button>\n      <a href=\"https://tailwindcss.com/docs\" target=\"_blank\" rel=\"noopener\" class=\"px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 font-semibold transition\">Docs</a>\n    </div>\n  </header>\n  <section class=\"max-w-3xl mx-auto px-6 mt-16 grid sm:grid-cols-3 gap-4 pb-20\">\n    <div class=\"p-5 rounded-2xl bg-slate-900 ring-1 ring-slate-800\"><div class=\"text-2xl\">⚡</div><h3 class=\"mt-2 font-semibold\">Fast</h3><p class=\"text-sm text-slate-400 mt-1\">No build, no config.</p></div>\n    <div class=\"p-5 rounded-2xl bg-slate-900 ring-1 ring-slate-800\"><div class=\"text-2xl\">🎨</div><h3 class=\"mt-2 font-semibold\">Beautiful</h3><p class=\"text-sm text-slate-400 mt-1\">Utility-first design.</p></div>\n    <div class=\"p-5 rounded-2xl bg-slate-900 ring-1 ring-slate-800\"><div class=\"text-2xl\">📱</div><h3 class=\"mt-2 font-semibold\">Responsive</h3><p class=\"text-sm text-slate-400 mt-1\">Looks great anywhere.</p></div>\n  </section>\n  <script>\n    document.getElementById(\"cta\").addEventListener(\"click\", () => {\n      alert(\"Let's build something 🚀\");\n      console.log(\"CTA clicked\");\n    });\n  </script>\n</body>\n</html>\n" },
-  ] },
-
-  /* ---- Canvas game ---- */
-  game: { ar: "لعبة Canvas", en: "Canvas game", files: [
-    { path: "index.html", content:
-"<!DOCTYPE html>\n<html lang=\"en\" dir=\"ltr\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>Catch the Dots</title>\n  <link rel=\"stylesheet\" href=\"css/styles.css\">\n</head>\n<body>\n  <div class=\"hud\"><span>Score: <b id=\"score\">0</b></span><span id=\"msg\">Move the mouse to catch the falling dots</span></div>\n  <canvas id=\"game\" width=\"480\" height=\"360\"></canvas>\n  <script src=\"js/game.js\"></script>\n</body>\n</html>\n" },
-    { path: "css/styles.css", content:
-"*{margin:0;box-sizing:border-box}\nhtml,body{height:100%}\nbody{font-family:system-ui,sans-serif;background:#0b1020;color:#e6e9f2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;overflow:hidden}\n.hud{display:flex;gap:18px;align-items:center;font-size:14px}\n.hud b{color:#7cf6c8}\n#msg{color:#8892b0}\ncanvas{background:radial-gradient(circle at 50% 0%,#141c38,#0b1020);border:1px solid #223;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.5);cursor:none;touch-action:none}\n" },
-    { path: "js/game.js", content:
-"const cv = document.getElementById(\"game\");\nconst ctx = cv.getContext(\"2d\");\nconst scoreEl = document.getElementById(\"score\");\nlet score = 0, paddle = { x: cv.width / 2, w: 70, h: 12 }, dots = [], t = 0;\n\ncv.addEventListener(\"mousemove\", (e) => {\n  const r = cv.getBoundingClientRect();\n  paddle.x = (e.clientX - r.left) * (cv.width / r.width);\n});\ncv.addEventListener(\"touchmove\", (e) => {\n  const r = cv.getBoundingClientRect();\n  paddle.x = (e.touches[0].clientX - r.left) * (cv.width / r.width);\n  e.preventDefault();\n}, { passive: false });\n\nfunction spawn() { dots.push({ x: 20 + Math.random() * (cv.width - 40), y: -10, r: 7 + Math.random() * 5, v: 1.4 + Math.random() * 2.2, hue: (Math.random() * 360) | 0 }); }\n\nfunction loop() {\n  t++;\n  if (t % 40 === 0) spawn();\n  ctx.clearRect(0, 0, cv.width, cv.height);\n  const py = cv.height - 26;\n  ctx.fillStyle = \"#7cf6c8\";\n  ctx.fillRect(paddle.x - paddle.w / 2, py, paddle.w, paddle.h);\n  for (let i = dots.length - 1; i >= 0; i--) {\n    const d = dots[i];\n    d.y += d.v;\n    ctx.beginPath();\n    ctx.fillStyle = \"hsl(\" + d.hue + \",80%,62%)\";\n    ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);\n    ctx.fill();\n    if (d.y + d.r >= py && d.y - d.r <= py + paddle.h && Math.abs(d.x - paddle.x) < paddle.w / 2 + d.r) {\n      score++; scoreEl.textContent = score; dots.splice(i, 1); continue;\n    }\n    if (d.y - d.r > cv.height) dots.splice(i, 1);\n  }\n  requestAnimationFrame(loop);\n}\nloop();\nconsole.log(\"Game started — catch the dots!\");\n" },
-  ] },
-
-  /* ---- Node/Express-style API (files + README) ---- */
-  api: { ar: "خادم API", en: "Node API", files: [
-    { path: "server.js", content:
-"// Minimal Express-style API. Run locally:  npm install && npm start\nconst express = require(\"express\");\nconst { router } = require(\"./routes/todos\");\n\nconst app = express();\napp.use(express.json());\n\n// Simple request logger\napp.use((req, _res, next) => { console.log(`${req.method} ${req.url}`); next(); });\n\napp.get(\"/\", (_req, res) => res.json({ ok: true, service: \"firas-api\", version: \"1.0.0\" }));\napp.get(\"/health\", (_req, res) => res.json({ status: \"up\", uptime: process.uptime() }));\napp.use(\"/api/todos\", router);\n\napp.use((_req, res) => res.status(404).json({ error: \"Not found\" }));\n\nconst PORT = process.env.PORT || 3000;\napp.listen(PORT, () => console.log(`API listening on http://localhost:${PORT}`));\n" },
-    { path: "routes/todos.js", content:
-"// In-memory CRUD routes for /api/todos\nconst express = require(\"express\");\nconst router = express.Router();\n\nlet todos = [\n  { id: 1, title: \"Read the README\", done: false },\n  { id: 2, title: \"Build something great\", done: false },\n];\nlet nextId = 3;\n\nrouter.get(\"/\", (_req, res) => res.json(todos));\n\nrouter.get(\"/:id\", (req, res) => {\n  const todo = todos.find((t) => t.id === Number(req.params.id));\n  if (!todo) return res.status(404).json({ error: \"Todo not found\" });\n  res.json(todo);\n});\n\nrouter.post(\"/\", (req, res) => {\n  const { title } = req.body || {};\n  if (!title) return res.status(400).json({ error: \"title is required\" });\n  const todo = { id: nextId++, title, done: false };\n  todos.push(todo);\n  res.status(201).json(todo);\n});\n\nrouter.patch(\"/:id\", (req, res) => {\n  const todo = todos.find((t) => t.id === Number(req.params.id));\n  if (!todo) return res.status(404).json({ error: \"Todo not found\" });\n  if (typeof req.body.title === \"string\") todo.title = req.body.title;\n  if (typeof req.body.done === \"boolean\") todo.done = req.body.done;\n  res.json(todo);\n});\n\nrouter.delete(\"/:id\", (req, res) => {\n  const before = todos.length;\n  todos = todos.filter((t) => t.id !== Number(req.params.id));\n  if (todos.length === before) return res.status(404).json({ error: \"Todo not found\" });\n  res.status(204).end();\n});\n\nmodule.exports = { router };\n" },
-    { path: "package.json", content:
-"{\n  \"name\": \"firas-api\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Minimal Express-style REST API starter\",\n  \"main\": \"server.js\",\n  \"scripts\": {\n    \"start\": \"node server.js\",\n    \"dev\": \"node --watch server.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^4.19.2\"\n  }\n}\n" },
-    { path: "README.md", content:
-"# Firas API\n\nA tiny Express-style REST API you can run anywhere Node.js is installed.\n\n## Run\n\n```bash\nnpm install\nnpm start\n```\n\nThe server starts on `http://localhost:3000`.\n\n## Endpoints\n\n| Method | Path             | Description            |\n|--------|------------------|------------------------|\n| GET    | `/`              | Service info           |\n| GET    | `/health`        | Health + uptime        |\n| GET    | `/api/todos`     | List all todos         |\n| GET    | `/api/todos/:id` | Get one todo           |\n| POST   | `/api/todos`     | Create a todo          |\n| PATCH  | `/api/todos/:id` | Update a todo          |\n| DELETE | `/api/todos/:id` | Delete a todo          |\n\n## Example\n\n```bash\ncurl -X POST http://localhost:3000/api/todos \\\\\n  -H \"Content-Type: application/json\" \\\\\n  -d '{\"title\":\"Ship it\"}'\n```\n\n> Data is in-memory and resets on restart. Swap `routes/todos.js` for a database when ready.\n" },
-  ] },
-
-  /* ---- Python script / CLI ---- */
-  python: { ar: "أداة Python", en: "Python CLI", files: [
-    { path: "main.py", content:
-"#!/usr/bin/env python3\n\"\"\"A tiny word-count CLI. Run:  python main.py sample.txt\"\"\"\nimport argparse\nimport sys\nfrom collections import Counter\n\n\ndef word_stats(text):\n    words = text.split()\n    counter = Counter(w.strip(\".,!?;:\\\"'()[]\").lower() for w in words if w.strip())\n    return {\n        \"characters\": len(text),\n        \"words\": len(words),\n        \"lines\": text.count(\"\\n\") + 1 if text else 0,\n        \"unique_words\": len(counter),\n        \"top\": counter.most_common(5),\n    }\n\n\ndef main(argv=None):\n    parser = argparse.ArgumentParser(description=\"Count words, lines and characters in a file.\")\n    parser.add_argument(\"file\", nargs=\"?\", help=\"Path to a text file (omit to read stdin)\")\n    parser.add_argument(\"-t\", \"--top\", type=int, default=5, help=\"How many frequent words to show\")\n    args = parser.parse_args(argv)\n\n    if args.file:\n        with open(args.file, \"r\", encoding=\"utf-8\") as fh:\n            text = fh.read()\n    else:\n        text = sys.stdin.read()\n\n    stats = word_stats(text)\n    print(f\"Characters : {stats['characters']}\")\n    print(f\"Words      : {stats['words']}\")\n    print(f\"Lines      : {stats['lines']}\")\n    print(f\"Unique     : {stats['unique_words']}\")\n    print(\"Top words  :\")\n    for word, n in Counter(dict(stats['top'])).most_common(args.top):\n        print(f\"  {word:<15} {n}\")\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n" },
-    { path: "sample.txt", content:
-"Firas Code lets you build and iterate fast.\nType your own code, and the AI edits alongside you.\nBuild fast. Ship fast. Learn fast.\n" },
-    { path: "README.md", content:
-"# Word Count CLI\n\nA small Python command-line tool that reports character, word and line counts plus the most frequent words.\n\n## Usage\n\n```bash\npython main.py sample.txt\npython main.py sample.txt --top 10\ncat sample.txt | python main.py\n```\n\nNo dependencies — pure standard library (`argparse`, `collections`).\n" },
-  ] },
-
-});
 function cwT() {
   const ar = state.lang === "ar";
   return ar ? {
@@ -13420,20 +13312,6 @@ function renderCodeHome(root) {
           '<button type="button" class="cw-home__create">' + (ar ? "ابنِ بالذكاء" : "Build with AI") + " ✨</button>" +
         "</div>" +
       "</div>" +
-      '<div class="cw-home__tpls">' +
-        '<div class="cw-home__recent-h">' + (ar ? "ابدأ من قالب جاهز" : "Start from a template") + "</div>" +
-        '<div class="cw-home__tplrow">' +
-          Object.keys(CW_TEMPLATES).filter((k) => k !== "blank").map((k) => {
-            const t = CW_TEMPLATES[k], m = (typeof CW_TPL_META !== "undefined" && CW_TPL_META[k]) || {};
-            return '<button type="button" class="cw-tpl" data-tpl="' + escapeHtml(k) + '">' +
-              '<span class="cw-tpl__ic">' + (m.ic || "📦") + "</span>" +
-              '<span class="cw-tpl__meta"><strong>' + escapeHtml(ar ? t.ar : t.en) + "</strong>" +
-              (m.desc ? "<small>" + escapeHtml(ar ? m.desc.ar : m.desc.en) + "</small>" : "") + "</span>" +
-              (m.badge ? '<span class="cw-tpl__badge" style="--tplc:' + escapeHtml(m.badgeColor || "#888") + '">' + escapeHtml(m.badge) + "</span>" : "") +
-              "</button>";
-          }).join("") +
-        "</div>" +
-      "</div>" +
       '<div class="cw-home__recent">' +
         '<div class="cw-home__recent-h">' + (ar ? "مشاريعك" : "Your projects") + "</div>" +
         '<div class="cw-home__grid">' + recentHtml + "</div>" +
@@ -13442,15 +13320,6 @@ function renderCodeHome(root) {
   const nameOf = () => root.querySelector(".cw-home__name").value.trim() || (ar ? "مشروع جديد" : "new-project");
   const openBlank = () => { createCodeProject(nameOf(), CW_BLANK_FILES.map((f) => ({ path: f.path, content: f.content }))); cwState.file = 0; cwState.renderedChat = ""; renderAll(); };
   root.querySelector(".cw-home__blank").addEventListener("click", openBlank);
-  // Starter templates: one click → a real, working project opens in the IDE instantly.
-  root.querySelectorAll(".cw-tpl").forEach((b) => b.addEventListener("click", () => {
-    const t = CW_TEMPLATES[b.getAttribute("data-tpl")];
-    if (!t || !Array.isArray(t.files)) return;
-    const nm = root.querySelector(".cw-home__name").value.trim() || (ar ? t.ar : t.en);
-    createCodeProject(nm, t.files.map((f) => ({ path: f.path, content: f.content })));
-    cwState.file = 0; cwState.renderedChat = "";
-    renderAll();
-  }));
   root.querySelector(".cw-home__create").addEventListener("click", async () => {
     const desc = (root.querySelector(".cw-home__desc").value || "").trim();
     if (!desc) { openBlank(); return; }                       // no description → just open a blank project directly
