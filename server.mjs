@@ -2094,6 +2094,8 @@ const EDGE_TRUSTED = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_SEC_VER = "1-143.0.3650.75";
 const EDGE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
+// Speaking rate for the Edge voice — a touch brisk feels more natural in a call.
+const EDGE_RATE = process.env.EDGE_TTS_RATE || "+12%";
 // A natural neural voice per language (male, warm — fits the "معك فِراس" persona).
 const EDGE_VOICES = {
   ar: "ar-SA-HamedNeural", "ar-sa": "ar-SA-HamedNeural", "ar-eg": "ar-EG-ShakirNeural",
@@ -2167,7 +2169,7 @@ function edgeSynthOne(text, voice, skew) {
       sendText("X-Timestamp:" + edgeDateStr() + "\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
         '{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}');
       const ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='" +
-        voice + "'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>" + edgeXmlEscape(text) + "</prosody></voice></speak>";
+        voice + "'><prosody pitch='+0Hz' rate='" + EDGE_RATE + "' volume='+0%'>" + edgeXmlEscape(text) + "</prosody></voice></speak>";
       sendText("X-RequestId:" + crypto.randomUUID().replace(/-/g, "") + "\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:" + edgeDateStr() + "Z\r\nPath:ssml\r\n\r\n" + ssml);
       let buf = Buffer.alloc(0); const parts = [];
       socket.on("data", (d) => {
@@ -2246,8 +2248,8 @@ function pcmToWav(pcm, rate) {
 /** The acting direction that gives the voice its feeling, per language. */
 function geminiTtsStyle(lang) {
   return String(lang || "").startsWith("ar")
-    ? "أنت فِراس، مساعد صوتي ودود. انطق النص التالي بصوت طبيعي دافئ وحيوي، بعفوية تامة كأنك تتحدث مع صديق مقرّب — نبرة معبّرة تتفاعل مع المعنى، وقفات طبيعية، وحماس خفيف عند الأخبار الجيدة. لا تقرأ قراءة رسمية جامدة. النص: "
-    : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, completely natural conversational tone — expressive intonation that reacts to the meaning, natural pauses, a hint of enthusiasm where it fits. Never a flat formal read. Text: ";
+    ? "أنت فِراس، مساعد صوتي ودود. انطق النص التالي بصوت طبيعي دافئ وحيوي، بوتيرة سريعة قليلاً وحيوية (ليست بطيئة ولا متثاقلة)، بعفوية تامة كأنك تتحدث مع صديق مقرّب — نبرة معبّرة تتفاعل مع المعنى، وقفات قصيرة طبيعية، وحماس خفيف عند الأخبار الجيدة. لا تقرأ قراءة رسمية جامدة. النص: "
+    : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, completely natural conversational tone, at a slightly brisk, energetic pace (not slow or plodding) — expressive intonation that reacts to the meaning, short natural pauses, a hint of enthusiasm where it fits. Never a flat formal read. Text: ";
 }
 async function geminiSynthesize(text, lang) {
   if (!GEMINI_KEYS.length) throw new Error("no gemini key");

@@ -11096,7 +11096,7 @@ function callListenSR() {
     if (els.callCaption) els.callCaption.textContent = (call.finalText + interim).trim();
     // End-of-turn: 1.2s of no new speech after we have something.
     clearTimeout(call.silence);
-    if ((call.finalText + interim).trim()) call.silence = setTimeout(commit, 1200);
+    if ((call.finalText + interim).trim()) call.silence = setTimeout(commit, 850);
   };
   rec.onerror = (e) => {
     const code = (e && e.error) || "";
@@ -11145,7 +11145,7 @@ async function callListenRecord() {
       if (rms > 6) { call.hadSpeech = true; call.vadQuiet = now; }
       const quietFor = now - (call.vadQuiet || now);
       const tooLong = now - t0 > 15000;
-      if ((call.hadSpeech && quietFor > 1400) || tooLong) { callFinishRecord(); return; }
+      if ((call.hadSpeech && quietFor > 1050) || tooLong) { callFinishRecord(); return; }
       call.vadRaf = requestAnimationFrame(tick);
     };
     call.vadQuiet = Date.now();
@@ -11214,6 +11214,13 @@ async function callOpen() {
   call.active = true; call.muted = false; call.finalText = "";
   call.prevMode = state.mode;
   if (state.mode !== "auto") { state.mode = "auto"; }  // no plan-mode clarifying turns mid-call
+  // SPEED: a call needs snappy replies, not deep deliberation. Force thinking OFF
+  // and cap the tier at the fast "pro" (Ultra/Max verify internally = slow); never
+  // slow down a user already on the quicker Mini. Restored on callEnd.
+  call.prevTier = state.tier;
+  call.prevThink = state.think;
+  if (state.tier === "ultra" || state.tier === "max") state.tier = "pro";
+  state.think = false;
   state.callMode = true;
   els.input.value = ""; autoGrow(); updateSendState();
   if (els.callMute) els.callMute.classList.remove("is-muted");
@@ -11243,7 +11250,9 @@ function callEnd() {
   call.rec = null; call.chunks = [];
   state.callMode = false;
   if (call.prevMode && MODES[call.prevMode]) state.mode = call.prevMode;
-  call.prevMode = null;
+  if (call.prevTier && MODELS[call.prevTier]) state.tier = call.prevTier;
+  if (typeof call.prevThink === "boolean") state.think = call.prevThink;
+  call.prevMode = null; call.prevTier = null; call.prevThink = null;
   document.body.classList.remove("in-call");
   if (els.callScreen) {
     els.callScreen.classList.remove("is-open");
