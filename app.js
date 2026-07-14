@@ -147,6 +147,19 @@ const STR = {
     micFail: "تعذّر تحويل الصوت — حاول مرة أخرى.",
     micEmpty: "لم أسمع كلامًا واضحًا — حاول مجددًا.",
     micLangTitle: "لغة الإملاء",
+    callLabel: "مكالمة صوتية مع فِراس",
+    callConnecting: "جارٍ الاتصال…",
+    callHello: "مرحبًا، معك فِراس. تفضّل، أنا أسمعك.",
+    callListening: "أستمع… تكلّم الآن",
+    callThinking: "فِراس يفكّر…",
+    callSpeaking: "فِراس يتحدّث…",
+    callTapInterrupt: "اضغط الدائرة لمقاطعته",
+    callTapTalk: "اضغط للتحدث",
+    callRecording: "أستمع… اضغط عند الانتهاء",
+    callMuted: "الميكروفون مكتوم",
+    callError: "تعذّرت المكالمة — تأكد من إذن الميكروفون.",
+    callSorry: "عذرًا، لم أستطع المتابعة. حاول مرة أخرى.",
+    callUnsupported: "المكالمة الصوتية غير مدعومة على هذا المتصفح.",
     greetingMorning: "صباح الخير",
     greetingAfternoon: "مساء الخير",
     greetingEvening: "مساءً سعيدًا",
@@ -320,6 +333,19 @@ const STR = {
     micFail: "Couldn't transcribe the audio — please try again.",
     micEmpty: "I didn't catch any clear speech — try again.",
     micLangTitle: "Dictation language",
+    callLabel: "Voice call with Firas",
+    callConnecting: "Connecting…",
+    callHello: "Hi, Firas here. Go ahead, I'm listening.",
+    callListening: "Listening… speak now",
+    callThinking: "Firas is thinking…",
+    callSpeaking: "Firas is speaking…",
+    callTapInterrupt: "Tap the circle to interrupt",
+    callTapTalk: "Tap to talk",
+    callRecording: "Listening… tap when done",
+    callMuted: "Microphone muted",
+    callError: "Call failed — check microphone permission.",
+    callSorry: "Sorry, I couldn't continue. Please try again.",
+    callUnsupported: "Voice calls aren't supported in this browser.",
     greetingMorning: "Good morning",
     greetingAfternoon: "Good afternoon",
     greetingEvening: "Good evening",
@@ -7001,9 +7027,17 @@ function buildMessages(tier, conversation, replyLang) {
         ? " أكمل كل المطلوب في هذا الرد نفسه: طُلب " + _want + " عنصرًا/مسألة — أجب عن كلٍّ منها كاملةً مرقّمة حتى الأخيرة، لا تتوقف في المنتصف ولا تسأل إن كنت تريد المتابعة."
         : " FINISH EVERYTHING in THIS reply: " + _want + " items/problems were requested — answer every single one, numbered, through the last; do not stop midway or ask whether to continue.")
     : "";
+  // VOICE CALL: replies are read aloud, so force a short, plain-spoken, markup-free
+  // conversational style (no LaTeX/markdown/code/emoji — the model spells math/symbols
+  // in words). Overrides the build/format rules for the duration of the call.
+  const callRule = state.callMode
+    ? (replyLang === "ar"
+        ? " أنت الآن في مكالمة صوتية مباشرة مع المستخدم، وكلامك سيُقرأ بصوت مسموع. تحدّث بأسلوب المحادثة الطبيعية على الهاتف: جُملٌ قصيرة وواضحة ولغةٌ بسيطة، وردٌّ موجز (جملة إلى ثلاث جُمل غالبًا) ما لم يطلب المستخدم تفصيلًا فتُوسّع باعتدال. لا تستخدم إطلاقًا markdown أو عناوين أو قوائم أو جداول أو كتل برمجية أو صيغ LaTeX أو رموزًا أو رموزًا تعبيرية — اكتب الأرقام والرموز والمعادلات بالكلمات كما تُنطق (مثلاً: «إكس تربيع زائد ثلاثة»). لا تُنشئ ملفات ولا أكوادًا أثناء المكالمة. كن دافئًا وطبيعيًا وتفاعليًا كأنك تتحدث وجهًا لوجه."
+        : " You are now in a LIVE VOICE CALL with the user and your words will be read aloud. Speak like a natural phone conversation: short, clear sentences, simple words, and a brief reply (usually one to three sentences) unless the user asks for detail, then expand moderately. NEVER use markdown, headings, lists, tables, code blocks, LaTeX, symbols, or emoji — spell out numbers, symbols and equations in words (e.g. \"x squared plus three\"). Do not create files or code during the call. Be warm, natural and conversational, as if talking face to face.")
+    : "";
   const system = {
     role: "system",
-    content: model.persona + identityRule + langRule + mathRule + accuracyRule + SCIENCE_RIGOR + finishRule + codeRule + genLevelRule + STEM_HARD_RULE + imageRule + tikzRule + (planning ? "" : buildRule + engineerRule),
+    content: model.persona + identityRule + langRule + mathRule + accuracyRule + SCIENCE_RIGOR + finishRule + codeRule + genLevelRule + STEM_HARD_RULE + imageRule + tikzRule + (planning ? "" : buildRule + engineerRule) + callRule,
   };
 
   // PLAN MODE: a per-turn system message (inserted right after the persona).
@@ -7052,7 +7086,8 @@ function buildMessages(tier, conversation, replyLang) {
   // app can build that file from the reply. Firas must NOT claim it can't make
   // files and must NOT mention buttons — the app generates the file itself.
   const lastUser = [...conversation].reverse().find((m) => m.role === "user");
-  const fileFmt = lastUser ? detectFileRequest(lastUser.content) : null;
+  // Skip file steering during a voice call — spoken replies must stay plain text.
+  const fileFmt = (lastUser && !state.callMode) ? detectFileRequest(lastUser.content) : null;
   const fileTurnSystem = fileFmt ? { role: "system", content: fileGuidance(fileFmt) } : null;
 
   const history = conversation.map((m) => {
@@ -10795,6 +10830,337 @@ function initMic() {
 }
 
 /* ----------------------------------------------------------------------------
+   VOICE CALL — a live spoken conversation with Firas AI. You talk, Firas answers
+   OUT LOUD, and it keeps listening — a hands-free phone-style call. Firas AI only
+   (hidden on Agent/Code). STT = the browser's SpeechRecognition when available
+   (hands-free, with silence-based turn detection); otherwise a tap-to-talk record
+   → /api/transcribe fallback. Replies come from the normal chat pipeline (so the
+   whole conversation is saved to the chat) under a short "spoken style" directive,
+   and are voiced with the browser's speechSynthesis. Tap the orb to interrupt.
+---------------------------------------------------------------------------- */
+const call = {
+  active: false, phase: "idle", // idle | connecting | listening | thinking | speaking
+  sr: null, rec: null, stream: null, chunks: [], analyser: null, ctx: null,
+  silence: 0, finalText: "", speakToken: 0, muted: false, prevMode: null,
+  vadRaf: 0, vadQuiet: 0, hadSpeech: false,
+};
+function callSRAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function callSpeechAvailable() { return !!(window.speechSynthesis && window.SpeechSynthesisUtterance); }
+function callSupported() {
+  return state.product === "ai" && callSpeechAvailable() &&
+    (callSRAvailable() || (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder));
+}
+function callBcp(forLang) {
+  const byDialect = MIC_BCP[mic.lang];
+  if (byDialect) return byDialect;
+  return (forLang || state.lang) === "ar" ? "ar-SA" : "en-US";
+}
+/* ---- overlay + phase UI ---- */
+function callSetPhase(phase, captionKey) {
+  call.phase = phase;
+  const orb = els.callOrb, st = els.callStatus, cap = els.callCaption;
+  if (orb) { orb.classList.remove("is-listening", "is-thinking", "is-speaking"); if (phase !== "idle" && phase !== "connecting") orb.classList.add("is-" + phase); }
+  if (st) {
+    st.textContent = phase === "connecting" ? t().callConnecting
+      : phase === "listening" ? (call.muted ? t().callMuted : t().callListening)
+      : phase === "thinking" ? t().callThinking
+      : phase === "speaking" ? t().callSpeaking : "";
+  }
+  if (cap && captionKey !== undefined) cap.textContent = captionKey ? t()[captionKey] : "";
+}
+/* ---- text → speakable plain text ---- */
+function callSpeakable(s) {
+  return String(s || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/\$\$[\s\S]*?\$\$/g, " ")
+    .replace(/\$[^$\n]*\$/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/[*_~>#|]+/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, ". ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function callPickVoice(lang) {
+  let voices = [];
+  try { voices = window.speechSynthesis.getVoices() || []; } catch (_) {}
+  if (!voices.length) return null;
+  const want = lang === "ar" ? "ar" : "en";
+  const byLang = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith(want));
+  return byLang.find((v) => /google|natural|premium|enhanced|neural/i.test(v.name))
+    || byLang[0]
+    || voices.find((v) => v.default)
+    || voices[0] || null;
+}
+/** Speak `text` aloud; resolves when finished or interrupted. */
+function callSpeak(text) {
+  return new Promise((resolve) => {
+    const clean = callSpeakable(text);
+    if (!clean || !callSpeechAvailable()) return resolve();
+    const token = ++call.speakToken;
+    try { window.speechSynthesis.cancel(); } catch (_) {}
+    const lang = detectLang(clean) === "ar" ? "ar" : "en";
+    const voice = callPickVoice(lang);
+    // Chunk by sentence so long replies never hit the engine's silent-cutoff bug.
+    const chunks = clean.match(/[^.!?؟،؛\n]+[.!?؟،؛\n]*/g) || [clean];
+    let i = 0;
+    const done = () => { if (call.speakToken === token) resolve(); };
+    const next = () => {
+      if (call.speakToken !== token || !call.active || i >= chunks.length) return done();
+      const part = chunks[i++].trim();
+      if (!part) return next();
+      const u = new SpeechSynthesisUtterance(part);
+      if (voice) u.voice = voice;
+      u.lang = voice ? voice.lang : (lang === "ar" ? "ar-SA" : "en-US");
+      u.rate = 1; u.pitch = 1; u.volume = 1;
+      u.onend = next;
+      u.onerror = next;
+      try { window.speechSynthesis.speak(u); } catch (_) { next(); }
+    };
+    next();
+  });
+}
+function callStopSpeaking() {
+  call.speakToken++; // invalidate any in-flight speak() so it resolves
+  try { window.speechSynthesis.cancel(); } catch (_) {}
+}
+/* ---- send the user's spoken turn through the normal chat, return the reply ---- */
+async function callSend(text) {
+  els.input.value = text;
+  clearPendingImages();
+  autoGrow(); updateSendState();
+  await sendMessage();               // pushes the turn, streams the reply, saves the chat
+  const c = activeChat();
+  const last = c && c.messages && c.messages[c.messages.length - 1];
+  return last && last.role === "assistant" ? String(last.content || "") : "";
+}
+/* ---- one full turn: got a transcript → answer → speak → listen again ---- */
+async function callHandleTranscript(text) {
+  const clean = String(text || "").trim();
+  if (!call.active) return;
+  if (!clean) { callListen(); return; }
+  callSetPhase("thinking", "");
+  if (els.callCaption) els.callCaption.textContent = clean;   // show what we heard
+  let reply = "";
+  try { reply = await callSend(clean); } catch (_) { reply = ""; }
+  if (!call.active) return;
+  if (!reply) { await callSpeak(t().callSorry); if (call.active) callListen(); return; }
+  callSetPhase("speaking", "callTapInterrupt");
+  if (els.callCaption) els.callCaption.textContent = callSpeakable(reply).slice(0, 240);
+  await callSpeak(reply);
+  if (call.active) callListen();
+}
+/* ---- listening: SpeechRecognition (hands-free) ---- */
+function callListen() {
+  if (!call.active) return;
+  callStopSpeaking();
+  if (call.muted) { callSetPhase("listening", ""); return; }
+  if (callSRAvailable()) return callListenSR();
+  return callListenRecord();
+}
+function callListenSR() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  callSetPhase("listening", "");
+  call.finalText = "";
+  let rec;
+  try { rec = new SR(); } catch (_) { return callListenRecord(); }
+  call.sr = rec;
+  rec.lang = callBcp(state.lang);
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+  const commit = () => {
+    clearTimeout(call.silence);
+    const said = call.finalText.trim();
+    if (call.sr === rec) { rec.onresult = rec.onend = rec.onerror = null; try { rec.stop(); } catch (_) {} call.sr = null; }
+    if (said) callHandleTranscript(said);
+    else if (call.active && call.phase === "listening") callListen(); // nothing heard → keep listening
+  };
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) call.finalText += r[0].transcript + " ";
+      else interim += r[0].transcript;
+    }
+    if (els.callCaption) els.callCaption.textContent = (call.finalText + interim).trim();
+    // End-of-turn: 1.2s of no new speech after we have something.
+    clearTimeout(call.silence);
+    if ((call.finalText + interim).trim()) call.silence = setTimeout(commit, 1200);
+  };
+  rec.onerror = (e) => {
+    const code = (e && e.error) || "";
+    if (code === "no-speech") { if (call.active && !call.muted) { try { rec.stop(); } catch (_) {} } return; }
+    if (code === "not-allowed" || code === "service-not-allowed") { showToast(t().callError); callEnd(); return; }
+  };
+  rec.onend = () => {
+    if (call.sr !== rec) return;
+    // ended without a commit (e.g. no-speech) → restart listening while the call lives
+    if (call.active && !call.muted && call.phase === "listening") { call.sr = null; callListenSR(); }
+  };
+  try { rec.start(); } catch (_) { call.sr = null; callListenRecord(); }
+}
+/* ---- listening fallback: record with silence auto-stop → /api/transcribe ---- */
+async function callListenRecord() {
+  if (!(navigator.mediaDevices && window.MediaRecorder)) { callSetPhase("listening", "callTapTalk"); return; }
+  callSetPhase("listening", "callRecording");
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (_) { showToast(t().callError); callEnd(); return; }
+  if (!call.active) { stream.getTracks().forEach((tr) => tr.stop()); return; }
+  call.stream = stream;
+  call.chunks = [];
+  const mime = micPickMime();
+  try { call.rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream); }
+  catch (_) { stream.getTracks().forEach((tr) => tr.stop()); callSetPhase("listening", "callTapTalk"); return; }
+  call.rec.ondataavailable = (e) => { if (e.data && e.data.size) call.chunks.push(e.data); };
+  call.rec.start(200);
+  // Simple VAD: watch RMS; auto-stop after ~1.4s of quiet once speech was detected.
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    call.ctx = new AC();
+    const src = call.ctx.createMediaStreamSource(stream);
+    call.analyser = call.ctx.createAnalyser();
+    call.analyser.fftSize = 512;
+    src.connect(call.analyser);
+    call.hadSpeech = false; call.vadQuiet = 0;
+    const buf = new Uint8Array(call.analyser.frequencyBinCount);
+    const t0 = Date.now();
+    const tick = () => {
+      if (!call.active || !call.analyser) return;
+      call.analyser.getByteTimeDomainData(buf);
+      let sum = 0; for (let i = 0; i < buf.length; i++) { const d = buf[i] - 128; sum += d * d; }
+      const rms = Math.sqrt(sum / buf.length);
+      const now = Date.now();
+      if (rms > 6) { call.hadSpeech = true; call.vadQuiet = now; }
+      const quietFor = now - (call.vadQuiet || now);
+      const tooLong = now - t0 > 15000;
+      if ((call.hadSpeech && quietFor > 1400) || tooLong) { callFinishRecord(); return; }
+      call.vadRaf = requestAnimationFrame(tick);
+    };
+    call.vadQuiet = Date.now();
+    call.vadRaf = requestAnimationFrame(tick);
+  } catch (_) { /* no analyser → user taps the orb to stop */ }
+}
+function callStopRecordHw() {
+  cancelAnimationFrame(call.vadRaf); call.vadRaf = 0;
+  try { if (call.rec && call.rec.state !== "inactive") call.rec.stop(); } catch (_) {}
+  try { if (call.stream) call.stream.getTracks().forEach((tr) => tr.stop()); } catch (_) {}
+  try { if (call.ctx) call.ctx.close(); } catch (_) {}
+  call.analyser = null; call.ctx = null; call.stream = null;
+}
+function callFinishRecord() {
+  const rec = call.rec; call.rec = null;
+  cancelAnimationFrame(call.vadRaf); call.vadRaf = 0;
+  if (!rec) return;
+  const finalize = async () => {
+    const blob = new Blob(call.chunks, { type: (rec && rec.mimeType) || "audio/webm" });
+    callStopRecordHw();
+    call.chunks = [];
+    if (!call.active) return;
+    if (blob.size < 1500 || !call.hadSpeech) { callListen(); return; } // nothing said → keep listening
+    callSetPhase("thinking", "");
+    try {
+      const wavB64 = await micWavBase64(blob);
+      const out = await apiJson("/api/transcribe", { method: "POST", body: JSON.stringify({ audio: wavB64, format: "wav", lang: mic.lang }) });
+      const text = (out && typeof out.text === "string") ? out.text.trim() : "";
+      callHandleTranscript(text);
+    } catch (_) { if (call.active) callListen(); }
+  };
+  if (rec.state !== "inactive") { rec.onstop = finalize; try { rec.stop(); } catch (_) { finalize(); } }
+  else finalize();
+}
+/* ---- orb tap: interrupt speaking, or stop a tap-to-talk recording ---- */
+function callOrbTap() {
+  if (!call.active) return;
+  if (call.phase === "speaking") { callStopSpeaking(); callListen(); return; }
+  if (call.phase === "listening") {
+    if (call.sr) { // SR mode: force-commit now
+      clearTimeout(call.silence);
+      const said = call.finalText.trim();
+      try { call.sr.stop(); } catch (_) {}
+      call.sr = null;
+      if (said) callHandleTranscript(said); else callListen();
+    } else if (call.rec) { // record mode: stop now
+      call.hadSpeech = true; callFinishRecord();
+    } else { callListen(); } // idle tap-to-talk → start
+  }
+}
+function callToggleMute() {
+  call.muted = !call.muted;
+  if (els.callMute) els.callMute.classList.toggle("is-muted", call.muted);
+  if (call.muted) {
+    clearTimeout(call.silence);
+    if (call.sr) { try { call.sr.stop(); } catch (_) {} call.sr = null; }
+    if (call.rec) { callStopRecordHw(); call.rec = null; }
+    callSetPhase("listening", "");
+  } else if (call.phase === "listening") { callListen(); }
+}
+/* ---- open / close ---- */
+async function callOpen() {
+  if (call.active) return;
+  if (state.product !== "ai") return;              // Firas AI only
+  if (!callSupported()) { showToast(t().callUnsupported); return; }
+  call.active = true; call.muted = false; call.finalText = "";
+  call.prevMode = state.mode;
+  if (state.mode !== "auto") { state.mode = "auto"; }  // no plan-mode clarifying turns mid-call
+  state.callMode = true;
+  els.input.value = ""; autoGrow(); updateSendState();
+  if (els.callMute) els.callMute.classList.remove("is-muted");
+  if (els.callName) els.callName.textContent = "Firas";
+  if (els.callCaption) els.callCaption.textContent = "";
+  els.callScreen.hidden = false;
+  requestAnimationFrame(() => els.callScreen.classList.add("is-open"));
+  document.body.classList.add("in-call");
+  callSetPhase("connecting", "");
+  try { window.speechSynthesis && window.speechSynthesis.getVoices(); } catch (_) {}
+  // A quick spoken greeting, then start listening.
+  await callSpeak(t().callHello);
+  if (call.active) callListen();
+}
+function callEnd() {
+  if (!call.active) return;
+  call.active = false;
+  clearTimeout(call.silence);
+  callStopSpeaking();
+  if (call.sr) { try { call.sr.onresult = call.sr.onend = call.sr.onerror = null; call.sr.abort(); } catch (_) {} call.sr = null; }
+  callStopRecordHw();
+  call.rec = null; call.chunks = [];
+  state.callMode = false;
+  if (call.prevMode && MODES[call.prevMode]) state.mode = call.prevMode;
+  call.prevMode = null;
+  document.body.classList.remove("in-call");
+  if (els.callScreen) {
+    els.callScreen.classList.remove("is-open");
+    setTimeout(() => { if (!call.active && els.callScreen) els.callScreen.hidden = true; }, 260);
+  }
+  callSetPhase("idle", "");
+}
+function initCall() {
+  if (!els.callBtn) return;
+  if (!callSpeechAvailable()) { els.callBtn.style.display = "none"; return; }
+  els.callBtn.addEventListener("click", callOpen);
+  if (els.callEnd) els.callEnd.addEventListener("click", callEnd);
+  if (els.callMute) els.callMute.addEventListener("click", callToggleMute);
+  if (els.callOrb) els.callOrb.addEventListener("click", callOrbTap);
+  // Preload TTS voices (Chrome loads them async).
+  try { if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => { try { window.speechSynthesis.getVoices(); } catch (_) {} }; } catch (_) {}
+  // Leaving the tab pauses a live listen; returning resumes (privacy + no ghost mic).
+  document.addEventListener("visibilitychange", () => {
+    if (!call.active) return;
+    if (document.hidden) { clearTimeout(call.silence); if (call.sr) { try { call.sr.stop(); } catch (_) {} call.sr = null; } if (call.rec) { callStopRecordHw(); call.rec = null; } callStopSpeaking(); }
+    else if (call.phase === "listening" && !call.muted) callListen();
+  });
+  // Esc ends the call.
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && call.active) callEnd(); });
+}
+
+/* ----------------------------------------------------------------------------
    Init + event wiring
 ---------------------------------------------------------------------------- */
 function cacheEls() {
@@ -10823,6 +11189,14 @@ function cacheEls() {
   els.micMenu = $("#micMenu");
   els.micLangItem = $("#micLangItem");
   els.micLangItemVal = $("#micLangItemVal");
+  els.callBtn = $("#callBtn");
+  els.callScreen = $("#callScreen");
+  els.callOrb = $("#callOrb");
+  els.callName = $("#callName");
+  els.callStatus = $("#callStatus");
+  els.callCaption = $("#callCaption");
+  els.callMute = $("#callMute");
+  els.callEnd = $("#callEnd");
   els.fileInput = $("#fileInput");
   els.attachTray = $("#attachTray");
   els.scrollBottomBtn = $("#scrollBottomBtn");
@@ -10911,6 +11285,8 @@ function wireEvents() {
 
   // Voice dictation (mic + dialect picker)
   initMic();
+  // Voice call (live spoken conversation — Firas AI only)
+  initCall();
 
   // Image attachments
   els.attachBtn.addEventListener("click", () => els.fileInput.click());

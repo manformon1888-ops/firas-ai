@@ -50,7 +50,7 @@
     media="print" onload="this.media='all'"
   />
 
-  <link rel="stylesheet" href="styles.css?v=native9" />
+  <link rel="stylesheet" href="styles.css?v=native10" />
 
   <!-- KaTeX (math typesetting) — NON-BLOCKING for the same reason (math renders after boot) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
@@ -71,7 +71,7 @@
        degrades gracefully (email/password still works) when it's absent. -->
   <script defer src="firebase-config.js"></script>
 
-  <script defer src="app.js?v=native9"></script>
+  <script defer src="app.js?v=native10"></script>
 </head>
 <body>
   <!-- ===== Mobile drawer scrim ===== -->
@@ -311,8 +311,11 @@
               </div>
             </div>
           </div>
-          <!-- Trailing action cluster: [mic][attach][send] together -->
+          <!-- Trailing action cluster: [call][mic][attach][send] together -->
           <div class="composer__actions">
+            <button type="button" class="icon-btn composer__call" id="callBtn" aria-label="مكالمة صوتية" title="مكالمة صوتية — تحدّث مع فِراس">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5C2 4 3 3 4.5 3h2c.7 0 1.3.5 1.5 1.2l.9 3.1c.2.6 0 1.3-.5 1.7l-1.6 1.3a12 12 0 0 0 5.6 5.6l1.3-1.6c.4-.5 1.1-.7 1.7-.5l3.1.9c.7.2 1.2.8 1.2 1.5v2c0 1.5-1 2.5-2.5 2.5A16.5 16.5 0 0 1 2 5.5Z"/></svg>
+            </button>
             <button type="button" class="icon-btn composer__mic" id="micBtn" aria-label="إدخال صوتي" title="إدخال صوتي — اضغط مطوّلًا لاختيار اللهجة">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>
             </button>
@@ -345,6 +348,28 @@
           <div class="mic-menu" id="micMenu" hidden></div>
         </form>
         <p class="composer__hint" data-i18n="disclaimer">قد يخطئ فِراس. تحقّق من المعلومات المهمة.</p>
+      </div>
+
+      <!-- ===== Voice CALL overlay (built/controlled by app.js) ===== -->
+      <div class="call" id="callScreen" hidden>
+        <div class="call__bg" aria-hidden="true"></div>
+        <div class="call__inner">
+          <div class="call__orb" id="callOrb" aria-hidden="true">
+            <span class="call__ring"></span><span class="call__ring"></span><span class="call__ring"></span>
+            <span class="call__core"><span class="nib is-aurora" data-size="lg"><span class="glyph">F</span></span></span>
+          </div>
+          <h2 class="call__name" id="callName">فِراس</h2>
+          <p class="call__status" id="callStatus"></p>
+          <p class="call__caption" id="callCaption"></p>
+          <div class="call__controls">
+            <button type="button" class="call__btn call__btn--mute" id="callMute" aria-label="كتم">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg>
+            </button>
+            <button type="button" class="call__btn call__btn--end" id="callEnd" aria-label="إنهاء المكالمة">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 15.5c-1.2 0-2.4-.2-3.5-.6a1 1 0 0 0-1 .2l-1.4 1.4a14.5 14.5 0 0 1-6.6-6.6l1.4-1.4a1 1 0 0 0 .2-1C9.7 6.4 9.5 5.2 9.5 4a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1C4 13.4 10.6 20 20 20a1 1 0 0 0 1-1v-3.5a1 1 0 0 0-1-1Z" transform="rotate(135 12 12)"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
     </main>
   </div>
