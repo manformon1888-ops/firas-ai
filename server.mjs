@@ -2227,7 +2227,7 @@ async function edgeSynthesize(text, lang) {
    to Edge neural / Google TTS when the key is missing or the quota is hit.
    --------------------------------------------------------------------------- */
 const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
-const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Charon"; // warm, natural male
+const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || "Sadaltager"; // warm, confident male — the owner's pick
 let geminiTtsDisabledUntil = 0; // circuit-breaker after quota/errors
 // Small in-memory cache (greeting + repeated lines) so the call's fixed phrases
 // never re-spend quota. ~40 clips × ~250 KB ≈ 10 MB tops.
@@ -2248,8 +2248,8 @@ function pcmToWav(pcm, rate) {
 /** The acting direction that gives the voice its feeling, per language. */
 function geminiTtsStyle(lang) {
   return String(lang || "").startsWith("ar")
-    ? "أنت فِراس، مساعد صوتي ودود. انطق النص التالي بصوت طبيعي دافئ وحيوي، بوتيرة سريعة قليلاً وحيوية (ليست بطيئة ولا متثاقلة)، بعفوية تامة كأنك تتحدث مع صديق مقرّب — نبرة معبّرة تتفاعل مع المعنى، وقفات قصيرة طبيعية، وحماس خفيف عند الأخبار الجيدة. لا تقرأ قراءة رسمية جامدة. النص: "
-    : "You are Firas, a friendly voice assistant. Say the following in a warm, lively, completely natural conversational tone, at a slightly brisk, energetic pace (not slow or plodding) — expressive intonation that reacts to the meaning, short natural pauses, a hint of enthusiasm where it fits. Never a flat formal read. Text: ";
+    ? "أنت فِراس، شابٌّ عربيّ ودود ومرِح تتحدث مع صديقك على الهاتف. انطق النص التالي بعربيةٍ فصيحة لكن بروحٍ عفوية دافئة جدًّا وحميمة — نبرة إنسانية حيّة تتموّج مع المعنى (تعلو قليلاً عند السؤال أو الحماس وتلين عند اللطف)، ابتسامة تُسمع في الصوت، وقفات قصيرة طبيعية بين الجُمل، وإيقاع سريع قليلاً وحيوي. تكلّم كإنسان حقيقي مقرّب، لا كقارئ نشرة أخبار — لا جمود ولا رسمية ولا رتابة إطلاقًا. النص: "
+    : "You are Firas, a friendly, upbeat young man talking to a friend on the phone. Say the following with a very warm, human, spontaneous delivery — a lively voice that rises a touch on questions and excitement and softens on kindness, a smile you can hear, short natural pauses, and a slightly brisk, energetic rhythm. Speak like a real close friend, never like a news reader — no stiffness, no formality, no monotone at all. Text: ";
 }
 async function geminiSynthesize(text, lang) {
   if (!GEMINI_KEYS.length) throw new Error("no gemini key");
