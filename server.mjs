@@ -2042,6 +2042,68 @@ function parseDdgLite(html) {
   }
   return out;
 }
+/* ===========================================================================
+   VOICE OUTPUT — POST /api/tts (auth required)
+   A CONSISTENT, natural, keyless voice that sounds the SAME on every browser
+   (unlike the device speechSynthesis, whose Arabic voice is often robotic or
+   missing). We proxy Google Translate TTS (free, no key), chunk the text to its
+   ~200-char limit, and concatenate the MP3 segments into one audio stream the
+   browser plays with <audio>. The client falls back to speechSynthesis if this
+   fails (offline / blocked).
+   =========================================================================== */
+function ttsChunks(text, max) {
+  // Split on sentence enders first, then pack words up to `max` chars per piece.
+  const sentences = String(text).split(/(?<=[.!?؟،؛\n])\s+/);
+  const out = [];
+  let cur = "";
+  for (let s of sentences) {
+    s = s.trim();
+    if (!s) continue;
+    while (s.length > max) {                 // a single very long run → hard-split at a space
+      let cut = s.lastIndexOf(" ", max);
+      if (cut < max * 0.5) cut = max;        // no good space → cut hard
+      out.push(s.slice(0, cut).trim());
+      s = s.slice(cut).trim();
+    }
+    if ((cur + " " + s).trim().length > max) { if (cur) out.push(cur.trim()); cur = s; }
+    else cur = cur ? cur + " " + s : s;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.filter(Boolean).slice(0, 14);   // hard cap so one call can't fan out unbounded
+}
+async function handleTts(req, res) {
+  const user = currentUser(req);
+  if (!user) return sendJson(res, 401, { error: "authentication required" });
+  if (rateLimited("tts:" + user.id, 90, 60_000)) return sendJson(res, 429, { error: "rate limited" });
+  const body = await readJson(req, 200_000);
+  if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
+  const text = String(body.text || "").replace(/\s+/g, " ").trim().slice(0, 1400);
+  if (!text) { res.writeHead(400); return res.end(); }
+  const raw = String(body.lang || "").toLowerCase();
+  const lang = raw.startsWith("ar") ? "ar" : (/^[a-z]{2}(-[a-z]{2})?$/.test(raw) ? raw.slice(0, 2) : "en");
+  const slow = body.slow ? "&ttsspeed=0.5" : "";
+  const chunks = ttsChunks(text, 190);
+  const bufs = [];
+  try {
+    for (const c of chunks) {
+      const url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob" + slow +
+        "&tl=" + encodeURIComponent(lang) + "&q=" + encodeURIComponent(c);
+      const r = await fetch(url, {
+        headers: { "User-Agent": SEARCH_UA, "Referer": "https://translate.google.com/", "Accept": "audio/mpeg,*/*" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) throw new Error("tts http " + r.status);
+      bufs.push(Buffer.from(await r.arrayBuffer()));
+    }
+  } catch (_) {
+    return sendJson(res, 502, { error: "tts unavailable" });
+  }
+  const out = Buffer.concat(bufs);
+  if (!out.length) return sendJson(res, 502, { error: "tts empty" });
+  res.writeHead(200, { "Content-Type": "audio/mpeg", "Cache-Control": "no-store", "Content-Length": out.length });
+  res.end(out);
+}
+
 async function handleWebSearch(req, res) {
   res.setHeader("Content-Type", "application/json");
   // Auth + rate limit so the DuckDuckGo proxy isn't an open anonymous scraper.
@@ -3287,6 +3349,7 @@ const server = http.createServer(async (req, res) => {
     if (route === "/api/announcements" && method === "DELETE") return await handleAnnouncementsDelete(req, res);
     if (route === "/api/translate" && method === "POST") return await handleTranslate(req, res);
     if (route === "/api/transcribe" && method === "POST") return await handleTranscribe(req, res);
+    if (route === "/api/tts" && method === "POST") return await handleTts(req, res);
 
     // ---- Admin knowledge base (RAG reference books) ----
     if (route === "/api/kb" && method === "GET") return await handleKbList(req, res);

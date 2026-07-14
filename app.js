@@ -7027,18 +7027,29 @@ function buildMessages(tier, conversation, replyLang) {
         ? " أكمل كل المطلوب في هذا الرد نفسه: طُلب " + _want + " عنصرًا/مسألة — أجب عن كلٍّ منها كاملةً مرقّمة حتى الأخيرة، لا تتوقف في المنتصف ولا تسأل إن كنت تريد المتابعة."
         : " FINISH EVERYTHING in THIS reply: " + _want + " items/problems were requested — answer every single one, numbered, through the last; do not stop midway or ask whether to continue.")
     : "";
-  // VOICE CALL: replies are read aloud, so force a short, plain-spoken, markup-free
-  // conversational style (no LaTeX/markdown/code/emoji — the model spells math/symbols
-  // in words). Overrides the build/format rules for the duration of the call.
-  const callRule = state.callMode
-    ? (replyLang === "ar"
-        ? " أنت الآن في مكالمة صوتية مباشرة مع المستخدم، وكلامك سيُقرأ بصوت مسموع. تحدّث بأسلوب المحادثة الطبيعية على الهاتف: جُملٌ قصيرة وواضحة ولغةٌ بسيطة، وردٌّ موجز (جملة إلى ثلاث جُمل غالبًا) ما لم يطلب المستخدم تفصيلًا فتُوسّع باعتدال. لا تستخدم إطلاقًا markdown أو عناوين أو قوائم أو جداول أو كتل برمجية أو صيغ LaTeX أو رموزًا أو رموزًا تعبيرية — اكتب الأرقام والرموز والمعادلات بالكلمات كما تُنطق (مثلاً: «إكس تربيع زائد ثلاثة»). لا تُنشئ ملفات ولا أكوادًا أثناء المكالمة. كن دافئًا وطبيعيًا وتفاعليًا كأنك تتحدث وجهًا لوجه."
-        : " You are now in a LIVE VOICE CALL with the user and your words will be read aloud. Speak like a natural phone conversation: short, clear sentences, simple words, and a brief reply (usually one to three sentences) unless the user asks for detail, then expand moderately. NEVER use markdown, headings, lists, tables, code blocks, LaTeX, symbols, or emoji — spell out numbers, symbols and equations in words (e.g. \"x squared plus three\"). Do not create files or code during the call. Be warm, natural and conversational, as if talking face to face.")
-    : "";
-  const system = {
-    role: "system",
-    content: model.persona + identityRule + langRule + mathRule + accuracyRule + SCIENCE_RIGOR + finishRule + codeRule + genLevelRule + STEM_HARD_RULE + imageRule + tikzRule + (planning ? "" : buildRule + engineerRule) + callRule,
-  };
+  // VOICE CALL: replies are READ ALOUD, so the whole system prompt switches to a
+  // spoken-conversation persona. We DROP the LaTeX/markdown/build/science-format
+  // mandates entirely (they force $…$, **Answer**, code blocks — which sound broken
+  // when spoken) and replace them with a strict "speak it in plain words" rule.
+  // Accuracy is preserved (verify silently, don't fabricate), just voiced.
+  let system;
+  if (state.callMode) {
+    const callSys = replyLang === "ar"
+      ? "أنت فِراس AI، مساعد صوتي ذكيّ ودافئ طوّره المطوّر فِراس. أنت الآن في مكالمة صوتية مباشرة: المستخدم يتحدّث إليك ويسمع ردّك مقروءًا بصوتٍ مسموع." +
+        " تحدّث بالعربية الفصحى الواضحة بأسلوب محادثة هاتفية طبيعية: جُملٌ قصيرة وبسيطة، وردٌّ موجز (جملة إلى ثلاث جُمل غالبًا) إلا إذا طلب المستخدم تفصيلًا فتُوسّع باعتدال ومع ذلك بأسلوب منطوق." +
+        " قاعدة صارمة: لا تكتب أبدًا رموزًا رياضية أو صيغ LaTeX أو علامات $ أو markdown أو عناوين أو نجوم أو قوائم أو جداول أو كتل برمجية أو روابط أو رموزًا تعبيرية. انطق كل رقم ورمز ومعادلة بالكلمات كما تُلفظ صوتيًا — مثال: بدل «١+١=٢» قل «واحد زائد واحد يساوي اثنين»، وبدل «x²» قل «إكس تربيع». اكتب كأنك تُملي كلامًا يُسمع، لا نصًّا يُقرأ." +
+        " كن دقيقًا: تحقّق من الحساب في نفسك قبل أن تقوله، ولا تختلق معلومة؛ إن لم تكن متأكدًا فقل ذلك بوضوح. لا تُنشئ ملفات ولا أكوادًا أثناء المكالمة. كن ودودًا وطبيعيًا وتفاعليًا كأنك تتحدّث وجهًا لوجه."
+      : "You are Firas AI, a warm, smart voice assistant developed by the developer Firas. You are on a LIVE VOICE CALL: the user talks to you and hears your reply read aloud." +
+        " Speak in natural, conversational spoken English: short simple sentences and a brief reply (usually one to three sentences) unless the user asks for detail, then expand moderately but still in a spoken style." +
+        " STRICT RULE: never write math symbols, LaTeX, dollar signs, markdown, headings, asterisks, lists, tables, code blocks, links or emoji. Say every number, symbol and equation in spoken words — e.g. instead of \"1+1=2\" say \"one plus one equals two\", instead of \"x^2\" say \"x squared\". Write as if dictating speech to be heard, not text to be read." +
+        " Stay accurate: check any calculation privately before you say it, and never fabricate — if unsure, say so plainly. Do not create files or code during the call. Be friendly, natural and conversational, as if talking face to face.";
+    system = { role: "system", content: callSys + identityRule + langRule };
+  } else {
+    system = {
+      role: "system",
+      content: model.persona + identityRule + langRule + mathRule + accuracyRule + SCIENCE_RIGOR + finishRule + codeRule + genLevelRule + STEM_HARD_RULE + imageRule + tikzRule + (planning ? "" : buildRule + engineerRule),
+    };
+  }
 
   // PLAN MODE: a per-turn system message (inserted right after the persona).
   // Firas first asks 1-3 specific clarifying questions if needed, then gives a
@@ -10840,15 +10851,17 @@ function initMic() {
 ---------------------------------------------------------------------------- */
 const call = {
   active: false, phase: "idle", // idle | connecting | listening | thinking | speaking
-  sr: null, rec: null, stream: null, chunks: [], analyser: null, ctx: null,
+  sr: null, rec: null, stream: null, chunks: [], analyser: null, ctx: null, audio: null,
   silence: 0, finalText: "", speakToken: 0, muted: false, prevMode: null,
   vadRaf: 0, vadQuiet: 0, hadSpeech: false,
 };
 function callSRAvailable() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
 function callSpeechAvailable() { return !!(window.speechSynthesis && window.SpeechSynthesisUtterance); }
+function callMicAvailable() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
+// Output uses the server voice (/api/tts + <audio>, works everywhere) with device
+// speechSynthesis as a fallback; INPUT needs SpeechRecognition or a recorder.
 function callSupported() {
-  return state.product === "ai" && callSpeechAvailable() &&
-    (callSRAvailable() || (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder));
+  return state.product === "ai" && (callSRAvailable() || callMicAvailable());
 }
 function callBcp(forLang) {
   const byDialect = MIC_BCP[mic.lang];
@@ -10868,23 +10881,25 @@ function callSetPhase(phase, captionKey) {
   }
   if (cap && captionKey !== undefined) cap.textContent = captionKey ? t()[captionKey] : "";
 }
-/* ---- text → speakable plain text ---- */
+/* ---- text → speakable plain text (safety net: the call prompt already avoids
+   markup, but strip/convert anything that leaks so nothing is read as symbols) ---- */
 function callSpeakable(s) {
-  return String(s || "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`[^`]*`/g, " ")
-    .replace(/\$\$[\s\S]*?\$\$/g, " ")
-    .replace(/\$[^$\n]*\$/g, " ")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/[*_~>#|]+/g, " ")
-    .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, ". ")
-    .replace(/\s+/g, " ")
-    .trim();
+  let t = String(s || "");
+  t = t.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ");
+  // LaTeX → words (best-effort) before dropping delimiters
+  t = t.replace(/\$\$([\s\S]*?)\$\$/g, " $1 ").replace(/\$([^$\n]{0,120}?)\$/g, " $1 ");
+  t = t.replace(/\\boxed\{([^{}]*)\}/g, " $1 ")
+       .replace(/\\text\{([^{}]*)\}/g, "$1")
+       .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, " $1 over $2 ")
+       .replace(/\\sqrt\{([^{}]*)\}/g, " root $1 ")
+       .replace(/\\times/g, " x ").replace(/\\cdot/g, " . ").replace(/\\pi/g, " pi ")
+       .replace(/\\[a-zA-Z]+/g, " ").replace(/[{}]/g, " ");
+  t = t.replace(/\^\s*2\b/g, " squared").replace(/\^\s*3\b/g, " cubed").replace(/\^/g, " to the power ");
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/[*_~>#|]+/g, " ");
+  t = t.replace(/https?:\/\/\S+/g, " ");
+  t = t.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu, " ");
+  return t.replace(/[ \t]+/g, " ").replace(/\n{2,}/g, ". ").replace(/\s+/g, " ").trim();
 }
 function callPickVoice(lang) {
   let voices = [];
@@ -10897,16 +10912,41 @@ function callPickVoice(lang) {
     || voices.find((v) => v.default)
     || voices[0] || null;
 }
-/** Speak `text` aloud; resolves when finished or interrupted. */
+/** Speak `text` aloud; resolves when finished or interrupted. Uses the server's
+    consistent, natural, cross-browser voice (/api/tts) first, and falls back to
+    the device speechSynthesis if that's unavailable (offline / blocked). */
 function callSpeak(text) {
-  return new Promise((resolve) => {
+  return new Promise(async (resolve) => {
     const clean = callSpeakable(text);
-    if (!clean || !callSpeechAvailable()) return resolve();
+    if (!clean) return resolve();
     const token = ++call.speakToken;
-    try { window.speechSynthesis.cancel(); } catch (_) {}
     const lang = detectLang(clean) === "ar" ? "ar" : "en";
+    // 1) Server voice — same natural voice on every browser.
+    try {
+      const r = await fetch("/api/tts", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: clean, lang }),
+      });
+      if (call.speakToken !== token || !call.active) return resolve();
+      if (r.ok) {
+        const blob = await r.blob();
+        if (call.speakToken !== token || !call.active) return resolve();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        call.audio = audio;
+        const finish = () => { try { URL.revokeObjectURL(url); } catch (_) {} if (call.audio === audio) call.audio = null; if (call.speakToken === token) resolve(); };
+        audio.onended = finish;
+        audio.onerror = finish;
+        try { await audio.play(); return; } catch (_) { /* autoplay blocked → device voice */ }
+        try { URL.revokeObjectURL(url); } catch (_) {}
+        if (call.audio === audio) call.audio = null;
+      }
+    } catch (_) { if (call.speakToken !== token || !call.active) return resolve(); }
+    // 2) Fallback: device speechSynthesis (chunked by sentence).
+    if (!callSpeechAvailable()) return resolve();
+    try { window.speechSynthesis.cancel(); } catch (_) {}
     const voice = callPickVoice(lang);
-    // Chunk by sentence so long replies never hit the engine's silent-cutoff bug.
     const chunks = clean.match(/[^.!?؟،؛\n]+[.!?؟،؛\n]*/g) || [clean];
     let i = 0;
     const done = () => { if (call.speakToken === token) resolve(); };
@@ -10927,7 +10967,8 @@ function callSpeak(text) {
 }
 function callStopSpeaking() {
   call.speakToken++; // invalidate any in-flight speak() so it resolves
-  try { window.speechSynthesis.cancel(); } catch (_) {}
+  if (call.audio) { try { call.audio.pause(); call.audio.src = ""; } catch (_) {} call.audio = null; }
+  try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
 }
 /* ---- send the user's spoken turn through the normal chat, return the reply ---- */
 async function callSend(text) {
@@ -11143,7 +11184,7 @@ function callEnd() {
 }
 function initCall() {
   if (!els.callBtn) return;
-  if (!callSpeechAvailable()) { els.callBtn.style.display = "none"; return; }
+  if (!(callSRAvailable() || callMicAvailable())) { els.callBtn.style.display = "none"; return; }
   els.callBtn.addEventListener("click", callOpen);
   if (els.callEnd) els.callEnd.addEventListener("click", callEnd);
   if (els.callMute) els.callMute.addEventListener("click", callToggleMute);
